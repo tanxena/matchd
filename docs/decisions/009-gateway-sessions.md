@@ -95,6 +95,8 @@ Observed in a real run: `cancel 2` then `hb` produced `Heartbeat` *before* the `
 
 ### The minimal sequencer
 
+*Superseded in milestone 4 by [decision 012](012-durability-and-fsync-policies.md): the sequencer now writes the WAL and applies the fsync policy. Kept here as the milestone 3 record.*
+
 Milestone 3 needs sequence numbers before milestone 4's WAL exists. `sequencer.Sequencer` is the final component's contract without durability: it stamps `Seq` and `Time` from an injectable `Clock`, on one goroutine. Milestone 4 adds the log, fsync policies and ack gating behind the same `Run(in, out)` shape.
 
 ## Costs

@@ -32,7 +32,7 @@ Three counters give everything an identity. Each is **gap-free**, meaning every 
 
 | counter | assigned by | advances on | used for |
 |---|---|---|---|
-| `Seq` | sequencer (milestone 4; tests for now) | every command, including rejected ones | ordering; durability gating; replay |
+| `Seq` | sequencer (since milestone 3; written to the WAL with each command since milestone 4) | every command, including rejected ones | ordering; durability gating; replay |
 | `OrderID` | engine | accepted new orders only | cancels; routing fills |
 | `MatchID` | engine | every match | pairing the taker's and maker's fill events |
 

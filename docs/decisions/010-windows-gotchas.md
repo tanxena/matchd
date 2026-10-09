@@ -49,8 +49,21 @@ The milestone 5 crash harness needs a hard kill anyway (`TerminateProcess` on Wi
 
 The slow-consumer test shrinks the server's send buffer (`SO_SNDBUF`, via `gateway.Config.SocketWriteBuffer`) and the client's receive buffer to 4 KB, so a non-reading client fills its session queue quickly. On Windows loopback, the test disconnected the slow client within about 20 ms. **To check in the Linux pass:** Linux treats `SO_SNDBUF` as a hint and doubles the value, so the flood may need more orders before the queue fills. The test loops until disconnection, with a 20 s deadline, rather than assuming a count.
 
+## 7. fsync is FlushFileBuffers, and it is slow on this laptop (milestone 4)
+
+Go's `os.File.Sync` calls `FlushFileBuffers` on Windows ([docs](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)) and `fsync` on Linux. Measured with `BenchmarkAppendSync` (one 36-byte record written and synced per operation, 3,000 operations × 5 runs): median **1.51 ms** (1.37–1.62 ms), against **3.7 µs** (3.4–4.8 µs) to write the same record without syncing.
+
+That ratio of about 400 is why `fsync=always` batches the commands already waiting ([decision 012](012-durability-and-fsync-policies.md)). **To check in the Linux pass:** fsync cost on Linux depends heavily on the file system and disk, so the numbers are not comparable across machines; the benchmark records the hardware.
+
+## 8. Directories can't be fsynced (milestone 4)
+
+On Linux a new file's directory entry is only durable after fsyncing the directory. Windows has no equivalent reachable from Go: `os.File.Sync` on a directory handle fails, because `FlushFileBuffers` needs a handle opened for writing. `internal/wal/syncdir_windows.go` is therefore a documented no-op, relying on NTFS's metadata journal. **This guarantee is weaker than Linux's and can't be tested locally** ([decision 011](011-wal-format.md)).
+
+## 9. A hard kill from a script (milestone 4)
+
+Manual crash checks in this milestone stopped `engine.exe` with `taskkill //F` (Git Bash needs the doubled slash, or it rewrites `/F` as a path). That is a `TerminateProcess` kill: no deferred code runs, and nothing is flushed. Restart then replayed the WAL correctly. The milestone 5 harness will do this programmatically (`os.Process.Kill`, which is `TerminateProcess` on Windows and `SIGKILL` on Linux).
+
 ## Pending (later milestones)
 
-- **fsync** is `FlushFileBuffers` on Windows (milestone 4). Measure its cost against Linux `fdatasync`.
 - **Atomic replace by rename:** `os.Rename` over an existing file on Windows (milestone 5).
-- **Process kill** in the crash harness (milestone 5).
+- **Process kill** inside the crash harness, and file handles still open at kill time (milestone 5).

@@ -59,7 +59,7 @@ Terms used in this repo's code and docs. Each entry names the milestone where th
 - **Command** (M2): an input to the engine: `NewOrder`, `Cancel`, `AddInstrument` (`engine.Command`).
 - **Event** (M2): an output of the engine: `Ack`, `Reject`, `Fill`, `Cancelled`, `BookDelta`, `InstrumentAdded` (`engine.Event`).
 - **Ack** (M2): the event confirming a new order was accepted, carrying its engine-assigned order id. It is always the first event for that order.
-- **Sequence number (Seq)** (M2; assigned by the sequencer from M4): a global, gap-free counter on every command, including rejected ones. The engine panics on a gap.
+- **Sequence number (Seq)** (M2; assigned by the sequencer since M3, logged since M4): a global, gap-free counter on every command, including rejected ones. The engine panics on a gap.
 - **Gap-free** (M2): every number in a series is used exactly once, in order. A missing number then proves something was lost.
 - **Match id** (M2): the number shared by the taker's and maker's fill events of one match.
 - **Leaves** (M2): an order's open quantity remaining after a fill.
@@ -96,9 +96,21 @@ Terms used in this repo's code and docs. Each entry names the milestone where th
 - **Nagle's algorithm / `TCP_NODELAY`** (M3): kernel batching of small writes, which adds latency to small messages; we turn it off on both ends.
 - **Copy-on-write** (M3): updating shared data by building a new copy and swapping a pointer to it, so readers never take a lock. Used for the publisher's client registry.
 
+## Durability (milestone 4)
+
+- **WAL (write-ahead log)** (M4): an append-only file of every command, written before the command's effects may become visible. Replaying it rebuilds the engine's state.
+- **Page cache** (M4): the operating system's in-memory copy of file data. `write` usually stops here; a process crash doesn't lose it, a power failure does.
+- **fsync** (M4): the call that blocks until a file's data is on stable storage (`FlushFileBuffers` on Windows). It is slow: about 1.5 ms here, against about 3.7 µs for a plain write.
+- **Durable** (M4): on stable storage, so it would survive a power failure.
+- **Durable seq** (M4): the highest command seq known to be durable. The publisher releases an event only when the event's seq is at or below it.
+- **Segment** (M4): one file of the WAL, named after its first record's seq.
+- **Torn write / torn tail** (M4): a record only partly written when a crash interrupted it, at the end of the log. Truncated on recovery; damage anywhere else is corruption.
+- **CRC32C** (M4): a 32-bit checksum (Castagnoli polynomial) stored with every record, to detect torn or corrupted bytes.
+- **Group commit** (M4): letting many commands share one fsync. `always` batches commands that are already waiting; `group:1ms` fsyncs on a timer while the engine carries on.
+- **Replay / recovery** (M4): rebuilding the engine's state at startup by feeding every logged command back through it.
+- **Fail-stop on fsync error** (M4): after a failed fsync nothing more is acknowledged and the process stops, because a retry can falsely succeed.
+
 ## Later milestones
-- **WAL (write-ahead log)** *(later, M4)*: an append-only file where every command is recorded before its effects become visible.
-- **fsync** *(later, M4)*: the system call that forces written data from the OS cache onto stable storage.
 - **Snapshot** *(later, M5)*: a saved copy of the full book state at some seq.
 - **md_seq** *(later, M6)*: the per-instrument market-data sequence number subscribers use to detect gaps.
 - **ITCH / OUCH** (reference): NASDAQ's market-data (ITCH) and order-entry (OUCH) protocols. They are cited for terminology:

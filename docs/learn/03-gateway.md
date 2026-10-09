@@ -110,7 +110,9 @@ A **fuzzer** generates millions of inputs, mutating towards ones that reach new 
 - **`Sequencer.Stamp`** ([sequencer.go:37](../../internal/sequencer/sequencer.go#L37)) assigns `lastSeq+1` and the current time.
 - **`Run`** stamps everything from `in` in arrival order and closes `out` when `in` closes.
 
-Arrival order on the one shared `cmds` channel *is* the global order of all clients' commands. Milestone 4 adds the WAL behind the same shape.
+Arrival order on the one shared `cmds` channel *is* the global order of all clients' commands.
+
+*Superseded in milestone 4:* the sequencer now also batches commands, writes them to the WAL and applies the fsync policy, behind the same `Run(in, out)` shape. See [04-wal.md](04-wal.md#2-code-walkthrough).
 
 ### `internal/publisher/publisher.go`: routing and the slow-consumer policy
 
