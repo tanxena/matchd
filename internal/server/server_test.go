@@ -53,6 +53,7 @@ func start(t *testing.T, tweak func(*Config)) *testServer {
 	gw.Addr = "127.0.0.1:0"
 	var now engine.Timestamp // fake clock; only the sequencer goroutine calls it
 	cfg := Config{
+		DataDir: t.TempDir(),
 		Gateway: gw,
 		Instruments: []book.Instrument{
 			{Symbol: "XYZ", TickSize: 1, LotSize: 1},

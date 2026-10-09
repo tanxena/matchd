@@ -40,7 +40,7 @@ func TestArgumentErrors(t *testing.T) {
 func TestOrderAndCancelAgainstServer(t *testing.T) {
 	gw := gateway.DefaultConfig()
 	gw.Addr = "127.0.0.1:0"
-	srv, err := server.Start(server.Config{Gateway: gw, Instruments: []book.Instrument{{Symbol: "XYZ", TickSize: 1, LotSize: 1}}})
+	srv, err := server.Start(server.Config{DataDir: t.TempDir(), Gateway: gw, Instruments: []book.Instrument{{Symbol: "XYZ", TickSize: 1, LotSize: 1}}})
 	if err != nil {
 		t.Fatal(err)
 	}

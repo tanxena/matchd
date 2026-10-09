@@ -155,16 +155,20 @@ func (g *Gateway) forget(s *session) {
 // Close stops accepting, disconnects every session, and waits for all
 // connection goroutines to exit. After Close returns, no goroutine of the
 // gateway will send on cmds, so the caller may close it.
+//
+// Close may be called more than once, and concurrently (the server calls it
+// both on a durability failure and on shutdown). Only the first call closes
+// the listener; every call waits for the goroutines.
 func (g *Gateway) Close() error {
 	g.mu.Lock()
-	g.closed.Store(true)
+	first := g.closed.CompareAndSwap(false, true)
 	all := make([]*session, 0, len(g.sessions))
 	for s := range g.sessions {
 		all = append(all, s)
 	}
 	g.mu.Unlock()
 	var err error
-	if g.ln != nil {
+	if first && g.ln != nil {
 		err = g.ln.Close()
 	}
 	for _, s := range all {
