@@ -212,6 +212,9 @@ Cost: O(1) for the order plus O(log L) to find the level (decision 002).
   - `TestFilledMakerReleasesSlot` checks that a full fill frees the slot, not just a cancel.
   - `TestCheckInvariantsDetectsCorruption` deliberately corrupts nine different fields and asserts that the checker notices each. An invariant checker that can't fail is as useless as a test that can't.
 - **`internal/book/scenario_test.go`** contains 19 table-driven scenarios, one per rule in sections 1.2–1.4 (FIFO, a partial fill keeping its place, no trading through the limit, a market order on an empty book, cancel ownership, client order id reuse, validation order, ...). **Every scenario runs against both books** through the `orderBook` interface. The expected fills are written out by hand, so a scenario checks the reference book against the spec, independently of the real book.
+- **`internal/book/ref/ref_test.go`** covers the oracle's own self-checks.
+  - `TestCheckInvariantsDetectsCorruption` corrupts the reference book five ways (crossed, out of order, zero qty, wrong side, duplicate id) and requires each to be detected.
+  - `TestRestJoinsBackOfEqualPrice` pins down the one loop that gives the reference book its time priority.
 - **`internal/book/diff_test.go`**: the differential harness.
   - **`generator`** ([diff_test.go:120](../../internal/book/diff_test.go#L120)) produces commands from a seed. The mix is 50% limit, 8% market, 25% cancel, 10% reuse of an earlier client order id, and 7% invalid orders.
     - Limit prices come from `limitPrice` under a **regime** that changes every 2,000 commands: balanced (spread 10, half crossing), deep (spread 40, 85% passive, which builds books hundreds of orders deep), or tight (spread 3, mostly crossing).
@@ -235,7 +238,7 @@ Cost: O(1) for the order plus O(log L) to find the level (decision 002).
 - [001: Price level storage](../decisions/001-price-level-storage.md). A sorted slice of `*level` per side with the best level last, and a free list of level structs. A red-black tree, a skip list and a price-indexed array were rejected, and the record says why. The cost: O(L) shifts when inserting or removing a level far from the best.
 - [002: Order storage and cancel](../decisions/002-order-storage-and-cancel.md). An indexed slab with `uint32` prev/next links, a free list, and `map[OrderID]uint32`. The pointer-linked list was rejected. Cancel is O(1) for the order plus O(log L) for the level search.
 - [003: Integer domain and reject semantics](../decisions/003-integer-domain-and-reject-semantics.md). Integer ticks and lots; the caller assigns `order_id`; the validation order; the duplicate rule applies to market orders too; **cancel is scoped to the owning client**; a market order on an empty book is accepted and expired; Day is treated as GTC; there is no self-trade prevention.
-- [004: Toolchain](../decisions/004-toolchain.md). Go 1.27.0, zero dependencies, LF line endings through `.gitattributes`, and the open question of the race detector (no C compiler on this machine).
+- [004: Toolchain](../decisions/004-toolchain.md). Go 1.27.0, zero dependencies, LF line endings through `.gitattributes`, and the race detector on Windows. It needs cgo and a C compiler; MSYS2 gcc is installed, so run `CGO_ENABLED=1 go test -race ./...`.
 
 ---
 
