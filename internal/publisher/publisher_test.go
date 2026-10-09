@@ -1,6 +1,8 @@
 package publisher
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -8,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tanxena/matchd/internal/book"
+	"github.com/tanxena/matchd/internal/durable"
 	"github.com/tanxena/matchd/internal/engine"
 )
 
@@ -46,7 +49,7 @@ func ev(client book.ClientID, seq engine.Seq) engine.Event {
 }
 
 func TestRoutesByClient(t *testing.T) {
-	p := New(quiet)
+	p := New(quiet, nil)
 	a, b := newFakeSub(10), newFakeSub(10)
 	p.Register(1, a)
 	p.Register(2, b)
@@ -67,7 +70,7 @@ func TestRoutesByClient(t *testing.T) {
 }
 
 func TestOneSessionPerClient(t *testing.T) {
-	p := New(quiet)
+	p := New(quiet, nil)
 	first, second := newFakeSub(1), newFakeSub(1)
 	if !p.Register(5, first) {
 		t.Fatal("first register failed")
@@ -88,7 +91,7 @@ func TestOneSessionPerClient(t *testing.T) {
 
 // A full queue must disconnect the client without blocking, and only once.
 func TestSlowConsumer(t *testing.T) {
-	p := New(quiet)
+	p := New(quiet, nil)
 	slow, ok := newFakeSub(3), newFakeSub(100)
 	p.Register(1, slow)
 	p.Register(2, ok)
@@ -125,7 +128,7 @@ func TestSlowConsumer(t *testing.T) {
 
 // Register/Unregister from many goroutines while Run routes: run with -race.
 func TestConcurrentRegistration(t *testing.T) {
-	p := New(quiet)
+	p := New(quiet, nil)
 	events := make(chan engine.Event, 64) // test -> Run goroutine
 	finished := make(chan struct{})       // closed when Run returns
 	go func() { p.Run(events); close(finished) }()
@@ -151,5 +154,115 @@ func TestConcurrentRegistration(t *testing.T) {
 	<-finished
 	if s := p.Stats(); s.Delivered+s.Dropped != 5000 {
 		t.Fatalf("delivered %d + dropped %d != 5000", s.Delivered, s.Dropped)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Durability gating (decision 012)
+
+func runGated(t *testing.T, d *durable.Seq, buf int) (*Publisher, chan engine.Event, chan struct{}, *fakeSub) {
+	t.Helper()
+	p := New(quiet, d)
+	sub := newFakeSub(MaxPending + 1000)
+	p.Register(1, sub)
+	events := make(chan engine.Event, buf) // test -> Run goroutine
+	finished := make(chan struct{})        // closed when Run returns
+	go func() { p.Run(events); close(finished) }()
+	return p, events, finished, sub
+}
+
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestHeldUntilDurableThenReleasedInOrder(t *testing.T) {
+	d := durable.New(0)
+	p, events, finished, sub := runGated(t, d, 16)
+	for seq := engine.Seq(1); seq <= 5; seq++ {
+		events <- ev(1, seq)
+		events <- ev(1, seq) // two events per command, same seq
+	}
+	waitFor(t, "10 held", func() bool { return p.Stats().Held == 10 })
+	if len(sub.q) != 0 {
+		t.Fatalf("%d events released before any durability", len(sub.q))
+	}
+	d.Advance(3)
+	waitFor(t, "6 released", func() bool { return len(sub.q) == 6 })
+	if p.Stats().Held != 4 {
+		t.Fatalf("held %d after advancing to 3", p.Stats().Held)
+	}
+	close(events) // input ends with 4 still held: Run must wait for them
+	select {
+	case <-finished:
+		t.Fatal("Run returned with events still held")
+	case <-time.After(50 * time.Millisecond):
+	}
+	d.Advance(5)
+	<-finished
+	var seqs []engine.Seq
+	for len(sub.q) > 0 {
+		seqs = append(seqs, (<-sub.q).Seq)
+	}
+	want := []engine.Seq{1, 1, 2, 2, 3, 3, 4, 4, 5, 5}
+	if fmt.Sprint(seqs) != fmt.Sprint(want) {
+		t.Fatalf("released %v, want %v", seqs, want)
+	}
+}
+
+func TestFailureWithholdsEverything(t *testing.T) {
+	d := durable.New(0)
+	p, events, finished, sub := runGated(t, d, 16)
+	events <- ev(1, 1)
+	d.Advance(1)
+	waitFor(t, "first released", func() bool { return len(sub.q) == 1 })
+	events <- ev(1, 2)
+	events <- ev(1, 3)
+	waitFor(t, "2 held", func() bool { return p.Stats().Held == 2 })
+	d.Fail(errors.New("injected fsync failure"))
+	// The engine may still be sending: the publisher must keep draining so
+	// it never blocks, but release nothing.
+	events <- ev(1, 4)
+	d.Advance(10) // ignored after Fail
+	close(events)
+	<-finished
+	if len(sub.q) != 1 {
+		t.Fatalf("%d events released; only the one durable before the failure may be", len(sub.q))
+	}
+	if s := p.Stats(); s.Withheld != 3 || s.Held != 0 {
+		t.Fatalf("stats %+v, want 3 withheld", s)
+	}
+}
+
+// When MaxPending events are held, the publisher stops taking more, so the
+// engine's sends block until durability catches up.
+func TestPendingLimitBackpressure(t *testing.T) {
+	d := durable.New(0)
+	p, events, finished, sub := runGated(t, d, 100)
+	sent := 0
+	for ; sent < MaxPending; sent++ {
+		events <- ev(1, engine.Seq(sent+1))
+	}
+	waitFor(t, "MaxPending held", func() bool { return p.Stats().Held == MaxPending })
+	for i := 0; i < 100; i++ { // fills the channel buffer: the publisher isn't taking
+		events <- ev(1, engine.Seq(sent+1))
+		sent++
+	}
+	select {
+	case events <- ev(1, engine.Seq(sent+1)):
+		t.Fatal("publisher kept accepting events past MaxPending")
+	case <-time.After(50 * time.Millisecond):
+	}
+	d.Advance(uint64(sent))
+	close(events)
+	<-finished
+	if len(sub.q) != sent {
+		t.Fatalf("released %d of %d", len(sub.q), sent)
 	}
 }
