@@ -99,7 +99,11 @@ func cxl(client book.ClientID, id book.OrderID, want book.CancelResult) step {
 func rested(q book.Qty) book.Result            { return book.Result{Rested: q} }
 func filled(q book.Qty) book.Result            { return book.Result{Filled: q} }
 func rejected(r book.RejectReason) book.Result { return book.Result{Reject: r} }
-func cancelled(q book.Qty) book.CancelResult   { return book.CancelResult{Cancelled: q} }
+
+// cancelled is the expected result of cancelling resting order o with qty left.
+func cancelled(o book.Order, q book.Qty) book.CancelResult {
+	return book.CancelResult{Side: o.Side, Price: o.Price, ClOrdID: o.ClOrdID, Cancelled: q}
+}
 
 var unknown = book.CancelResult{Reject: book.RejectUnknownOrder}
 
@@ -205,7 +209,7 @@ func TestScenarios(t *testing.T) {
 			name: "cancel removes; second cancel and unknown id are rejected",
 			steps: []step{
 				sub(a100, rested(10)), sub(a100b, rested(5)),
-				cxl(1, a100.ID, cancelled(10)),
+				cxl(1, a100.ID, cancelled(a100, 10)),
 				cxl(1, a100.ID, unknown),
 				cxl(1, 999, unknown),
 			},
@@ -224,7 +228,7 @@ func TestScenarios(t *testing.T) {
 			steps: []step{
 				sub(a100, rested(10)),
 				sub(buy(10, 3, 100, 4), filled(4), fill(buy(10, 3, 100, 4), a100, 100, 4, 6)),
-				cxl(1, a100.ID, cancelled(6)),
+				cxl(1, a100.ID, cancelled(a100, 6)),
 			},
 		},
 		{
@@ -252,7 +256,7 @@ func TestScenarios(t *testing.T) {
 			name: "client order id is reusable after cancel and after full fill",
 			steps: []step{
 				sub(withClOrd(a100, 77), rested(10)),
-				cxl(1, a100.ID, cancelled(10)),
+				cxl(1, a100.ID, cancelled(withClOrd(a100, 77), 10)),
 				sub(withClOrd(sell(10, 1, 100, 2), 77), rested(2)),
 				sub(buy(11, 2, 100, 2), filled(2), fill(buy(11, 2, 100, 2), withClOrd(sell(10, 1, 100, 2), 77), 100, 2, 0)),
 				sub(withClOrd(sell(12, 1, 105, 1), 77), rested(1)),

@@ -392,6 +392,20 @@ func runPair(t *testing.T, seed uint64, n int, real, oracle orderBook) coverage 
 			if rp != op || rq != oq || rok != ook {
 				fail(i, c, "best %s: book %d x %d (%v), ref %d x %d (%v)", s, rp, rq, rok, op, oq, ook)
 			}
+			// LevelQty (used by the engine for book deltas) must equal the
+			// oracle's per-order quantities summed by price, for every level.
+			if rb, ok := real.(*book.Book); ok {
+				for j := 0; j < len(refRest); {
+					px := refRest[j].Price
+					var want book.Qty
+					for ; j < len(refRest) && refRest[j].Price == px; j++ {
+						want += refRest[j].Qty
+					}
+					if got := rb.LevelQty(s, px); got != want {
+						fail(i, c, "LevelQty(%s, %d) = %d, ref level sums to %d", s, px, got, want)
+					}
+				}
+			}
 		}
 		if real.Len() != oracle.Len() {
 			fail(i, c, "len: book %d, ref %d", real.Len(), oracle.Len())

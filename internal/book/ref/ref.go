@@ -153,7 +153,7 @@ func (b *Book) Cancel(client book.ClientID, id book.OrderID) book.CancelResult {
 					return book.CancelResult{Reject: book.RejectUnknownOrder}
 				}
 				*list = slices.Delete(*list, i, i+1)
-				return book.CancelResult{Cancelled: r.Qty}
+				return book.CancelResult{Side: r.Side, Price: r.Price, ClOrdID: r.ClOrdID, Cancelled: r.Qty}
 			}
 		}
 	}

@@ -94,6 +94,34 @@ func TestSlabAndLevelReuse(t *testing.T) {
 	}
 }
 
+func TestLevelQty(t *testing.T) {
+	b := mustNew(t)
+	b.Submit(Order{ID: 1, Client: 1, ClOrdID: 1, Side: Buy, Type: Limit, TIF: GTC, Price: 100, Qty: 4}, nil)
+	b.Submit(Order{ID: 2, Client: 1, ClOrdID: 2, Side: Buy, Type: Limit, TIF: GTC, Price: 100, Qty: 6}, nil)
+	b.Submit(Order{ID: 3, Client: 1, ClOrdID: 3, Side: Buy, Type: Limit, TIF: GTC, Price: 98, Qty: 1}, nil)
+	cases := []struct {
+		side Side
+		px   Price
+		want Qty
+	}{
+		{Buy, 100, 10},
+		{Buy, 98, 1},
+		{Buy, 99, 0},   // gap between levels
+		{Buy, 101, 0},  // above best
+		{Buy, 50, 0},   // below worst
+		{Sell, 100, 0}, // other side
+	}
+	for _, c := range cases {
+		if got := b.LevelQty(c.side, c.px); got != c.want {
+			t.Errorf("LevelQty(%s, %d) = %d, want %d", c.side, c.px, got, c.want)
+		}
+	}
+	b.Cancel(1, 3)
+	if got := b.LevelQty(Buy, 98); got != 0 {
+		t.Errorf("LevelQty after emptying level = %d, want 0", got)
+	}
+}
+
 // Fully filled makers must release their slots too, not just cancels.
 func TestFilledMakerReleasesSlot(t *testing.T) {
 	b := mustNew(t)
@@ -128,8 +156,8 @@ func TestCheckInvariantsDetectsCorruption(t *testing.T) {
 		"level count":     func(b *Book) { b.bids.levels[0].count++ },
 		"crossed":         func(b *Book) { b.asks.levels[0].price = 100; b.nodes[3].price = 100 },
 		"zero qty order":  func(b *Book) { b.nodes[1].qty = 0; b.bids.levels[0].total -= 5 },
-		"stale byID":      func(b *Book) { b.byID[99] = 1 },
-		"missing byClOrd": func(b *Book) { delete(b.byClOrd, clientOrderKey{1, 2}) },
+		"stale byID":      func(b *Book) { b.byID.put(99, 1) },
+		"missing byClOrd": func(b *Book) { b.byClOrd.delete(clientOrderKey{1, 2}) },
 		"broken prev":     func(b *Book) { b.nodes[2].prev = nilIdx },
 		"tail wrong":      func(b *Book) { b.bids.levels[0].tail = 1 },
 		"leaked slot":     func(b *Book) { b.nodes = append(b.nodes, orderNode{}) },

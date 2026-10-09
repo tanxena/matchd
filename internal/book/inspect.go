@@ -12,14 +12,25 @@ func (b *Book) Best(s Side) (px Price, qty Qty, ok bool) {
 	return lv.price, lv.total, true
 }
 
+// LevelQty returns the total quantity resting at price px on side s, or 0 if
+// there is no level there. O(log L). The engine calls it after a command to
+// report each touched level's new size as a book delta.
+func (b *Book) LevelQty(s Side, px Price) Qty {
+	lad := b.ladderFor(s)
+	if i, found := lad.search(px); found {
+		return lad.levels[i].total
+	}
+	return 0
+}
+
 // Live reports whether order id is resting on the book.
 func (b *Book) Live(id OrderID) bool {
-	_, ok := b.byID[id]
+	_, ok := b.byID.get(id)
 	return ok
 }
 
 // Len returns the number of resting orders.
-func (b *Book) Len() int { return len(b.byID) }
+func (b *Book) Len() int { return b.byID.len() }
 
 // Orders appends every resting order on side s to dst in priority order (best
 // level first, oldest first within a level) and returns the extended slice.
@@ -57,7 +68,7 @@ func (b *Book) CheckInvariants() error {
 		}
 	}
 
-	seen := make(map[uint32]bool, len(b.byID))
+	seen := make(map[uint32]bool, b.byID.len())
 	for _, side := range [2]Side{Buy, Sell} {
 		lad := b.ladderFor(side)
 		for i, lv := range lad.levels {
@@ -91,10 +102,10 @@ func (b *Book) CheckInvariants() error {
 				if n.side != side || n.price != lv.price {
 					return fmt.Errorf("order %d (%s @%d) in %s level %d", n.id, n.side, n.price, side, lv.price)
 				}
-				if got, ok := b.byID[n.id]; !ok || got != j {
+				if got, ok := b.byID.get(n.id); !ok || got != j {
 					return fmt.Errorf("order %d: byID has (%d,%v), want slot %d", n.id, got, ok, j)
 				}
-				if got, ok := b.byClOrd[clientOrderKey{n.client, n.clOrdID}]; !ok || got != j {
+				if got, ok := b.byClOrd.get(clientOrderKey{n.client, n.clOrdID}); !ok || got != j {
 					return fmt.Errorf("order %d: byClOrd has (%d,%v), want slot %d", n.id, got, ok, j)
 				}
 				sum += n.qty
@@ -113,11 +124,11 @@ func (b *Book) CheckInvariants() error {
 		}
 	}
 
-	if len(seen) != len(b.byID) {
-		return fmt.Errorf("byID has %d entries, %d orders on the book", len(b.byID), len(seen))
+	if len(seen) != b.byID.len() {
+		return fmt.Errorf("byID has %d entries, %d orders on the book", b.byID.len(), len(seen))
 	}
-	if len(seen) != len(b.byClOrd) {
-		return fmt.Errorf("byClOrd has %d entries, %d orders on the book", len(b.byClOrd), len(seen))
+	if len(seen) != b.byClOrd.len() {
+		return fmt.Errorf("byClOrd has %d entries, %d orders on the book", b.byClOrd.len(), len(seen))
 	}
 
 	free := 0
@@ -128,7 +139,7 @@ func (b *Book) CheckInvariants() error {
 		seen[j] = true
 		free++
 	}
-	if live := len(b.byID); live+free != len(b.nodes)-1 {
+	if live := b.byID.len(); live+free != len(b.nodes)-1 {
 		return fmt.Errorf("slab leak: %d live + %d free != %d slots", live, free, len(b.nodes)-1)
 	}
 	return nil

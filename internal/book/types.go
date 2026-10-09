@@ -114,6 +114,12 @@ const (
 	RejectInvalidTIF
 	RejectDuplicateClientOrderID
 	RejectUnknownOrder
+
+	// Engine-level reasons. A Book never returns these; they live here so the
+	// engine, the wire protocol and the reference book share one enum.
+	RejectUnknownInstrument
+	RejectInvalidInstrument
+	RejectDuplicateSymbol
 )
 
 func (r RejectReason) String() string {
@@ -134,6 +140,12 @@ func (r RejectReason) String() string {
 		return "DuplicateClientOrderID"
 	case RejectUnknownOrder:
 		return "UnknownOrder"
+	case RejectUnknownInstrument:
+		return "UnknownInstrument"
+	case RejectInvalidInstrument:
+		return "InvalidInstrument"
+	case RejectDuplicateSymbol:
+		return "DuplicateSymbol"
 	}
 	return fmt.Sprintf("reject(%d)", uint8(r))
 }
@@ -160,10 +172,15 @@ type Result struct {
 	Expired Qty          // unfilled quantity cancelled on arrival (market only)
 }
 
-// CancelResult describes the outcome of a cancel.
+// CancelResult describes the outcome of a cancel. On success it also echoes
+// the removed order's side, price and client order id, so the caller can emit
+// a cancel acknowledgement and a book delta without a second lookup.
 type CancelResult struct {
 	Reject    RejectReason // RejectNone if the order was found and removed
-	Cancelled Qty          // remaining quantity that was removed from the book
+	Side      Side
+	Price     Price
+	ClOrdID   ClientOrderID
+	Cancelled Qty // remaining quantity that was removed from the book
 }
 
 // Fill is one match between an incoming (taker) order and a resting (maker)

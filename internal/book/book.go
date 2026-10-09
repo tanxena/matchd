@@ -112,8 +112,8 @@ type Book struct {
 	// freeLevels holds level structs whose price level emptied, for reuse.
 	freeLevels []*level
 
-	byID    map[OrderID]uint32        // live order id -> slab index (cancel lookup)
-	byClOrd map[clientOrderKey]uint32 // live (client, clOrdID) -> slab index (duplicate check)
+	byID    index[OrderID]        // live order id -> slab index (cancel lookup)
+	byClOrd index[clientOrderKey] // live (client, clOrdID) -> slab index (duplicate check)
 }
 
 // New returns an empty book for instr.
@@ -126,8 +126,8 @@ func New(instr Instrument) (*Book, error) {
 		bids:    ladder{sign: +1},
 		asks:    ladder{sign: -1},
 		nodes:   make([]orderNode, 1, 1024), // slot 0 reserved
-		byID:    make(map[OrderID]uint32),
-		byClOrd: make(map[clientOrderKey]uint32),
+		byID:    newIndex[OrderID](1024),
+		byClOrd: newIndex[clientOrderKey](1024),
 	}, nil
 }
 
@@ -162,7 +162,7 @@ func (b *Book) Submit(o Order, fills []Fill) (Result, []Fill) {
 	if r := o.Validate(); r != RejectNone {
 		return Result{Reject: r}, fills
 	}
-	if _, dup := b.byClOrd[clientOrderKey{o.Client, o.ClOrdID}]; dup {
+	if _, dup := b.byClOrd.get(clientOrderKey{o.Client, o.ClOrdID}); dup {
 		return Result{Reject: RejectDuplicateClientOrderID}, fills
 	}
 
@@ -223,7 +223,7 @@ func (b *Book) Submit(o Order, fills []Fill) (Result, []Fill) {
 // rest places the unfilled remainder of a limit order at the tail of its
 // price level, creating the level if needed.
 func (b *Book) rest(o *Order, qty Qty) {
-	if _, exists := b.byID[o.ID]; exists {
+	if _, exists := b.byID.get(o.ID); exists {
 		// The engine assigns unique ids; a repeat is a caller bug that would
 		// corrupt the index, so fail loudly rather than continue.
 		panic(fmt.Sprintf("book: order id %d already resting", o.ID))
@@ -258,8 +258,8 @@ func (b *Book) rest(o *Order, qty Qty) {
 	lv.count++
 	lv.total += qty
 
-	b.byID[o.ID] = idx
-	b.byClOrd[clientOrderKey{o.Client, o.ClOrdID}] = idx
+	b.byID.put(o.ID, idx)
+	b.byClOrd.put(clientOrderKey{o.Client, o.ClOrdID}, idx)
 }
 
 // Cancel removes a resting order. The order must exist and belong to client;
@@ -269,7 +269,7 @@ func (b *Book) rest(o *Order, qty Qty) {
 // Cost: O(1) map lookup and unlink, plus an O(log L) search for the level and,
 // if the level empties, an O(L) shift to remove it (decision 002).
 func (b *Book) Cancel(client ClientID, id OrderID) CancelResult {
-	idx, ok := b.byID[id]
+	idx, ok := b.byID.get(id)
 	if !ok || b.nodes[idx].client != client {
 		return CancelResult{Reject: RejectUnknownOrder}
 	}
@@ -287,7 +287,7 @@ func (b *Book) Cancel(client ClientID, id OrderID) CancelResult {
 		lad.removeAt(i)
 		b.freeLevel(lv)
 	}
-	return CancelResult{Cancelled: n.qty}
+	return CancelResult{Side: n.side, Price: n.price, ClOrdID: n.clOrdID, Cancelled: n.qty}
 }
 
 // unlink removes node i from lv's queue. It does not touch lv.total; callers
@@ -324,8 +324,8 @@ func (b *Book) alloc() uint32 {
 // slot is zeroed so a stale index can never read a plausible-looking order.
 func (b *Book) release(i uint32) {
 	n := &b.nodes[i]
-	delete(b.byID, n.id)
-	delete(b.byClOrd, clientOrderKey{n.client, n.clOrdID})
+	b.byID.delete(n.id)
+	b.byClOrd.delete(clientOrderKey{n.client, n.clOrdID})
 	*n = orderNode{next: b.freeNode}
 	b.freeNode = i
 }
