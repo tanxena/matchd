@@ -1,0 +1,30 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/bin/
+
+# Test and coverage output
+*.test
+*.out
+coverage.*
+*.prof
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Runtime data directories (WAL, snapshots)
+/data/
+
+# Interview notes are private (PRD 11.3)
+docs/interviews/
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
