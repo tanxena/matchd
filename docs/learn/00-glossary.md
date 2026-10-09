@@ -54,9 +54,34 @@ Terms used in this repo's code and docs. Each entry names the milestone where th
 - **Free list** (M1): a linked list of unused slab slots or structs, reused before allocating new ones.
 - **Intrusive linked list** (M1): a list whose links (`prev`, `next`) are fields of the elements themselves, rather than separate list nodes.
 
-## Later milestones
+## Engine (milestone 2)
 
-- **Sequence number (seq)** *(later, M4)*: a global, gap-free counter assigned to every accepted command.
+- **Command** (M2): an input to the engine: `NewOrder`, `Cancel`, `AddInstrument` (`engine.Command`).
+- **Event** (M2): an output of the engine: `Ack`, `Reject`, `Fill`, `Cancelled`, `BookDelta`, `InstrumentAdded` (`engine.Event`).
+- **Ack** (M2): the event confirming a new order was accepted, carrying its engine-assigned order id. It is always the first event for that order.
+- **Sequence number (Seq)** (M2; assigned by the sequencer from M4): a global, gap-free counter on every command, including rejected ones. The engine panics on a gap.
+- **Gap-free** (M2): every number in a series is used exactly once, in order. A missing number then proves something was lost.
+- **Match id** (M2): the number shared by the taker's and maker's fill events of one match.
+- **Leaves** (M2): an order's open quantity remaining after a fill.
+- **Book delta** (M2): a market-data event giving one price level's new total size; 0 means the level is gone.
+- **Market by price (MBP) / market by order (MBO)** (M2): market data described per price level (our deltas) versus per individual order (NASDAQ ITCH).
+- **Determinism** (M2): same inputs in the same order give the same outputs, with no hidden inputs such as the clock, randomness or map iteration order. The foundation of recovery by replay.
+- **State machine approach** (M2): treating a service as state plus a deterministic transition function, so replaying the same ordered inputs reproduces the same state (Schneider, 1990).
+- **Backpressure** (M2): a slow consumer slowing its producer, because sends block when buffers are full. Wanted between engine and publisher; never allowed to reach the engine from a single slow client.
+- **Fail-stop** (M2): stopping the process on an impossible state rather than continuing with possibly corrupted state.
+- **Steady state** (M2): running at a constant book size. The zero-allocation requirement applies here; growing to a new peak may allocate.
+- **Allocation / garbage collector (GC)** (M2): heap memory requested at run time, and the runtime component that reclaims it. Both cost time, especially in tail latency.
+
+## Hash tables (milestone 2)
+
+- **Open addressing / linear probing** (M2): storing keys directly in an array, and on a collision trying the next slot, then the next.
+- **Home slot** (M2): the slot a key's hash points to; the start of its probe path.
+- **Load factor** (M2): the fraction of slots in use. The book's index keeps it at or below 1/2.
+- **Tombstone** (M2): a marker left in a deleted slot so lookups keep probing past it. It fills the table and eventually forces a rebuild.
+- **Backward-shift deletion** (M2): deleting without tombstones by moving later entries of the probe run back into the gap, when doing so can't place an entry before its home.
+- **Hash flooding** (M2): an attack where chosen keys all collide, turning lookups into linear scans. Defended by a secret per-table hash seed.
+
+## Later milestones
 - **WAL (write-ahead log)** *(later, M4)*: an append-only file where every command is recorded before its effects become visible.
 - **fsync** *(later, M4)*: the system call that forces written data from the OS cache onto stable storage.
 - **Snapshot** *(later, M5)*: a saved copy of the full book state at some seq.

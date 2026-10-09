@@ -99,14 +99,14 @@ Three things make this trustworthy rather than theatrical:
 
 - **`Price`, `Qty`, `OrderID`, `ClientID`, `ClientOrderID`** ([types.go:18–33](../../internal/book/types.go#L18)). Each is a distinct named integer type, so the compiler refuses to mix them: a `Qty` can't be passed where a `Price` is expected.
 - **`Side`, `OrderType`, `TIF`** ([types.go:38–104](../../internal/book/types.go#L38)). Small enums whose **zero value is invalid** (`Buy = 1`, `Sell = 2`), so an order with a forgotten field is rejected instead of quietly becoming a buy. Each has a `String()` method for readable test output. `Side.Opposite()` gives the side an order trades against.
-- **`RejectReason`** ([types.go:106](../../internal/book/types.go#L106)). `RejectNone` (0) means accepted. The other reasons are `InvalidSide`, `InvalidType`, `InvalidQty`, `InvalidPrice`, `InvalidTIF`, `DuplicateClientOrderID` and `UnknownOrder`.
-- **`Order`** ([types.go:142](../../internal/book/types.go#L142)). The new-order command.
-- **`Result`** ([types.go:156](../../internal/book/types.go#L156)). The outcome of `Submit`: `Reject`, `Filled`, `Rested`, `Expired`. For an accepted order, Filled + Rested + Expired = Qty.
-- **`CancelResult`** ([types.go:164](../../internal/book/types.go#L164)).
-- **`Fill`** ([types.go:171](../../internal/book/types.go#L171)). One match. It records the price (always the maker's), the quantity, the taker's side, id and client, and the maker's id, client and client order id. **`MakerLeft`** is the maker's quantity after this fill, so 0 means the maker left the book. Milestone 2 uses it to emit the right book delta without asking the book again.
-- **`RestingOrder`** ([types.go:185](../../internal/book/types.go#L185)). A read-only view of an order on the book. The two books are compared using it.
-- **`Instrument` and `Instrument.Validate`** ([types.go:200](../../internal/book/types.go#L200)). Symbol, tick size and lot size. The book checks them once at construction and never uses them in matching.
-- **`Order.Validate`** ([types.go:224](../../internal/book/types.go#L224)). Field checks in a fixed order (side, type, qty, price, tif), so an order with several problems always gets the same reason. Limit orders need price > 0 and TIF GTC or Day; market orders need price == 0.
+- **`RejectReason`** ([types.go:106](../../internal/book/types.go#L106)). `RejectNone` (0) means accepted. The book's reasons are `InvalidSide`, `InvalidType`, `InvalidQty`, `InvalidPrice`, `InvalidTIF`, `DuplicateClientOrderID` and `UnknownOrder`. Since milestone 2 the enum also holds three engine-level reasons that a `Book` never returns (`UnknownInstrument`, `InvalidInstrument`, `DuplicateSymbol`), so the engine, wire protocol and books share one list.
+- **`Order`** ([types.go:154](../../internal/book/types.go#L154)). The new-order command.
+- **`Result`** ([types.go:168](../../internal/book/types.go#L168)). The outcome of `Submit`: `Reject`, `Filled`, `Rested`, `Expired`. For an accepted order, Filled + Rested + Expired = Qty.
+- **`CancelResult`** ([types.go:178](../../internal/book/types.go#L178)). `Reject` and `Cancelled` (the quantity removed). Since milestone 2 it also echoes the removed order's `Side`, `Price` and `ClOrdID`, so the engine can build the cancel acknowledgement and the book delta without a second lookup.
+- **`Fill`** ([types.go:188](../../internal/book/types.go#L188)). One match. It records the price (always the maker's), the quantity, the taker's side, id and client, and the maker's id, client and client order id. **`MakerLeft`** is the maker's quantity after this fill, so 0 means the maker left the book. Milestone 2 uses it to emit the right book delta without asking the book again.
+- **`RestingOrder`** ([types.go:202](../../internal/book/types.go#L202)). A read-only view of an order on the book. The two books are compared using it.
+- **`Instrument` and `Instrument.Validate`** ([types.go:217](../../internal/book/types.go#L217)). Symbol, tick size and lot size. The book checks them once at construction and never uses them in matching.
+- **`Order.Validate`** ([types.go:241](../../internal/book/types.go#L241)). Field checks in a fixed order (side, type, qty, price, tif), so an order with several problems always gets the same reason. Limit orders need price > 0 and TIF GTC or Day; market orders need price == 0.
 
 ### `internal/book/book.go`: the real book
 
@@ -121,15 +121,17 @@ Three things make this trustworthy rather than theatrical:
   - `best()` returns the last element, or nil.
   - `insertAt(i, lv)` grows the slice by one, shifts the levels from `i` upward by one with `copy`, and stores `lv` at `i`.
   - `removeAt(i)` shifts the levels above `i` down by one and **sets the vacated last slot to nil**, so the slice doesn't keep the removed level reachable.
-- **`clientOrderKey`** ([book.go:95](../../internal/book/book.go#L95)). The `(client, clOrdID)` pair, used as a map key for the duplicate check.
+- **`clientOrderKey`** ([book.go:95](../../internal/book/book.go#L95)). The `(client, clOrdID)` pair, used as the key of the duplicate-check index.
 
 **`Book`** ([book.go:101](../../internal/book/book.go#L101)) holds:
 
 - `bids`, `asks`;
 - the slab `nodes` and the free-list head `freeNode`;
 - `freeLevels`, a stack of reusable `*level`;
-- `byID`, which maps order id to slot (for cancel);
-- `byClOrd`, which maps `(client, clOrdID)` to slot (for the duplicate check).
+- `byID`, an `index[OrderID]` from order id to slot (for cancel);
+- `byClOrd`, an `index[clientOrderKey]` from `(client, clOrdID)` to slot (for the duplicate check).
+
+*Revised in milestone 2:* these two were Go maps in milestone 1. They are now the book's own open-addressing hash table (`internal/book/index.go`), because Go maps were measured allocating in steady state. See [02-engine.md](02-engine.md) and [decision 002, revision 2](../decisions/002-order-storage-and-cancel.md).
 
 **`New`** ([book.go:120](../../internal/book/book.go#L120)) validates the instrument, sets the ladder signs, and creates the slab with slot 0 reserved and room for 1,024 orders.
 
@@ -172,22 +174,23 @@ Cost: O(1) for the order plus O(log L) to find the level (decision 002).
 **`alloc` and `release`** ([book.go:311, 325](../../internal/book/book.go#L311)) manage the slab.
 
 - `alloc` pops a slot from the free list, or appends a new one. It panics at 2³²−1 slots.
-- `release` deletes the order from both maps, **zeroes** the slot (so a stale index reads as an obviously empty order), and pushes it on the free list through `next`.
+- `release` deletes the order from both indexes, **zeroes** the slot (so a stale index reads as an obviously empty order), and pushes it on the free list through `next`.
 
 **`newLevel` and `freeLevel`** ([book.go:333, 344](../../internal/book/book.go#L333)) do the same for level structs.
 
 ### `internal/book/inspect.go`: read-only views
 
 - **`Best(s)`** returns the price and total quantity of the best level.
-- **`Live(id)`** and **`Len()`** are map lookups.
+- **`Live(id)`** is an index lookup; **`Len()`** is the index's count.
+- **`LevelQty(s, px)`** *(added in milestone 2)* returns the total resting at one price, or 0. It is a binary search, and the engine uses it to report each touched level's new size.
 - **`Orders(s, dst)`** appends every resting order on side `s` in priority order: levels from last to first (best first), and within a level from head to tail.
-- **`CheckInvariants()`** ([inspect.go:53](../../internal/book/inspect.go#L53)) walks everything and returns the first inconsistency it finds. It checks:
+- **`CheckInvariants()`** ([inspect.go:64](../../internal/book/inspect.go#L64)) walks everything and returns the first inconsistency it finds. It checks:
   - the book isn't crossed;
   - levels are strictly sorted, none is empty, and no entry is nil;
   - each queue's `prev` links match a forward walk, and `tail` is the last node;
   - every order has qty > 0 and the side and price of the level holding it;
   - each level's `total` and `count` match its orders;
-  - both maps point at exactly the resting orders and nothing else, which proves cancelled and filled ids are gone;
+  - both indexes point at exactly the resting orders and nothing else, which proves cancelled and filled ids are gone;
   - every slab slot is either resting or on the free list, never both and never neither (no leaks).
 
   It allocates and is O(n); only tests call it.
@@ -236,7 +239,7 @@ Cost: O(1) for the order plus O(log L) to find the level (decision 002).
 ## 3. Design decisions
 
 - [001: Price level storage](../decisions/001-price-level-storage.md). A sorted slice of `*level` per side with the best level last, and a free list of level structs. A red-black tree, a skip list and a price-indexed array were rejected, and the record says why. The cost: O(L) shifts when inserting or removing a level far from the best.
-- [002: Order storage and cancel](../decisions/002-order-storage-and-cancel.md). An indexed slab with `uint32` prev/next links, a free list, and `map[OrderID]uint32`. The pointer-linked list was rejected. Cancel is O(1) for the order plus O(log L) for the level search.
+- [002: Order storage and cancel](../decisions/002-order-storage-and-cancel.md). An indexed slab with `uint32` prev/next links, a free list, and an id-to-slot lookup (a Go map in milestone 1; the book's own tombstone-free hash index since milestone 2, revision 2 of the record). The pointer-linked list was rejected. Cancel is O(1) for the order plus O(log L) for the level search.
 - [003: Integer domain and reject semantics](../decisions/003-integer-domain-and-reject-semantics.md). Integer ticks and lots; the caller assigns `order_id`; the validation order; the duplicate rule applies to market orders too; **cancel is scoped to the owning client**; a market order on an empty book is accepted and expired; Day is treated as GTC; there is no self-trade prevention.
 - [004: Toolchain](../decisions/004-toolchain.md). Go 1.27.0, zero dependencies, LF line endings through `.gitattributes`, and the race detector on Windows. It needs cgo and a C compiler; MSYS2 gcc is installed, so run `CGO_ENABLED=1 go test -race ./...`.
 
@@ -268,9 +271,9 @@ Each of these was either run for real against the harness (the "caught" results 
 
 **Value receivers vs pointer receivers.** `func (s Side) Opposite()` gets a *copy* of `s`; `func (b *Book) Submit(...)` gets a pointer and can modify the book. The rule of thumb: use a pointer receiver if the method mutates the value or the value is large. `Instrument.Validate` uses a value receiver; `Order.Validate` takes `*Order` to avoid copying a 48-byte struct on every order.
 
-**The comma-ok idiom.** `idx, ok := b.byID[id]` returns the zero value plus `ok == false` for a missing key, instead of throwing or returning `undefined`. The same shape appears in type assertions and channel receives later on. `if _, dup := m[k]; dup { ... }` combines it with an `if` initialiser, so the variable's scope is just that `if`.
+**The comma-ok idiom.** Looking up a missing key in a Go map, `v, ok := m[k]`, returns the zero value plus `ok == false`, instead of throwing or returning `undefined`. The book's own index follows the same convention (`idx, ok := b.byID.get(id)`), so it reads like a map. The same shape appears in type assertions and channel receives later on. `if _, dup := b.byClOrd.get(k); dup { ... }` combines it with an `if` initialiser, so the variable's scope is just that `if`.
 
-**Structs as map keys.** `map[clientOrderKey]uint32` works because a struct of comparable fields is itself comparable: Go hashes the whole struct. No string concatenation like `` `${client}:${clOrdID}` `` is needed. See [Map types](https://go.dev/ref/spec#Map_types).
+**Structs as keys.** A struct whose fields are all comparable is itself comparable with `==`, so it can be a map key, or here the `K` of the generic `index[K comparable]`. Both `==` and `maphash.Comparable` work on the whole struct, so no string concatenation like `` `${client}:${clOrdID}` `` is needed. See [Comparison operators](https://go.dev/ref/spec#Comparison_operators) and [Map types](https://go.dev/ref/spec#Map_types).
 
 **Append to a caller-supplied buffer.** `Submit(o, fills []Fill) (Result, []Fill)` appends to `fills` and returns the possibly-reallocated slice. The caller passes `buf[:0]`, which keeps the backing array but sets the length to zero, and stores the result back. After a few calls the buffer is big enough and matching never allocates again. The same pattern is used by `strconv.AppendInt` and `Orders(s, dst)`. It works because a slice is a small `(pointer, len, cap)` header, not the data itself ([Go slices: usage and internals](https://go.dev/blog/slices-intro)).
 
