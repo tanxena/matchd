@@ -1,0 +1,516 @@
+package book_test
+
+import (
+	"flag"
+	"fmt"
+	"math/rand/v2"
+	"slices"
+	"sync"
+	"testing"
+
+	"github.com/tanxena/matchd/internal/book"
+	"github.com/tanxena/matchd/internal/book/ref"
+)
+
+// Run the long suite with:   go test ./internal/book -run Differential -long
+// Replay a single seed with: go test ./internal/book -run Differential -seed 42 [-cmds 500000]
+var (
+	longRun = flag.Bool("long", false, "differential test: 1M+ commands across 20 seeds")
+	oneSeed = flag.Uint64("seed", 0, "differential test: run only this seed")
+	// Named -cmds, not -n: go test consumes -n itself (print commands, do not run).
+	numCmds  = flag.Int("cmds", 0, "differential test: commands per seed (0 = suite default)")
+	verbose  = flag.Bool("diffstats", false, "differential test: log per-seed coverage stats")
+	statsMu  sync.Mutex // guards totals; seeds run as parallel subtests
+	totals   coverage
+	totalsOK bool
+)
+
+const (
+	normalSeeds   = 10
+	normalPerSeed = 10_000
+	longSeeds     = 20
+	longPerSeed   = 60_000 // 20 x 60k = 1.2M commands
+	numClients    = 5
+)
+
+func TestDifferential(t *testing.T) {
+	seeds := make([]uint64, 0, longSeeds)
+	perSeed := normalPerSeed
+	switch {
+	case *oneSeed != 0:
+		seeds = append(seeds, *oneSeed)
+	case *longRun:
+		for s := range uint64(longSeeds) {
+			seeds = append(seeds, 1000+s)
+		}
+	default:
+		for s := range uint64(normalSeeds) {
+			seeds = append(seeds, 1+s)
+		}
+	}
+	if *longRun {
+		perSeed = longPerSeed
+	}
+	if *numCmds > 0 {
+		perSeed = *numCmds
+	}
+
+	t.Run("seeds", func(t *testing.T) {
+		for _, seed := range seeds {
+			t.Run(fmt.Sprint(seed), func(t *testing.T) {
+				t.Parallel()
+				cov := runDifferential(t, seed, perSeed)
+				if *verbose {
+					t.Logf("seed %d: %s", seed, cov)
+				}
+				statsMu.Lock()
+				totals.add(cov)
+				totalsOK = true
+				statsMu.Unlock()
+			})
+		}
+	})
+	// The parallel subtests have all finished once the group returns.
+	if t.Failed() || !totalsOK {
+		return
+	}
+	t.Logf("%d seeds x %d commands: %s", len(seeds), perSeed, totals)
+	// The stream must actually exercise every path, or "no divergence" means
+	// little. These floors are far below what any realistic seed produces.
+	totals.requireCoverage(t, len(seeds)*perSeed)
+}
+
+// ---------------------------------------------------------------------------
+// Command stream generation
+
+type cmdKind uint8
+
+const (
+	cmdSubmit cmdKind = iota
+	cmdCancel
+)
+
+type command struct {
+	kind   cmdKind
+	order  book.Order    // cmdSubmit
+	reuse  bool          // cmdSubmit: (client, clOrdID) was used by an earlier order
+	client book.ClientID // cmdCancel
+	id     book.OrderID  // cmdCancel
+}
+
+func (c command) String() string {
+	if c.kind == cmdCancel {
+		return fmt.Sprintf("Cancel{client=%d id=%d}", c.client, c.id)
+	}
+	o := c.order
+	return fmt.Sprintf("New{id=%d client=%d clOrd=%d %s %s tif=%s px=%d qty=%d}",
+		o.ID, o.Client, o.ClOrdID, o.Side, o.Type, o.TIF, o.Price, o.Qty)
+}
+
+type issued struct {
+	id      book.OrderID
+	client  book.ClientID
+	clOrdID book.ClientOrderID
+}
+
+// generator produces a reproducible random command stream from a seed. It
+// tracks which orders are live (from the oracle's results) so it can aim
+// cancels and duplicate client order ids at live orders, dead orders, and ids
+// that never existed.
+type generator struct {
+	rng       *rand.Rand
+	n         int   // commands generated so far
+	mid       int64 // drifting mid price, in ticks
+	reg       regime
+	nextID    book.OrderID
+	nextClOrd [numClients + 1]book.ClientOrderID
+	all       []issued             // every order ever submitted (accepted or not)
+	live      []issued             // currently resting, per the oracle
+	liveIdx   map[book.OrderID]int // id -> index in live
+}
+
+func newGenerator(seed uint64) *generator {
+	return &generator{
+		rng:     rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15)),
+		mid:     1000,
+		liveIdx: make(map[book.OrderID]int),
+	}
+}
+
+// regime shapes where limit orders land. The generator switches regime every
+// regimeLen commands so one stream contains both shallow, heavily crossing
+// books and deep books with many price levels (which exercise inserting and
+// removing levels in the middle of the ladder, not just at the best price).
+type regime struct {
+	spread  int64 // limit prices land up to this many ticks from mid
+	passive int   // percent of limits placed on their own side of mid (non-crossing)
+}
+
+const regimeLen = 2000
+
+var regimes = []regime{
+	{spread: 10, passive: 50}, // balanced: about half the limits cross
+	{spread: 40, passive: 85}, // deep: wide, mostly resting book
+	{spread: 3, passive: 30},  // tight: aggressive, crossing-heavy
+}
+
+// limitPrice returns a price for a limit on side s under the current regime.
+// Passive orders sit 1..spread ticks away from mid on their own side; the rest
+// are placed 0..spread ticks through mid toward the other side.
+func (g *generator) limitPrice(s book.Side) book.Price {
+	off := 1 + g.rng.Int64N(g.reg.spread)
+	if g.rng.IntN(100) >= g.reg.passive {
+		off = -g.rng.Int64N(g.reg.spread + 1)
+	}
+	if s == book.Buy {
+		return book.Price(g.mid - off)
+	}
+	return book.Price(g.mid + off)
+}
+
+func (g *generator) client() book.ClientID { return book.ClientID(1 + g.rng.IntN(numClients)) }
+
+func (g *generator) side() book.Side {
+	if g.rng.IntN(2) == 0 {
+		return book.Buy
+	}
+	return book.Sell
+}
+
+func (g *generator) newOrder(client book.ClientID) book.Order {
+	g.nextID++
+	g.nextClOrd[client]++
+	return book.Order{ID: g.nextID, Client: client, ClOrdID: g.nextClOrd[client]}
+}
+
+func (g *generator) next() command {
+	if g.n%regimeLen == 0 {
+		g.reg = regimes[g.rng.IntN(len(regimes))]
+	}
+	g.n++
+	// Mid does a bounded random walk so resting orders spread over a band of
+	// prices. Bounds keep every price positive.
+	g.mid = min(max(g.mid+int64(g.rng.IntN(3)-1), 900), 1100)
+
+	var c command
+	switch r := g.rng.IntN(100); {
+	case r < 50: // limit, placed per the current regime
+		o := g.newOrder(g.client())
+		o.Side, o.Type = g.side(), book.Limit
+		o.TIF = book.GTC
+		if g.rng.IntN(10) == 0 {
+			o.TIF = book.Day
+		}
+		o.Price = g.limitPrice(o.Side)
+		o.Qty = book.Qty(1 + g.rng.IntN(20))
+		c = command{kind: cmdSubmit, order: o}
+	case r < 58: // market
+		o := g.newOrder(g.client())
+		o.Side, o.Type = g.side(), book.Market
+		o.Qty = book.Qty(1 + g.rng.IntN(40))
+		c = command{kind: cmdSubmit, order: o}
+	case r < 83: // cancel
+		c = g.cancel()
+	case r < 93: // reuse an earlier (client, clOrdID): live -> reject, dead -> accept
+		c = g.reuseClOrd()
+	default: // invalid order
+		c = g.invalid()
+	}
+	if c.kind == cmdSubmit {
+		o := c.order
+		g.all = append(g.all, issued{o.ID, o.Client, o.ClOrdID})
+	}
+	return c
+}
+
+func (g *generator) cancel() command {
+	switch r := g.rng.IntN(100); {
+	case r < 60 && len(g.live) > 0: // a live order, usually by its owner
+		o := g.live[g.rng.IntN(len(g.live))]
+		cl := o.client
+		if g.rng.IntN(10) == 0 {
+			cl = g.client() // may or may not be the owner
+		}
+		return command{kind: cmdCancel, client: cl, id: o.id}
+	case r < 90 && len(g.all) > 0: // any past order: often already dead
+		o := g.all[g.rng.IntN(len(g.all))]
+		return command{kind: cmdCancel, client: o.client, id: o.id}
+	default: // an id that has never been issued
+		return command{kind: cmdCancel, client: g.client(), id: g.nextID + 1 + book.OrderID(g.rng.IntN(1000))}
+	}
+}
+
+func (g *generator) reuseClOrd() command {
+	var src issued
+	switch {
+	case len(g.live) > 0 && g.rng.IntN(2) == 0:
+		src = g.live[g.rng.IntN(len(g.live))]
+	case len(g.all) > 0:
+		src = g.all[g.rng.IntN(len(g.all))]
+	default:
+		return g.invalid()
+	}
+	g.nextID++
+	o := book.Order{
+		ID: g.nextID, Client: src.client, ClOrdID: src.clOrdID,
+		Side: g.side(), Type: book.Limit, TIF: book.GTC,
+		Qty: book.Qty(1 + g.rng.IntN(20)),
+	}
+	o.Price = g.limitPrice(o.Side)
+	if g.rng.IntN(4) == 0 {
+		o.Type, o.TIF, o.Price = book.Market, 0, 0
+	}
+	return command{kind: cmdSubmit, order: o, reuse: true}
+}
+
+func (g *generator) invalid() command {
+	o := g.newOrder(g.client())
+	o.Side, o.Type, o.TIF = g.side(), book.Limit, book.GTC
+	o.Price, o.Qty = book.Price(g.mid), 1
+	switch g.rng.IntN(7) {
+	case 0:
+		o.Qty = 0
+	case 1:
+		o.Qty = -book.Qty(1 + g.rng.IntN(5))
+	case 2:
+		o.Price = 0
+	case 3:
+		o.Side = 0
+	case 4:
+		o.Type = 7
+	case 5:
+		o.TIF = 9
+	case 6:
+		o.Type, o.TIF = book.Market, 0 // market with a price
+	}
+	return command{kind: cmdSubmit, order: o}
+}
+
+// observe updates the live set from the oracle's outcome of c.
+func (g *generator) observe(c command, res book.Result, fills []book.Fill, cres book.CancelResult) {
+	for _, f := range fills {
+		if f.MakerLeft == 0 {
+			g.removeLive(f.Maker)
+		}
+	}
+	switch c.kind {
+	case cmdSubmit:
+		if res.Rested > 0 {
+			o := c.order
+			g.liveIdx[o.ID] = len(g.live)
+			g.live = append(g.live, issued{o.ID, o.Client, o.ClOrdID})
+		}
+	case cmdCancel:
+		if cres.Reject == book.RejectNone {
+			g.removeLive(c.id)
+		}
+	}
+}
+
+func (g *generator) removeLive(id book.OrderID) {
+	i, ok := g.liveIdx[id]
+	if !ok {
+		return
+	}
+	last := len(g.live) - 1
+	g.live[i] = g.live[last]
+	g.liveIdx[g.live[i].id] = i
+	g.live = g.live[:last]
+	delete(g.liveIdx, id)
+}
+
+// ---------------------------------------------------------------------------
+// Running and comparing
+
+// runDifferential drives one seeded stream through both books and fails on
+// the first command after which they disagree in any observable way.
+func runDifferential(t *testing.T, seed uint64, n int) coverage {
+	t.Helper()
+	real, err := book.New(instr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oracle, err := ref.New(instr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return runPair(t, seed, n, real, oracle)
+}
+
+func runPair(t *testing.T, seed uint64, n int, real, oracle orderBook) coverage {
+	t.Helper()
+	g := newGenerator(seed)
+	var (
+		cov                 coverage
+		realFills, refFills []book.Fill
+		realRest, refRest   []book.RestingOrder
+	)
+	fail := func(i int, c command, format string, args ...any) {
+		t.Helper()
+		t.Fatalf("DIVERGENCE seed=%d command #%d %s\n%s\nreplay: go test ./internal/book -run Differential -seed %d -cmds %d",
+			seed, i, c, fmt.Sprintf(format, args...), seed, i+1)
+	}
+
+	for i := range n {
+		c := g.next()
+		// Reset per command so a cancel leaves both fill slices empty.
+		realFills, refFills = realFills[:0], refFills[:0]
+		var (
+			realRes, refRes book.Result
+			realCxl, refCxl book.CancelResult
+		)
+		switch c.kind {
+		case cmdSubmit:
+			realRes, realFills = real.Submit(c.order, realFills)
+			refRes, refFills = oracle.Submit(c.order, refFills)
+			if realRes != refRes {
+				fail(i, c, "result: book %+v\n        ref  %+v", realRes, refRes)
+			}
+			if !slices.Equal(realFills, refFills) {
+				fail(i, c, "fills: book %s\n       ref  %s", fmtFills(realFills), fmtFills(refFills))
+			}
+			cov.submit(c, refRes, refFills)
+		case cmdCancel:
+			realCxl = real.Cancel(c.client, c.id)
+			refCxl = oracle.Cancel(c.client, c.id)
+			if realCxl != refCxl {
+				fail(i, c, "cancel: book %+v\n        ref  %+v", realCxl, refCxl)
+			}
+			cov.cancel(refCxl)
+		}
+
+		// Identical resting state after every command, order by order in
+		// priority order (this checks time priority, not just level totals).
+		for _, s := range [2]book.Side{book.Buy, book.Sell} {
+			realRest = real.Orders(s, realRest[:0])
+			refRest = oracle.Orders(s, refRest[:0])
+			if !slices.Equal(realRest, refRest) {
+				fail(i, c, "%s side differs:\n book %+v\n ref  %+v", s, realRest, refRest)
+			}
+			rp, rq, rok := real.Best(s)
+			op, oq, ook := oracle.Best(s)
+			if rp != op || rq != oq || rok != ook {
+				fail(i, c, "best %s: book %d x %d (%v), ref %d x %d (%v)", s, rp, rq, rok, op, oq, ook)
+			}
+		}
+		if real.Len() != oracle.Len() {
+			fail(i, c, "len: book %d, ref %d", real.Len(), oracle.Len())
+		}
+
+		// Structural invariants on both.
+		if err := real.CheckInvariants(); err != nil {
+			fail(i, c, "book invariant: %v", err)
+		}
+		if err := oracle.CheckInvariants(); err != nil {
+			fail(i, c, "ref invariant: %v", err)
+		}
+		// Orders that just left the book must be gone from both.
+		for _, f := range refFills {
+			if f.MakerLeft == 0 && (real.Live(f.Maker) || oracle.Live(f.Maker)) {
+				fail(i, c, "filled maker %d still live", f.Maker)
+			}
+		}
+		if c.kind == cmdCancel && refCxl.Reject == book.RejectNone && (real.Live(c.id) || oracle.Live(c.id)) {
+			fail(i, c, "cancelled order %d still live", c.id)
+		}
+
+		cov.depth = max(cov.depth, oracle.Len())
+		g.observe(c, refRes, refFills, refCxl)
+	}
+	return cov
+}
+
+// ---------------------------------------------------------------------------
+// Coverage accounting: proof that the stream exercised each path.
+
+type coverage struct {
+	commands, fills, multiFill int
+	rested, partialRest        int
+	marketExpired              int
+	cancelsOK                  int
+	rejects                    [book.RejectUnknownOrder + 1]int
+	reusedClOrdOK              int // accepted orders whose (client, clOrdID) had been used before
+	depth                      int // max resting orders seen
+}
+
+func (c *coverage) submit(cmd command, r book.Result, fills []book.Fill) {
+	c.commands++
+	c.rejects[r.Reject]++
+	c.fills += len(fills)
+	if len(fills) > 1 {
+		c.multiFill++
+	}
+	if r.Rested > 0 {
+		c.rested++
+		if r.Filled > 0 {
+			c.partialRest++
+		}
+	}
+	if r.Expired > 0 {
+		c.marketExpired++
+	}
+	if cmd.reuse && r.Reject == book.RejectNone {
+		c.reusedClOrdOK++
+	}
+}
+
+func (c *coverage) cancel(r book.CancelResult) {
+	c.commands++
+	if r.Reject == book.RejectNone {
+		c.cancelsOK++
+	} else {
+		c.rejects[r.Reject]++
+	}
+}
+
+func (c *coverage) add(o coverage) {
+	c.commands += o.commands
+	c.fills += o.fills
+	c.multiFill += o.multiFill
+	c.rested += o.rested
+	c.partialRest += o.partialRest
+	c.marketExpired += o.marketExpired
+	c.cancelsOK += o.cancelsOK
+	c.reusedClOrdOK += o.reusedClOrdOK
+	for i := range c.rejects {
+		c.rejects[i] += o.rejects[i]
+	}
+	c.depth = max(c.depth, o.depth)
+}
+
+func (c coverage) String() string {
+	s := fmt.Sprintf("commands=%d fills=%d multi-fill-orders=%d rested=%d partial-then-rest=%d market-expired=%d cancels-ok=%d clordid-reused=%d max-depth=%d rejects:",
+		c.commands, c.fills, c.multiFill, c.rested, c.partialRest, c.marketExpired, c.cancelsOK, c.reusedClOrdOK, c.depth)
+	for r := book.RejectInvalidSide; r <= book.RejectUnknownOrder; r++ {
+		s += fmt.Sprintf(" %s=%d", r, c.rejects[r])
+	}
+	return s
+}
+
+func (c coverage) requireCoverage(t *testing.T, n int) {
+	t.Helper()
+	floor := n / 1000 // 0.1% of commands
+	checks := []struct {
+		name string
+		got  int
+	}{
+		{"fills", c.fills},
+		{"orders with multiple fills", c.multiFill},
+		{"orders resting", c.rested},
+		{"partial fill then rest", c.partialRest},
+		{"market remainders expired", c.marketExpired},
+		{"successful cancels", c.cancelsOK},
+		{"client order id reused after its order died", c.reusedClOrdOK},
+	}
+	for r := book.RejectInvalidSide; r <= book.RejectUnknownOrder; r++ {
+		checks = append(checks, struct {
+			name string
+			got  int
+		}{r.String() + " rejects", c.rejects[r]})
+	}
+	for _, ch := range checks {
+		if ch.got < floor {
+			t.Errorf("coverage: %s = %d, want >= %d; the generator is not exercising this path", ch.name, ch.got, floor)
+		}
+	}
+}
