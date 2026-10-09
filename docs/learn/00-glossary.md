@@ -81,6 +81,21 @@ Terms used in this repo's code and docs. Each entry names the milestone where th
 - **Backward-shift deletion** (M2): deleting without tombstones by moving later entries of the probe run back into the gap, when doing so can't place an entry before its home.
 - **Hash flooding** (M2): an attack where chosen keys all collide, turning lookups into linear scans. Defended by a secret per-table hash seed.
 
+## Network and protocol (milestone 3)
+
+- **Byte stream** (M3): what TCP delivers: ordered bytes with no message boundaries. One write can arrive as several reads, or merged with the next write.
+- **Frame / framing** (M3): one message on the wire, and the rule for finding where it ends. Ours is a 4-byte length prefix.
+- **Length prefix** (M3): a count at the start of a frame saying how many bytes follow.
+- **Endianness** (M3): the byte order of multi-byte numbers. Little-endian stores the least significant byte first, as our wire format and x86/ARM CPUs do; big-endian ("network byte order") stores the most significant first, as NASDAQ ITCH and OUCH do.
+- **Golden bytes** (M3): a test that compares an encoding against hand-written expected bytes, catching layout changes that a round trip can't see.
+- **Fuzzing** (M3): automatically generating huge numbers of inputs to find crashes or broken properties.
+- **Session** (M3): a connection after a successful `Login`. It owns the client id used for every command it sends.
+- **Heartbeat** (M3): an empty message that proves a connection is alive. The server echoes it; silence for `IdleTimeout` disconnects.
+- **Slow consumer** (M3): a client that can't read its events as fast as they're produced. It is disconnected when its bounded queue fills, and never allowed to stall the engine.
+- **Flow control (TCP)** (M3): the receiver tells the sender how much buffer it has left, so a sender can't overrun a slow reader. This is how a blocked reader slows its own client down.
+- **Nagle's algorithm / `TCP_NODELAY`** (M3): kernel batching of small writes, which adds latency to small messages; we turn it off on both ends.
+- **Copy-on-write** (M3): updating shared data by building a new copy and swapping a pointer to it, so readers never take a lock. Used for the publisher's client registry.
+
 ## Later milestones
 - **WAL (write-ahead log)** *(later, M4)*: an append-only file where every command is recorded before its effects become visible.
 - **fsync** *(later, M4)*: the system call that forces written data from the OS cache onto stable storage.
