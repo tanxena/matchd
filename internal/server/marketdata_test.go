@@ -6,6 +6,7 @@ import (
 	"net"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -162,17 +163,32 @@ func TestMarketDataConvergence(t *testing.T) {
 	fromStart := subscribe(t, s, 1, 1, nil)
 
 	dropped := map[uint64]bool{} // md_seq values already dropped once (resends must get through)
+	var dropping atomic.Bool     // only while trading: see the closing order below
+	dropping.Store(true)
 	var lateJoiner *subscriber
 	load(t, s, 1500, 1, func() {
 		lateJoiner = subscribe(t, s, 2, 1, func(m client.Msg) bool {
 			md := m.BookDelta.MDSeq + m.Trade.MDSeq // Drop sees only deltas and trades; one of these is set
-			if md%37 == 0 && !dropped[md] {
+			if dropping.Load() && md%37 == 0 && !dropped[md] {
 				dropped[md] = true // lose this frame once, as a network would
 				return true
 			}
 			return false
 		})
 	})
+
+	// A lost frame is only noticed when a later one arrives, so if the very
+	// last delta was dropped, nothing would ever reveal it. (A real feed
+	// sends heartbeats carrying the latest md_seq for this.) Stop dropping,
+	// and send one more order that rests at a new price: one more delta.
+	dropping.Store(false)
+	closer := dial(t, s, 200)
+	if err := closer.NewOrder(limit(1, 1, proto.SideBuy, 1, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if m := recv(t, closer, 1)[0]; m.Type != proto.TypeAck {
+		t.Fatalf("closing order: %v", m)
+	}
 
 	// A third subscriber joining now gets a snapshot at the final md_seq.
 	probe := subscribe(t, s, 3, 1, nil)
