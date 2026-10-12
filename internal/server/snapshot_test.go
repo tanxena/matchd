@@ -138,11 +138,22 @@ func TestReplayCheckDetectsDamage(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		tampered := false
 		for i := range st.Instruments { // change one resting quantity, keep the file valid
-			if len(st.Instruments[i].Bids) > 0 {
-				st.Instruments[i].Bids[0].Qty++
-				break
+			is := &st.Instruments[i]
+			switch {
+			case len(is.Bids) > 0:
+				is.Bids[0].Qty++
+			case len(is.Asks) > 0:
+				is.Asks[0].Qty++
+			default:
+				continue
 			}
+			tampered = true
+			break
+		}
+		if !tampered {
+			t.Fatal("newest snapshot holds no orders at all; nothing to tamper with")
 		}
 		if err := os.WriteFile(filepath.Join(dir, "snapshots", newest.File), snapshot.Encode(st), 0o644); err != nil {
 			t.Fatal(err)
@@ -265,5 +276,48 @@ func TestSnapshotWaitsForDurability(t *testing.T) {
 	_ = s.Close()
 	if m, _ := snapshot.ReadManifest(dir); len(m.Snapshots) == 0 {
 		t.Fatal("no snapshot after durability caught up")
+	}
+}
+
+// A crash while the manifest is being replaced can leave it missing (on
+// Windows os.Rename is not atomic). Recovery must still find the snapshots.
+func TestRecoveryWithoutManifest(t *testing.T) {
+	dir := t.TempDir()
+	s1 := start(t, snapshotConfig(dir))
+	for round := range 3 { // several snapshots, so the WAL gets pruned and can't replay alone
+		trade(t, s1, 300, uint64(1+round*1000))
+		time.Sleep(150 * time.Millisecond)
+	}
+	_ = s1.Close()
+	if st := s1.Snapshots(); st.Failed != 0 {
+		t.Fatalf("snapshot writer failures: %+v", st)
+	}
+	m, err := snapshot.ReadManifest(dir)
+	if err != nil || len(m.Snapshots) != snapshot.Keep {
+		t.Fatalf("manifest before the test: %+v %v", m, err)
+	}
+	for _, variant := range []string{"temp file left behind", "nothing left"} {
+		t.Run(variant, func(t *testing.T) {
+			data, _ := os.ReadFile(filepath.Join(dir, "manifest.json"))
+			_ = os.Remove(filepath.Join(dir, "manifest.json"))
+			if variant == "temp file left behind" {
+				if err := os.WriteFile(filepath.Join(dir, "manifest.json.tmp"), data, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := snapshot.ReadManifest(dir)
+			if err != nil || !reflect.DeepEqual(got.Snapshots, m.Snapshots) {
+				t.Fatalf("manifest without manifest.json: %+v %v, want %+v", got.Snapshots, err, m.Snapshots)
+			}
+			s2 := start(t, snapshotConfig(dir))
+			_ = s2.Close()
+			if !reflect.DeepEqual(s2.Engine().State(), s1.Engine().State()) {
+				t.Fatal("state differs after recovering without manifest.json")
+			}
+			_ = os.Remove(filepath.Join(dir, "manifest.json.tmp"))
+			if err := os.WriteFile(filepath.Join(dir, "manifest.json"), data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

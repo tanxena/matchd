@@ -86,7 +86,7 @@ func (w *Writer) write(s *engine.Snapshot) error {
 		return err
 	}
 
-	m, err := ReadManifest(w.DataDir)
+	m, _, err := readPublished(w.DataDir) // not ReadManifest: no directory scan here
 	if err != nil {
 		return err
 	}
