@@ -41,7 +41,7 @@ The publisher keeps, for each instrument, a **price-level view** (price to total
 ```
 client → Subscribe(instrument)
 server → Snapshot(instrument, md_seq = S, levels = n)
-server → SnapshotLevel × n          bids best-first, then asks best-first
+server → SnapshotLevel × n          bids best-first, then asks best-first; streamed by the writer
 server → BookDelta / Trade with md_seq S+1, S+2, …
 ```
 
@@ -75,7 +75,22 @@ It ignores duplicates, and on `ResendUnavailable` it subscribes again. `engctl b
 
 - **Durability:** market-data events go through the same gate as everything else (decision 012). `TestMarketDataWaitsForFsync` holds fsync and sees no delta reach a subscriber.
 - **Slow consumers:** fan-out is a non-blocking offer into each subscriber's session queue, exactly like client routing, and a full queue disconnects (decision 009). `TestSlowMarketDataSubscriber` shows it while a trader keeps trading.
-- **One queue per session:** snapshot frames and resend answers are events too. The publisher creates `EvSnapshotBegin`, `EvSnapshotLevel` and `EvResendUnavailable`; the engine never does. So everything a session sends travels through one ordered queue.
+- **Order within a session:** snapshot and resend answers keep their place among the session's events. The publisher creates two event kinds the engine never does: `EvResendUnavailable`, and `EvSnapshot`, a **marker** for where a snapshot goes. The snapshot's levels don't travel through the queue at all (next section).
+
+### Snapshots are streamed outside the event queue (revised after review)
+
+The first version queued **one event per level**. A book with more levels than the session queue (`OutQueue`, default 4,096) could then never be snapshotted to anyone: every subscriber to it would be disconnected as a slow consumer, however fast it read. Making the queue grow with the book was rejected: memory per session would be unbounded, and the queue size would stop meaning "how far behind a client may fall".
+
+The design now:
+1. On Subscribe, the publisher copies its level view into a sorted, **immutable** `publisher.Snapshot` (it already built this slice to sort the levels). It hands it over with `Subscriber.DeliverSnapshot`, which doesn't block.
+2. The session puts the snapshot on a small side channel (at most 4 pending), and an `EvSnapshot` marker on its normal queue. The marker fixes the snapshot's place in the stream: after every event before it, before every event after it.
+3. When the writer goroutine reaches the marker, it **streams** the header and every level frame straight from the snapshot, with blocking socket writes. Each flush is bounded by `WriteTimeout`. Then it goes back to the queue.
+
+The writer can't read the publisher's own level maps in place: the publisher goroutine keeps changing them, so that would be a data race. The copy is what makes "directly from the book view" safe. It costs O(levels) on the publisher goroutine, the same as the sort.
+
+**What it guarantees:**
+- **A client that can't consume the snapshot is still disconnected.** If it stops reading, a socket write blocks past `WriteTimeout` and the session closes. If the market moves faster than it reads while the snapshot streams, the queue (which holds the events after the snapshot) fills, and it is a slow consumer as before.
+- **A client that can consume it isn't, however deep the book.** A 4,000-level book goes through a 64-event queue (`TestDeepSnapshotBeyondQueue`).
 
 ### engctl names instruments by id (a deviation, chosen with the user)
 
@@ -84,7 +99,8 @@ PRD 5.7 writes `engctl book <symbol>`, but the wire protocol identifies instrume
 ## Costs
 
 - **Memory:** up to about 7.3 MB of ring per active instrument, plus the publisher's level view.
-- **Snapshots of deep books:** each level is one event in the subscriber's session queue (default 4,096), so a book with more levels than the queue can't be snapshotted to that subscriber. It would be disconnected as a slow consumer. Real books are far shallower, and the queue size is configurable.
+- **Snapshots cost a copy:** each subscription copies and sorts the instrument's levels on the publisher goroutine, and that copy lives until the writer has streamed it. A burst of subscriptions to a deep book costs publisher time while the copies are made, and memory until they're streamed.
+- **A slow reader slows only itself, up to `WriteTimeout` per write:** while a snapshot streams, that session's writer sends nothing else. Its queue absorbs live events, and fills if the stream is too slow.
 - **Resend sends everything from the gap to now,** even if the client only missed one message. That's simple and in order, at the cost of some duplicates, which the client ignores.
 - **The event struct grew to 112 bytes** (an `MDSeq` field plus alignment), which every channel and queue pays for.
 - **No unsubscribe message.** A subscription ends when the connection does. It wasn't required, and it's easy to add later.
@@ -93,7 +109,9 @@ PRD 5.7 writes `engctl book <symbol>`, but the wire protocol identifies instrume
 
 | test | shows |
 |---|---|
-| `TestMarketDataConvergence` (**acceptance 4**) | a from-start subscriber; a mid-stream joiner whose Feed drops every 37th md message once (**59 gaps, 59 resends**); and a third subscriber's fresh snapshot all reach the same `md_seq` (4,424) with identical books, which also equal the engine's own book after shutdown |
+| `TestMarketDataConvergence` (**acceptance 4**) | a from-start subscriber; a mid-stream joiner whose Feed drops every 37th md message once while trading runs (in one run, **59 gaps, 59 resends**); and a third subscriber's fresh snapshot all reach the same `md_seq` (about 4,400; it depends on how the two traders interleave) with identical books, which also equal the engine's own book after shutdown |
+| `TestDeepSnapshotBeyondQueue` | a 4,000-level book reaches a subscriber whose queue holds 64 events: all levels, then live data, with no disconnects |
+| `TestDeepSnapshotUnreadDisconnects` | a subscriber to an 8,000-level book that never reads is disconnected by the write deadline; trading carries on |
 | `TestResendBeyondRingResnapshots` | with a 16-event ring, a 40-message hole gets `ResendUnavailable`, the Feed re-subscribes, and still converges |
 | `TestMarketDataAfterRestart` | after a restart, a subscriber's snapshot has the recovered `md_seq` and book, and the next event continues the numbering |
 | `TestMarketDataWaitsForFsync` | no market data before fsync |
@@ -109,4 +127,8 @@ PRD 5.7 writes `engctl book <symbol>`, but the wire protocol identifies instrume
 - a Feed that applies past a gap;
 - market data bypassing the durability gate;
 - `md_seq` not restored at startup;
-- `Close` leaving a snapshot frozen.
+- `Close` leaving a snapshot frozen;
+- a snapshot stream that stops at the queue size (the old limit);
+- snapshot writes without a deadline.
+
+**A test flaw found by repetition:** the convergence test failed 1 run in 20, when the final `md_seq` (4,440 = 37 × 120) was one the joiner dropped. A lost **last** message is only noticed when another one arrives, and none did. The test now stops dropping when trading ends, and sends one more order, whose delta reveals any lost tail. A production feed would send heartbeats carrying the latest `md_seq` for the same reason; v1 has none, so over TCP, where frames aren't lost, it doesn't need them.

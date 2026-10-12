@@ -147,14 +147,14 @@ The layout is persistent: changing it means a new WAL format version.
 ### `internal/publisher/publisher.go`: the gate
 
 - **`MaxPending`** = 65,536 held events.
-- **`Run`** ([publisher.go:172](../../internal/publisher/publisher.go#L172)) selects on three channels:
+- **`Run`** ([publisher.go:179](../../internal/publisher/publisher.go#L179)) selects on three channels:
   - the event channel. It is set to `nil` while 65,536 events are held, so the engine waits; that is the backpressure.
   - `durable.Notify`;
   - `durable.Failed`.
 
   It returns only when its input has closed **and** nothing is still held, or when durability fails.
-- **`release`** ([publisher.go:208](../../internal/publisher/publisher.go#L208)) routes the prefix of held events whose seq is ≤ durable. Seqs never decrease, so the releasable events are always a prefix. It then reuses or compacts the slice so it doesn't grow forever.
-- **`withhold`** ([publisher.go:242](../../internal/publisher/publisher.go#L242)) drops everything held, drains the rest of the engine's output so the engine is never left blocked, counts it in `Withheld`, and logs an error.
+- **`release`** ([publisher.go:215](../../internal/publisher/publisher.go#L215)) routes the prefix of held events whose seq is ≤ durable. Seqs never decrease, so the releasable events are always a prefix. It then reuses or compacts the slice so it doesn't grow forever.
+- **`withhold`** ([publisher.go:249](../../internal/publisher/publisher.go#L249)) drops everything held, drains the rest of the engine's output so the engine is never left blocked, counts it in `Withheld`, and logs an error.
 
 ### `internal/server/server.go`: recovery and failure
 

@@ -110,8 +110,8 @@ The general lesson: **a test of "nothing happened" needs its own test showing it
 - **`InstrumentID`, `Seq`, `Timestamp`** ([types.go:22–31](../../internal/engine/types.go#L22)). Named integer types, as in milestone 1. Instrument id 0 is never valid.
 - **`CommandKind`, `Command`** ([types.go:34, 58](../../internal/engine/types.go#L58)). One flat struct (104 bytes) for every command kind; fields a kind doesn't use stay zero. `Client` is set by the gateway from the logged-in session (milestone 3), never taken from the frame payload, which is what makes owner-scoped cancel secure.
 - **`EventKind`** ([types.go:81](../../internal/engine/types.go#L81)). Each constant's comment states its contract, for example "`EvAck`: always the first event for an accepted order".
-- **`Role`, `CancelReason`** ([types.go:147, 155](../../internal/engine/types.go#L147)). Taker or maker; requested or expired.
-- **`Event`** ([types.go:169](../../internal/engine/types.go#L169)). One flat, pointer-free struct (96 bytes in milestone 2; 112 since milestone 6 added `MDSeq`). `Qty` means a different thing per kind: order qty for an ack, matched qty for a fill, qty removed for a cancel, the level's new total for a delta. The comment on the field says so. `Leaves` is a party's open quantity after a fill.
+- **`Role`, `CancelReason`** ([types.go:145, 153](../../internal/engine/types.go#L145)). Taker or maker; requested or expired.
+- **`Event`** ([types.go:167](../../internal/engine/types.go#L167)). One flat, pointer-free struct (96 bytes in milestone 2; 112 since milestone 6 added `MDSeq`). `Qty` means a different thing per kind: order qty for an ack, matched qty for a fill, qty removed for a cancel, the level's new total for a delta. The comment on the field says so. `Leaves` is a party's open quantity after a fill.
 
 ### `internal/engine/engine.go`: the engine
 

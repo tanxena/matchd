@@ -56,7 +56,7 @@ Market data is subject to the same rule as everything else ([decision 012](../de
 - In **`newOrder`**, each match now appends three events: the taker's fill, the maker's fill, and an **`EvTrade`** print (client 0, aggressor side, match id, `md_seq`).
 - **`Snapshot`/`State`/`Restore`** carry each instrument's `MDSeq`.
 - **`snapshot.Encode`/`Decode`** write it after the lot size, which is why the snapshot file format is now **version 2**.
-- **New event kinds:** `EvTrade` (7), plus three the **publisher** creates: `EvSnapshotBegin` (8), `EvSnapshotLevel` (9) and `EvResendUnavailable` (10).
+- **New event kinds:** `EvTrade` (7), plus two the **publisher** creates: `EvSnapshot` (8), a marker for where a snapshot goes in a session's stream, and `EvResendUnavailable` (9).
 - `Event` gained an `MDSeq` field, bringing it to **112 bytes**.
 
 ### Protocol: five messages
@@ -86,18 +86,25 @@ There is also a new reject reason, `ResendUnavailable` (105). Each message is st
   - unknown instrument: an `EvReject` with `UnknownInstrument`;
   - subscribe: `sendSnapshot`, then add to `subs`;
   - resend: nothing if the request is beyond the latest; `EvResendUnavailable` if it's older than the ring; otherwise every ring event from `from` to the latest.
-- **`sendSnapshot`** ([marketdata.go:138](../../internal/publisher/marketdata.go#L138)) sorts the levels (bids high to low, asks low to high), then offers `EvSnapshotBegin` followed by one `EvSnapshotLevel` each.
-- **`marketData`** ([marketdata.go:169](../../internal/publisher/marketdata.go#L169)) is called from `route` for each released delta or trade:
+- **`Snapshot`** ([marketdata.go:140](../../internal/publisher/marketdata.go#L140)) is an immutable copy of one instrument's levels at an `md_seq`. **`sendSnapshot`** ([marketdata.go:155](../../internal/publisher/marketdata.go#L155)) builds it, sorted (bids high to low, asks low to high), and hands it over with `Subscriber.DeliverSnapshot`. The levels never go through the event queue, so a deep book doesn't need a deep queue.
+- **`marketData`** ([marketdata.go:177](../../internal/publisher/marketdata.go#L177)) is called from `route` for each released delta or trade:
   1. check the `md_seq` follows the last (logging loudly if not);
   2. apply a delta to the level map;
   3. store the event in the ring;
   4. offer it to every subscriber, dropping closed ones and slow ones.
-- **`offer`** ([marketdata.go:216](../../internal/publisher/marketdata.go#L216)) is a non-blocking deliver; on failure it counts a slow consumer and calls `SlowConsumer()`.
+- **`offer`** ([marketdata.go:224](../../internal/publisher/marketdata.go#L224)) is a non-blocking deliver; on failure it counts a slow consumer and calls `SlowConsumer()`.
 - `route` (in `publisher.go`) now sends deltas and trades to `marketData`, and creates a view on `InstrumentAdded`. `Subscriber` gained **`Closed()`**, and `SlowConsumer` must now be idempotent, because it can be called from both client routing and market-data fan-out.
 
 ### Gateway
 
-The reader handles `Subscribe` by calling `pub.Subscribe(instrument, session)`, **without requiring login**, and `Resend` by calling `pub.Resend(...)`. `session` implements `Closed()`. **`appendEvent`** encodes `BookDelta`, `Trade`, the snapshot header and levels, and `ResendUnavailable`, which goes out as a `Reject` with reason 105.
+The reader handles `Subscribe` by calling `pub.Subscribe(instrument, session)`, **without requiring login**, and `Resend` by calling `pub.Resend(...)`. `session` implements `Closed()`. **`appendEvent`** encodes `BookDelta`, `Trade` and `ResendUnavailable`, which goes out as a `Reject` with reason 105.
+
+**Snapshots are streamed by the writer, outside the queue.**
+- **`DeliverSnapshot`** ([session.go:91](../../internal/gateway/session.go#L91)) puts the snapshot on a small side channel `snaps` (at most 4 pending), then an `EvSnapshot` marker on `out`. It never blocks.
+- When the writer reaches the marker, **`streamSnapshot`** ([session.go:366](../../internal/gateway/session.go#L366)) takes the snapshot and writes the header and every level frame from it.
+- **`write`** ([session.go:395](../../internal/gateway/session.go#L395)) flushes under the write deadline whenever the buffer is full, so a client that stops reading is disconnected after `WriteTimeout`, while one that reads gets the whole book, however deep. Live events published meanwhile wait in `out`.
+
+The first version queued one event per level, so a book deeper than the queue (4,096 by default) disconnected every subscriber, even fast ones. Streaming fixed that without making the queue grow.
 
 ### Server
 
@@ -129,13 +136,18 @@ At startup, for each recovered instrument, `Start` sums the resting orders per p
 
 ### Tests and results
 
-- **`TestMarketDataConvergence`** ([marketdata_test.go:160](../../internal/server/marketdata_test.go#L160)) is **acceptance 4**:
+- **`TestMarketDataConvergence`** ([marketdata_test.go:161](../../internal/server/marketdata_test.go#L161)) is **acceptance 4**:
   - two traders send 1,500 orders each, waiting for each answer;
   - subscriber A joins before trading starts;
   - halfway through, subscriber B joins, with a Feed that **drops every 37th** delta or trade, once;
-  - after trading, subscriber C joins fresh to learn the final `md_seq`.
+  - after trading, dropping stops and one more order rests (its delta reveals a lost tail; see below);
+  - then subscriber C joins fresh to learn the final `md_seq`.
 
-  Result: final `md_seq` 4,424; B went through **59 gaps and 59 resends**; A, B and C have **identical books**, which also equal the engine's own book after shutdown.
+  Result, in one run: final `md_seq` 4,424; B went through **59 gaps and 59 resends**; A, B and C have **identical books**, which also equal the engine's own book after shutdown. The final number varies a little from run to run with how the two traders interleave.
+
+  **A test flaw found by running it 20 times:** one run's final `md_seq` was 4,440 = 37 × 120, so B dropped the *last* message, and nothing after it ever revealed the gap. That's why the closing order exists. Real feeds send heartbeats carrying the latest `md_seq` to catch exactly this.
+- **`TestDeepSnapshotBeyondQueue`** ([deepsnapshot_test.go:41](../../internal/server/deepsnapshot_test.go#L41)): a 4,000-level book reaches a subscriber whose queue holds 64 events. It gets all levels, then the next trade and delta; nobody is disconnected.
+- **`TestDeepSnapshotUnreadDisconnects`** ([deepsnapshot_test.go:76](../../internal/server/deepsnapshot_test.go#L76)): a subscriber to an 8,000-level book that never reads is disconnected by the 300 ms write deadline; a trader keeps getting acks.
 - **`TestResendBeyondRingResnapshots`:** with `MDRing = 16`, B drops 40 consecutive messages. The resend is refused, B re-subscribes, and it still converges (1 re-snapshot).
 - **`TestMarketDataAfterRestart`:** a subscriber after a restart sees the recovered book at the recovered `md_seq`, and the next event continues the numbering.
 - **`TestMarketDataWaitsForFsync`:** with fsync held, no delta reaches a subscriber.
@@ -176,6 +188,8 @@ BookDelta md=7 inst=1 sell 102 -> qty 2
 4. **The publisher builds snapshots from unreleased events.** Under group commit the engine is up to about 1 ms ahead of the disk. A snapshot built from the engine's live book would show orders whose commands aren't durable. If the power then failed, the recovered exchange would never have had those orders, but the subscriber would show them. Building snapshots only from **released** deltas makes that impossible. *Planted variant*, where market data skips the gate: caught by `TestMarketDataWaitsForFsync`.
 
 5. **Shutdown leaves a snapshot frozen.** *Real, found by a test this milestone:* `Close` while a snapshot was in flight left every book frozen, because the engine had stopped before receiving the snapshot back. Nothing broke immediately. But any later use of the engine, here reading its state after `Close` (and, in milestone 7, snapshot-on-shutdown), panicked with "Freeze while a snapshot is still in progress". `Close` now thaws it.
+
+6. **Snapshot levels go through the bounded event queue.** That was this milestone's first design. A 5,000-level book and a 4,096-event queue: every subscriber, however fast, is disconnected as a slow consumer before the snapshot finishes, and the book can't be watched by anyone. Growing the queue would let one client's snapshot take unbounded memory. *Planted variant*, a stream that stops at the queue's size: the deep-book test's subscriber never goes live.
 
 ---
 
