@@ -180,9 +180,25 @@ func TestReplayCheckDetectsDamage(t *testing.T) {
 	})
 	t.Run("WAL ends before the newest snapshot", func(t *testing.T) {
 		dir := setup(t)
-		segs, _ := filepath.Glob(filepath.Join(dir, "wal", "*.log"))
-		if err := os.Remove(segs[len(segs)-1]); err != nil { // lose the newest records
-			t.Fatal(err)
+		m, _ := snapshot.ReadManifest(dir)
+		newest := m.Snapshots[len(m.Snapshots)-1].Seq
+		// Remove the segment holding the newest snapshot's seq and every
+		// segment after it, so the WAL certainly ends before the snapshot.
+		// (Removing just the last segment isn't enough: if it only holds
+		// records after the snapshot, the WAL still covers it, and
+		// replay-check is right to pass.)
+		segs, _ := filepath.Glob(filepath.Join(dir, "wal", "*.log")) // sorted: names are zero-padded first seqs
+		cut := 0
+		for i, seg := range segs {
+			first, _ := strconv.ParseUint(strings.TrimSuffix(filepath.Base(seg), ".log"), 10, 64)
+			if first <= newest {
+				cut = i
+			}
+		}
+		for _, seg := range segs[cut:] {
+			if err := os.Remove(seg); err != nil {
+				t.Fatal(err)
+			}
 		}
 		if _, err := snapshot.ReplayCheck(dir); err == nil {
 			t.Fatal("missing WAL tail not detected")

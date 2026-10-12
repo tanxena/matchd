@@ -332,12 +332,12 @@ func TestProtocolErrorsCloseOnlyThatConnection(t *testing.T) {
 	waitForLog(t, s, "protocol error")
 }
 
-func TestSubscribeUnsupportedAndHeartbeat(t *testing.T) {
+func TestSubscribeAndHeartbeat(t *testing.T) {
 	s := start(t, nil)
 	c := dial(t, s, 1)
 	_ = c.Subscribe(proto.Subscribe{Instrument: 1})
-	if m := recv(t, c, 1)[0]; m.Type != proto.TypeReject || m.Reject.Reason != proto.ReasonUnsupported {
-		t.Fatalf("subscribe: %v", m)
+	if m := recv(t, c, 1)[0]; m.Type != proto.TypeSnapshot || m.Snapshot.Levels != 0 || m.Snapshot.MDSeq != 0 {
+		t.Fatalf("subscribe to an empty book: %v", m)
 	}
 	_ = c.Heartbeat() // the connection is still usable
 	if m := recv(t, c, 1)[0]; m.Type != proto.TypeHeartbeat {

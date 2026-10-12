@@ -35,6 +35,9 @@ type Config struct {
 	// disables snapshots.
 	SnapshotEvery    uint64
 	SnapshotInterval time.Duration
+	// MDRing is each instrument's market-data resend window, in events.
+	// 0 = publisher.DefaultRingSize (65,536; decision 016).
+	MDRing int
 	// Fsync is the durability policy. Zero value = always.
 	Fsync sequencer.Policy
 	// WAL options (segment size; tests inject file wrappers here).
@@ -62,9 +65,10 @@ type Server struct {
 	done    chan struct{} // closed when the publisher goroutine has finished
 	log     *slog.Logger
 
-	seqErr    error         // the sequencer's result; written before done is closed
-	snapDone  chan struct{} // closed when the snapshot writer has finished
-	ticker    *time.Ticker  // snapshot time trigger (nil if disabled)
+	seqErr    error                 // the sequencer's result; written before done is closed
+	snapDone  chan struct{}         // closed when the snapshot writer has finished
+	snapBack  chan *engine.Snapshot // writer -> engine; Close thaws what the engine didn't
+	ticker    *time.Ticker          // snapshot time trigger (nil if disabled)
 	closeOnce sync.Once
 	closeErr  error
 }
@@ -165,6 +169,15 @@ func Start(cfg Config) (*Server, error) {
 		done:    make(chan struct{}),
 		log:     cfg.Log,
 	}
+	// Market data starts from the recovered books: each instrument's levels
+	// and md_seq, so a subscriber after a restart sees exactly the recovered
+	// book and numbering continues where it left off.
+	s.pub.SetRingSize(cfg.MDRing)
+	for i, is := range eng.State().Instruments {
+		bids, asks := levelTotals(is.Bids), levelTotals(is.Asks)
+		s.pub.InitMarketData(engine.InstrumentID(i+1), is.MDSeq, bids, asks)
+	}
+
 	sequenced := make(chan engine.Command, cfg.CommandQueue) // sequencer -> engine
 	events := make(chan engine.Event, cfg.EventQueue)        // engine -> publisher
 
@@ -187,8 +200,9 @@ func Start(cfg Config) (*Server, error) {
 	var hooks *engine.SnapshotHooks
 	s.snapDone = make(chan struct{})
 	if cfg.SnapshotEvery > 0 || cfg.SnapshotInterval > 0 {
-		snapOut := make(chan *engine.Snapshot, 1)  // engine -> writer; at most one in flight
-		snapBack := make(chan *engine.Snapshot, 1) // writer -> engine, for Thaw
+		snapOut := make(chan *engine.Snapshot, 1)   // engine -> writer; at most one in flight
+		s.snapBack = make(chan *engine.Snapshot, 1) // writer -> engine, for Thaw
+		snapBack := s.snapBack
 		hooks = &engine.SnapshotHooks{Every: cfg.SnapshotEvery, Out: snapOut, Done: snapBack}
 		if cfg.SnapshotInterval > 0 {
 			s.ticker = time.NewTicker(cfg.SnapshotInterval)
@@ -237,6 +251,16 @@ func (s *Server) Close() error {
 		close(s.cmds)
 		<-s.done
 		<-s.snapDone
+		// A snapshot in flight when the engine stopped comes back after the
+		// engine goroutine has exited; thaw it here (safe now: nothing else
+		// touches the engine), or its books would stay frozen.
+		if s.snapBack != nil {
+			select {
+			case snap := <-s.snapBack:
+				s.eng.Thaw(snap)
+			default:
+			}
+		}
 		if s.ticker != nil {
 			s.ticker.Stop()
 		}
@@ -271,3 +295,12 @@ func (s *Server) Publisher() *publisher.Publisher { return s.pub }
 // Engine returns the engine. It belongs to the engine goroutine while the
 // server runs: only use it after Close has returned.
 func (s *Server) Engine() *engine.Engine { return s.eng }
+
+// levelTotals sums resting quantity per price.
+func levelTotals(orders []book.RestingOrder) map[book.Price]book.Qty {
+	m := make(map[book.Price]book.Qty)
+	for _, r := range orders {
+		m[r.Price] += r.Qty
+	}
+	return m
+}
