@@ -36,11 +36,14 @@ func (f *fakeSub) Deliver(ev engine.Event) bool {
 	}
 }
 
-func (f *fakeSub) SlowConsumer() {
-	called := false
-	f.once.Do(func() { close(f.slow); called = true })
-	if !called {
-		panic("SlowConsumer called twice")
+func (f *fakeSub) SlowConsumer() { f.once.Do(func() { close(f.slow) }) }
+
+func (f *fakeSub) Closed() bool {
+	select {
+	case <-f.slow:
+		return true
+	default:
+		return false
 	}
 }
 

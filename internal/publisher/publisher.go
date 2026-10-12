@@ -2,13 +2,16 @@
 // to (decision 009).
 //
 // It does two jobs:
+//
 //   - Durability gating (milestone 4, decision 012): an event is released
 //     only once the command that caused it is on disk. Events wait in a
 //     FIFO queue until the durable seq covers them.
+//
 //   - Routing (milestone 3, decision 009): each released event goes to its
 //     client's session, never blocking on a slow one.
 //
-// Market-data subscribers arrive in milestone 6.
+//   - Market data (milestone 6, decision 016, marketdata.go): per-instrument
+//     snapshots, deltas and trades to subscribers, and resends.
 //
 // The rule that shapes this package: the publisher must never block. The
 // engine sends events to it on a channel; if the publisher waited on one
@@ -47,9 +50,13 @@ type Subscriber interface {
 	// it returns false at once if the queue is full.
 	Deliver(ev engine.Event) bool
 	// SlowConsumer tells the session it fell too far behind. The session
-	// must disconnect. Called at most once per registration, from the
-	// publisher goroutine, after the session has been unregistered.
+	// must disconnect. Called from the publisher goroutine; it may be called
+	// more than once (from client routing and from market-data fan-out), so
+	// it must be idempotent.
 	SlowConsumer()
+	// Closed reports whether the session has gone away, so market-data
+	// subscriptions can be dropped.
+	Closed() bool
 }
 
 type registry = map[book.ClientID]Subscriber
@@ -86,16 +93,39 @@ type Publisher struct {
 	slowConsumers atomic.Uint64
 	held          atomic.Int64  // events currently waiting for durability
 	withheld      atomic.Uint64 // events never released because durability failed
+	subscriptions atomic.Uint64 // market-data subscriptions served
+	snapshotsSent atomic.Uint64
+	resends       atomic.Uint64 // Resend requests received
+	resendMisses  atomic.Uint64 // ... answered ResendUnavailable
+
+	// Market data. md is owned by the Run goroutine. requests carries
+	// Subscribe/Resend from gateway goroutines to Run; stopped is closed
+	// when Run returns, so a request never blocks after shutdown.
+	md       map[engine.InstrumentID]*mdBook
+	ringSize int
+	requests chan request
+	stopped  chan struct{}
 }
 
 // New returns a publisher with no clients. Events are released only once
 // d covers their seq; d == nil releases them immediately. Every released
 // event is also given to fills, if non-nil.
 func New(log *slog.Logger, d *durable.Seq, fills FillRecorder) *Publisher {
-	p := &Publisher{log: log, durable: d, fills: fills, pending: make([]engine.Event, 0, 1024)}
+	p := &Publisher{
+		log: log, durable: d, fills: fills, pending: make([]engine.Event, 0, 1024),
+		md: map[engine.InstrumentID]*mdBook{}, ringSize: DefaultRingSize,
+		requests: make(chan request, 256), stopped: make(chan struct{}),
+	}
 	empty := registry{}
 	p.clients.Store(&empty)
 	return p
+}
+
+// SetRingSize sets the per-instrument resend window. Call before Run.
+func (p *Publisher) SetRingSize(n int) {
+	if n > 0 {
+		p.ringSize = n
+	}
 }
 
 // Register makes s the session for client id. It returns false, changing
@@ -140,6 +170,7 @@ func (p *Publisher) Unregister(id book.ClientID, s Subscriber) {
 // and every held event has been released, or once durability has failed
 // (after which nothing is released, ever).
 func (p *Publisher) Run(events <-chan engine.Event) {
+	defer close(p.stopped)
 	var notify <-chan struct{}
 	var failed <-chan struct{}
 	if p.durable != nil {
@@ -164,6 +195,8 @@ func (p *Publisher) Run(events <-chan engine.Event) {
 			p.release()
 		case <-notify:
 			p.release()
+		case r := <-p.requests:
+			p.handle(r)
 		case <-failed:
 			p.withhold(events)
 			return
@@ -221,10 +254,17 @@ func (p *Publisher) withhold(events <-chan engine.Event) {
 }
 
 func (p *Publisher) route(ev engine.Event) {
-	if ev.Client == 0 {
-		// Book deltas (market data, milestone 6) and startup admin
-		// commands have no client.
+	switch ev.Kind {
+	case engine.EvBookDelta, engine.EvTrade:
+		p.marketData(&ev)
 		return
+	case engine.EvInstrumentAdded:
+		if p.md[ev.Instrument] == nil {
+			p.md[ev.Instrument] = newMDBook(0)
+		}
+	}
+	if ev.Client == 0 {
+		return // startup and admin commands have no client to answer
 	}
 	s := (*p.clients.Load())[ev.Client]
 	if s == nil {
@@ -251,6 +291,10 @@ type Stats struct {
 	SlowConsumers uint64
 	Held          int64  // waiting for durability right now
 	Withheld      uint64 // never released because durability failed
+	Subscriptions uint64
+	SnapshotsSent uint64
+	Resends       uint64
+	ResendMisses  uint64
 }
 
 // Stats returns the current counters. Safe from any goroutine.
@@ -261,5 +305,9 @@ func (p *Publisher) Stats() Stats {
 		SlowConsumers: p.slowConsumers.Load(),
 		Held:          p.held.Load(),
 		Withheld:      p.withheld.Load(),
+		Subscriptions: p.subscriptions.Load(),
+		SnapshotsSent: p.snapshotsSent.Load(),
+		Resends:       p.resends.Load(),
+		ResendMisses:  p.resendMisses.Load(),
 	}
 }

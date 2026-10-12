@@ -73,6 +73,16 @@ func (s *session) Deliver(ev engine.Event) bool {
 	}
 }
 
+// Closed implements publisher.Subscriber.
+func (s *session) Closed() bool {
+	select {
+	case <-s.done:
+		return true
+	default:
+		return false
+	}
+}
+
 // SlowConsumer implements publisher.Subscriber.
 func (s *session) SlowConsumer() {
 	s.close(fmt.Sprintf("slow consumer: outbound queue full (%d events)", cap(s.out)))
@@ -126,6 +136,7 @@ func (s *session) readLoop() {
 		order  proto.NewOrder
 		cancel proto.Cancel
 		sub    proto.Subscribe
+		resend proto.Resend
 	)
 	for {
 		if s.g.cfg.IdleTimeout > 0 {
@@ -186,11 +197,15 @@ func (s *session) readLoop() {
 			if decodeErr = sub.Decode(payload); decodeErr != nil {
 				break
 			}
-			// Market data arrives in milestone 6. Until then: a clear,
-			// non-fatal answer.
-			if !s.reply(control{typ: proto.TypeReject, reject: proto.Reject{Instrument: sub.Instrument, Reason: proto.ReasonUnsupported}}) {
-				return
+			// Market data is public: no login needed. The publisher answers
+			// with a snapshot, then streams deltas and trades.
+			s.g.pub.Subscribe(engine.InstrumentID(sub.Instrument), s)
+
+		case proto.TypeResend:
+			if decodeErr = resend.Decode(payload); decodeErr != nil {
+				break
 			}
+			s.g.pub.Resend(engine.InstrumentID(resend.Instrument), resend.FromMDSeq, s)
 
 		case proto.TypeHeartbeat:
 			if decodeErr = proto.DecodeHeartbeat(payload); decodeErr != nil {
@@ -315,9 +330,10 @@ func (s *session) flush(bw *bufio.Writer) error {
 	return bw.Flush()
 }
 
-// appendEvent encodes an engine event as its wire message. Only events with
-// a client are ever queued to a session (the publisher skips the rest), so
-// BookDelta and InstrumentAdded can't arrive here; they encode to nothing.
+// appendEvent encodes an event as its wire message: the engine's events for
+// this client, and market data (deltas, trades, and the publisher's
+// snapshot and resend answers). InstrumentAdded is never queued to a
+// session; it encodes to nothing.
 func appendEvent(dst []byte, ev *engine.Event) []byte {
 	switch ev.Kind {
 	case engine.EvAck:
@@ -339,6 +355,24 @@ func appendEvent(dst []byte, ev *engine.Event) []byte {
 			Side: uint8(ev.Side), Role: uint8(ev.Role),
 			Price: int64(ev.Price), Qty: int64(ev.Qty), Leaves: int64(ev.Leaves),
 		})
+	case engine.EvBookDelta:
+		return proto.AppendBookDelta(dst, &proto.BookDelta{
+			Seq: uint64(ev.Seq), Time: int64(ev.Time), Instrument: uint32(ev.Instrument), MDSeq: ev.MDSeq,
+			Side: uint8(ev.Side), Price: int64(ev.Price), Qty: int64(ev.Qty),
+		})
+	case engine.EvTrade:
+		return proto.AppendTrade(dst, &proto.Trade{
+			Seq: uint64(ev.Seq), Time: int64(ev.Time), Instrument: uint32(ev.Instrument), MDSeq: ev.MDSeq,
+			MatchID: ev.MatchID, Side: uint8(ev.Side), Price: int64(ev.Price), Qty: int64(ev.Qty),
+		})
+	case engine.EvSnapshotBegin:
+		return proto.AppendSnapshot(dst, &proto.Snapshot{Instrument: uint32(ev.Instrument), MDSeq: ev.MDSeq, Levels: uint32(ev.Qty)})
+	case engine.EvSnapshotLevel:
+		return proto.AppendSnapshotLevel(dst, &proto.SnapshotLevel{
+			Instrument: uint32(ev.Instrument), Side: uint8(ev.Side), Price: int64(ev.Price), Qty: int64(ev.Qty),
+		})
+	case engine.EvResendUnavailable:
+		return proto.AppendReject(dst, &proto.Reject{Instrument: uint32(ev.Instrument), Reason: proto.ReasonResendUnavailable})
 	case engine.EvCancelled:
 		return proto.AppendCancelAck(dst, &proto.CancelAck{
 			Seq: uint64(ev.Seq), Time: int64(ev.Time), Instrument: uint32(ev.Instrument),

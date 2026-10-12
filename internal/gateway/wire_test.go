@@ -96,11 +96,43 @@ func TestAppendEvent(t *testing.T) {
 		t.Errorf("cancel ack: %v %+v", typ, ca)
 	}
 
-	for _, k := range []engine.EventKind{engine.EvBookDelta, engine.EvInstrumentAdded} {
-		e = base
-		e.Kind = k
-		if b := appendEvent(nil, &e); len(b) != 0 {
-			t.Errorf("%v encoded to %d bytes; it must never reach a client session", k, len(b))
-		}
+	// Market data.
+	e = engine.Event{Kind: engine.EvBookDelta, Seq: 7, Time: 99, Instrument: 3, MDSeq: 41, Side: book.Buy, Price: 100, Qty: 12}
+	typ, p = frame(e)
+	var bd proto.BookDelta
+	if typ != proto.TypeBookDelta || bd.Decode(p) != nil ||
+		bd != (proto.BookDelta{Seq: 7, Time: 99, Instrument: 3, MDSeq: 41, Side: proto.SideBuy, Price: 100, Qty: 12}) {
+		t.Errorf("book delta: %v %+v", typ, bd)
+	}
+	e = engine.Event{Kind: engine.EvTrade, Seq: 7, Time: 99, Instrument: 3, MDSeq: 42, MatchID: 5, Side: book.Sell, Price: 100, Qty: 2}
+	typ, p = frame(e)
+	var tr proto.Trade
+	if typ != proto.TypeTrade || tr.Decode(p) != nil ||
+		tr != (proto.Trade{Seq: 7, Time: 99, Instrument: 3, MDSeq: 42, MatchID: 5, Side: proto.SideSell, Price: 100, Qty: 2}) {
+		t.Errorf("trade: %v %+v", typ, tr)
+	}
+	e = engine.Event{Kind: engine.EvSnapshotBegin, Instrument: 3, MDSeq: 42, Qty: 6}
+	typ, p = frame(e)
+	var sn proto.Snapshot
+	if typ != proto.TypeSnapshot || sn.Decode(p) != nil || sn != (proto.Snapshot{Instrument: 3, MDSeq: 42, Levels: 6}) {
+		t.Errorf("snapshot: %v %+v", typ, sn)
+	}
+	e = engine.Event{Kind: engine.EvSnapshotLevel, Instrument: 3, Side: book.Sell, Price: 101, Qty: 9}
+	typ, p = frame(e)
+	var sl proto.SnapshotLevel
+	if typ != proto.TypeSnapshotLevel || sl.Decode(p) != nil || sl != (proto.SnapshotLevel{Instrument: 3, Side: proto.SideSell, Price: 101, Qty: 9}) {
+		t.Errorf("snapshot level: %v %+v", typ, sl)
+	}
+	e = engine.Event{Kind: engine.EvResendUnavailable, Instrument: 3, MDSeq: 10}
+	typ, p = frame(e)
+	var ru proto.Reject
+	if typ != proto.TypeReject || ru.Decode(p) != nil || ru.Reason != proto.ReasonResendUnavailable || ru.Instrument != 3 {
+		t.Errorf("resend unavailable: %v %+v", typ, ru)
+	}
+
+	e = base
+	e.Kind = engine.EvInstrumentAdded
+	if b := appendEvent(nil, &e); len(b) != 0 {
+		t.Errorf("InstrumentAdded encoded to %d bytes; it must never reach a client session", len(b))
 	}
 }
