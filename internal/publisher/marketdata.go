@@ -133,32 +133,40 @@ func (p *Publisher) handle(r request) {
 	}
 }
 
-// sendSnapshot delivers the instrument's levels as of mb.mdSeq: a header,
-// then bids best-first, then asks best-first.
+// Snapshot is one instrument's market-data book as of MDSeq: bids best
+// first, then asks best first. The publisher builds a fresh one for each
+// subscription and never touches it again, so the session's writer can read
+// it without locks while the publisher goes on changing its own view.
+type Snapshot struct {
+	Instrument engine.InstrumentID
+	MDSeq      uint64
+	Levels     []Level
+}
+
+// Level is one price level's total resting quantity.
+type Level struct {
+	Side  book.Side
+	Price book.Price
+	Qty   book.Qty
+}
+
+// sendSnapshot copies the instrument's levels as of mb.mdSeq, sorted, and
+// hands them to the subscriber to stream.
 func (p *Publisher) sendSnapshot(mb *mdBook, id engine.InstrumentID, s Subscriber) bool {
-	type lvl struct {
-		side book.Side
-		px   book.Price
-		qty  book.Qty
-	}
-	levels := make([]lvl, 0, len(mb.bids)+len(mb.asks))
+	levels := make([]Level, 0, len(mb.bids)+len(mb.asks))
 	for px, q := range mb.bids {
-		levels = append(levels, lvl{book.Buy, px, q})
+		levels = append(levels, Level{book.Buy, px, q})
 	}
-	slices.SortFunc(levels, func(a, b lvl) int { return cmp.Compare(b.px, a.px) }) // highest bid first
+	slices.SortFunc(levels, func(a, b Level) int { return cmp.Compare(b.Price, a.Price) }) // highest bid first
 	nb := len(levels)
 	for px, q := range mb.asks {
-		levels = append(levels, lvl{book.Sell, px, q})
+		levels = append(levels, Level{book.Sell, px, q})
 	}
-	slices.SortFunc(levels[nb:], func(a, b lvl) int { return cmp.Compare(a.px, b.px) }) // lowest ask first
+	slices.SortFunc(levels[nb:], func(a, b Level) int { return cmp.Compare(a.Price, b.Price) }) // lowest ask first
 
-	if !p.offer(s, engine.Event{Kind: engine.EvSnapshotBegin, Instrument: id, MDSeq: mb.mdSeq, Qty: book.Qty(len(levels))}) {
+	if !s.DeliverSnapshot(&Snapshot{Instrument: id, MDSeq: mb.mdSeq, Levels: levels}) {
+		p.slow(s, id, mb.mdSeq)
 		return false
-	}
-	for _, l := range levels {
-		if !p.offer(s, engine.Event{Kind: engine.EvSnapshotLevel, Instrument: id, Side: l.side, Price: l.px, Qty: l.qty}) {
-			return false
-		}
 	}
 	p.snapshotsSent.Add(1)
 	return true
@@ -218,8 +226,13 @@ func (p *Publisher) offer(s Subscriber, ev engine.Event) bool {
 		p.delivered.Add(1)
 		return true
 	}
-	p.slowConsumers.Add(1)
-	p.log.Warn("slow market-data consumer disconnected", "instrument", ev.Instrument, "md_seq", ev.MDSeq)
-	s.SlowConsumer()
+	p.slow(s, ev.Instrument, ev.MDSeq)
 	return false
+}
+
+// slow disconnects a market-data subscriber that couldn't take more.
+func (p *Publisher) slow(s Subscriber, id engine.InstrumentID, mdSeq uint64) {
+	p.slowConsumers.Add(1)
+	p.log.Warn("slow market-data consumer disconnected", "instrument", id, "md_seq", mdSeq)
+	s.SlowConsumer()
 }

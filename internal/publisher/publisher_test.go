@@ -36,6 +36,11 @@ func (f *fakeSub) Deliver(ev engine.Event) bool {
 	}
 }
 
+// DeliverSnapshot queues the snapshot's marker, as a session does.
+func (f *fakeSub) DeliverSnapshot(s *Snapshot) bool {
+	return f.Deliver(engine.Event{Kind: engine.EvSnapshot, Instrument: s.Instrument, MDSeq: s.MDSeq, Qty: book.Qty(len(s.Levels))})
+}
+
 func (f *fakeSub) SlowConsumer() { f.once.Do(func() { close(f.slow) }) }
 
 func (f *fakeSub) Closed() bool {

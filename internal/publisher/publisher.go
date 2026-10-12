@@ -49,6 +49,13 @@ type Subscriber interface {
 	// Deliver offers ev to the session's outbound queue. It must not block:
 	// it returns false at once if the queue is full.
 	Deliver(ev engine.Event) bool
+	// DeliverSnapshot hands the session a market-data snapshot to stream to
+	// its client, in order with Deliver: after every event delivered before
+	// it, before every event delivered after it. It must not block, and
+	// returns false if the session can't take it. The session streams the
+	// levels itself, with backpressure, instead of queueing one event per
+	// level, so a book deeper than the queue still fits (decision 016).
+	DeliverSnapshot(s *Snapshot) bool
 	// SlowConsumer tells the session it fell too far behind. The session
 	// must disconnect. Called from the publisher goroutine; it may be called
 	// more than once (from client routing and from market-data fan-out), so

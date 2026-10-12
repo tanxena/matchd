@@ -104,17 +104,17 @@ const (
 	// EvFill events.
 	EvTrade EventKind = 7
 
-	// Kinds the publisher creates (never the engine), so that everything a
-	// session sends travels through its one queue of Events (decision 016).
+	// Kinds the publisher creates (never the engine), so that a session's
+	// answers keep their place in its one ordered queue (decision 016).
 
-	// EvSnapshotBegin starts a market-data snapshot for Instrument at
-	// MDSeq; Qty is how many EvSnapshotLevel events follow.
-	EvSnapshotBegin EventKind = 8
-	// EvSnapshotLevel is one price level of a snapshot: Side, Price, Qty.
-	EvSnapshotLevel EventKind = 9
+	// EvSnapshot marks where a market-data snapshot for Instrument at MDSeq
+	// goes in a session's stream. The levels don't travel as events: the
+	// session's writer streams them from the publisher's copy when it
+	// reaches this marker, so a deep book doesn't need a deep queue.
+	EvSnapshot EventKind = 8
 	// EvResendUnavailable: a Resend asked for MDSeq values the ring buffer
 	// no longer holds; the client must subscribe again for a snapshot.
-	EvResendUnavailable EventKind = 10
+	EvResendUnavailable EventKind = 9
 )
 
 func (k EventKind) String() string {
@@ -133,10 +133,8 @@ func (k EventKind) String() string {
 		return "InstrumentAdded"
 	case EvTrade:
 		return "Trade"
-	case EvSnapshotBegin:
-		return "SnapshotBegin"
-	case EvSnapshotLevel:
-		return "SnapshotLevel"
+	case EvSnapshot:
+		return "Snapshot"
 	case EvResendUnavailable:
 		return "ResendUnavailable"
 	}

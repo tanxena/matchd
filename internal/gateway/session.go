@@ -12,7 +12,13 @@ import (
 	"github.com/tanxena/matchd/internal/book"
 	"github.com/tanxena/matchd/internal/engine"
 	"github.com/tanxena/matchd/internal/proto"
+	"github.com/tanxena/matchd/internal/publisher"
 )
+
+// maxPendingSnapshots bounds the snapshots a session holds but hasn't
+// streamed yet. Only a client that subscribes over and over without reading
+// gets near it, and it is then a slow consumer.
+const maxPendingSnapshots = 4
 
 // control is a reply the gateway itself generates (not an engine event):
 // LoginAck, Heartbeat, or a gateway-level Reject. The reader goroutine
@@ -41,6 +47,9 @@ type session struct {
 	// here without blocking (Deliver), the writer drains it. Its capacity is
 	// the slow-consumer threshold.
 	out chan engine.Event
+	// snaps holds market-data snapshots waiting to be streamed, in the order
+	// of their EvSnapshot markers in out (decision 016).
+	snaps chan *publisher.Snapshot
 	// ctrl carries gateway replies from the reader to the writer.
 	ctrl chan control
 	// done is closed exactly once, by close. Every blocking operation in
@@ -58,6 +67,7 @@ func newSession(g *Gateway, conn net.Conn) *session {
 		conn:   conn,
 		remote: conn.RemoteAddr().String(),
 		out:    make(chan engine.Event, g.cfg.OutQueue),
+		snaps:  make(chan *publisher.Snapshot, maxPendingSnapshots),
 		ctrl:   make(chan control, 16),
 		done:   make(chan struct{}),
 	}
@@ -71,6 +81,20 @@ func (s *session) Deliver(ev engine.Event) bool {
 	default:
 		return false
 	}
+}
+
+// DeliverSnapshot implements publisher.Subscriber without blocking: the
+// snapshot goes on snaps, and an EvSnapshot marker on out holds its place
+// among the events. The writer streams it on reaching the marker. (If the
+// marker doesn't fit, the snapshot is left on snaps, but the publisher then
+// disconnects the session as a slow consumer, so it is never streamed.)
+func (s *session) DeliverSnapshot(snap *publisher.Snapshot) bool {
+	select {
+	case s.snaps <- snap:
+	default:
+		return false
+	}
+	return s.Deliver(engine.Event{Kind: engine.EvSnapshot, Instrument: snap.Instrument, MDSeq: snap.MDSeq})
 }
 
 // Closed implements publisher.Subscriber.
@@ -296,6 +320,14 @@ func (s *session) writeLoop() {
 	for {
 		select {
 		case ev := <-s.out:
+			if ev.Kind == engine.EvSnapshot {
+				if err := s.streamSnapshot(bw); err != nil {
+					s.close("write error during snapshot: " + err.Error())
+					return
+				}
+				buf = buf[:0]
+				break
+			}
 			buf = appendEvent(buf[:0], &ev)
 		case c := <-s.ctrl:
 			buf = appendControl(buf[:0], &c)
@@ -323,6 +355,53 @@ func (s *session) writeLoop() {
 	}
 }
 
+// streamSnapshot writes the next pending snapshot: its header, then one
+// SnapshotLevel frame per level, read straight from the publisher's
+// immutable copy rather than queued as events. When the client reads
+// slowly, the socket writes block (TCP backpressure), each one bounded by
+// WriteTimeout: a client that can't take the snapshot is disconnected, and
+// one that can isn't limited by the queue's size. Events published
+// meanwhile wait on out; if out fills, the client is a slow consumer as
+// usual.
+func (s *session) streamSnapshot(bw *bufio.Writer) error {
+	var snap *publisher.Snapshot
+	select {
+	case snap = <-s.snaps: // queued before its marker, so it is there
+	case <-s.done:
+		return net.ErrClosed
+	}
+	var frame [64]byte
+	b := proto.AppendSnapshot(frame[:0], &proto.Snapshot{
+		Instrument: uint32(snap.Instrument), MDSeq: snap.MDSeq, Levels: uint32(len(snap.Levels)),
+	})
+	if err := s.write(bw, b); err != nil {
+		return err
+	}
+	for i := range snap.Levels {
+		l := &snap.Levels[i]
+		b = proto.AppendSnapshotLevel(frame[:0], &proto.SnapshotLevel{
+			Instrument: uint32(snap.Instrument), Side: uint8(l.Side), Price: int64(l.Price), Qty: int64(l.Qty),
+		})
+		if err := s.write(bw, b); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// write buffers one frame, first flushing under the write deadline if the
+// frame doesn't fit, so every socket write a long snapshot causes is
+// bounded by WriteTimeout.
+func (s *session) write(bw *bufio.Writer, frame []byte) error {
+	if bw.Available() < len(frame) {
+		if err := s.flush(bw); err != nil {
+			return err
+		}
+	}
+	_, err := bw.Write(frame)
+	return err
+}
+
 func (s *session) flush(bw *bufio.Writer) error {
 	if s.g.cfg.WriteTimeout > 0 {
 		_ = s.conn.SetWriteDeadline(time.Now().Add(s.g.cfg.WriteTimeout))
@@ -331,9 +410,10 @@ func (s *session) flush(bw *bufio.Writer) error {
 }
 
 // appendEvent encodes an event as its wire message: the engine's events for
-// this client, and market data (deltas, trades, and the publisher's
-// snapshot and resend answers). InstrumentAdded is never queued to a
-// session; it encodes to nothing.
+// this client, and market data (deltas, trades, and the publisher's resend
+// answer). It encodes nothing for an EvSnapshot marker, which the writer
+// handles itself (streamSnapshot), or for InstrumentAdded, which is never
+// queued to a session.
 func appendEvent(dst []byte, ev *engine.Event) []byte {
 	switch ev.Kind {
 	case engine.EvAck:
@@ -364,12 +444,6 @@ func appendEvent(dst []byte, ev *engine.Event) []byte {
 		return proto.AppendTrade(dst, &proto.Trade{
 			Seq: uint64(ev.Seq), Time: int64(ev.Time), Instrument: uint32(ev.Instrument), MDSeq: ev.MDSeq,
 			MatchID: ev.MatchID, Side: uint8(ev.Side), Price: int64(ev.Price), Qty: int64(ev.Qty),
-		})
-	case engine.EvSnapshotBegin:
-		return proto.AppendSnapshot(dst, &proto.Snapshot{Instrument: uint32(ev.Instrument), MDSeq: ev.MDSeq, Levels: uint32(ev.Qty)})
-	case engine.EvSnapshotLevel:
-		return proto.AppendSnapshotLevel(dst, &proto.SnapshotLevel{
-			Instrument: uint32(ev.Instrument), Side: uint8(ev.Side), Price: int64(ev.Price), Qty: int64(ev.Qty),
 		})
 	case engine.EvResendUnavailable:
 		return proto.AppendReject(dst, &proto.Reject{Instrument: uint32(ev.Instrument), Reason: proto.ReasonResendUnavailable})

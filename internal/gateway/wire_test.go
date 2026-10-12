@@ -111,18 +111,6 @@ func TestAppendEvent(t *testing.T) {
 		tr != (proto.Trade{Seq: 7, Time: 99, Instrument: 3, MDSeq: 42, MatchID: 5, Side: proto.SideSell, Price: 100, Qty: 2}) {
 		t.Errorf("trade: %v %+v", typ, tr)
 	}
-	e = engine.Event{Kind: engine.EvSnapshotBegin, Instrument: 3, MDSeq: 42, Qty: 6}
-	typ, p = frame(e)
-	var sn proto.Snapshot
-	if typ != proto.TypeSnapshot || sn.Decode(p) != nil || sn != (proto.Snapshot{Instrument: 3, MDSeq: 42, Levels: 6}) {
-		t.Errorf("snapshot: %v %+v", typ, sn)
-	}
-	e = engine.Event{Kind: engine.EvSnapshotLevel, Instrument: 3, Side: book.Sell, Price: 101, Qty: 9}
-	typ, p = frame(e)
-	var sl proto.SnapshotLevel
-	if typ != proto.TypeSnapshotLevel || sl.Decode(p) != nil || sl != (proto.SnapshotLevel{Instrument: 3, Side: proto.SideSell, Price: 101, Qty: 9}) {
-		t.Errorf("snapshot level: %v %+v", typ, sl)
-	}
 	e = engine.Event{Kind: engine.EvResendUnavailable, Instrument: 3, MDSeq: 10}
 	typ, p = frame(e)
 	var ru proto.Reject
@@ -134,5 +122,9 @@ func TestAppendEvent(t *testing.T) {
 	e.Kind = engine.EvInstrumentAdded
 	if b := appendEvent(nil, &e); len(b) != 0 {
 		t.Errorf("InstrumentAdded encoded to %d bytes; it must never reach a client session", len(b))
+	}
+	e.Kind = engine.EvSnapshot
+	if b := appendEvent(nil, &e); len(b) != 0 {
+		t.Errorf("a snapshot marker encoded to %d bytes; the writer streams snapshots itself", len(b))
 	}
 }
