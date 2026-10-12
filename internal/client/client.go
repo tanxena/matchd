@@ -20,6 +20,12 @@ type Msg struct {
 	Reject    proto.Reject
 	Fill      proto.Fill
 	CancelAck proto.CancelAck
+
+	// Market data.
+	BookDelta     proto.BookDelta
+	Trade         proto.Trade
+	Snapshot      proto.Snapshot
+	SnapshotLevel proto.SnapshotLevel
 }
 
 // Conn is a logged-in connection. Reading (Next) must happen on one
@@ -37,7 +43,8 @@ type Conn struct {
 var ErrLoginRejected = errors.New("login rejected")
 
 // Dial connects to addr and logs in as clientID, waiting up to timeout for
-// the LoginAck.
+// the LoginAck. clientID 0 connects without logging in, which is enough for
+// market data (Subscribe, Resend) but not for orders.
 func Dial(addr string, clientID uint32, timeout time.Duration) (*Conn, error) {
 	nc, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
@@ -47,6 +54,9 @@ func Dial(addr string, clientID uint32, timeout time.Duration) (*Conn, error) {
 		_ = tc.SetNoDelay(true)
 	}
 	c := &Conn{conn: nc, r: proto.NewReader(nc), ClientID: clientID}
+	if clientID == 0 {
+		return c, nil
+	}
 	if err := c.send(func(b []byte) []byte { return proto.AppendLogin(b, &proto.Login{ClientID: clientID}) }); err != nil {
 		_ = nc.Close()
 		return nil, err
@@ -91,6 +101,11 @@ func (c *Conn) Subscribe(m proto.Subscribe) error {
 	return c.send(func(b []byte) []byte { return proto.AppendSubscribe(b, &m) })
 }
 
+// Resend sends a Resend.
+func (c *Conn) Resend(m proto.Resend) error {
+	return c.send(func(b []byte) []byte { return proto.AppendResend(b, &m) })
+}
+
 // Heartbeat sends a Heartbeat.
 func (c *Conn) Heartbeat() error {
 	return c.send(proto.AppendHeartbeat)
@@ -116,6 +131,14 @@ func (c *Conn) Next() (Msg, error) {
 		err = m.CancelAck.Decode(p)
 	case proto.TypeHeartbeat:
 		err = proto.DecodeHeartbeat(p)
+	case proto.TypeBookDelta:
+		err = m.BookDelta.Decode(p)
+	case proto.TypeTrade:
+		err = m.Trade.Decode(p)
+	case proto.TypeSnapshot:
+		err = m.Snapshot.Decode(p)
+	case proto.TypeSnapshotLevel:
+		err = m.SnapshotLevel.Decode(p)
 	default:
 		err = fmt.Errorf("unexpected message type %v", typ)
 	}
@@ -158,6 +181,17 @@ func (m Msg) String() string {
 			c.Seq, c.OrderID, c.ClOrdID, why, sideName(c.Side), c.Qty, c.Price)
 	case proto.TypeHeartbeat:
 		return "Heartbeat"
+	case proto.TypeBookDelta:
+		d := m.BookDelta
+		return fmt.Sprintf("BookDelta md=%d inst=%d %s %d -> qty %d", d.MDSeq, d.Instrument, sideName(d.Side), d.Price, d.Qty)
+	case proto.TypeTrade:
+		tr := m.Trade
+		return fmt.Sprintf("Trade md=%d inst=%d match=%d %d @ %d (aggressor %s)", tr.MDSeq, tr.Instrument, tr.MatchID, tr.Qty, tr.Price, sideName(tr.Side))
+	case proto.TypeSnapshot:
+		return fmt.Sprintf("Snapshot inst=%d md=%d levels=%d", m.Snapshot.Instrument, m.Snapshot.MDSeq, m.Snapshot.Levels)
+	case proto.TypeSnapshotLevel:
+		l := m.SnapshotLevel
+		return fmt.Sprintf("  level %s %d x %d", sideName(l.Side), l.Price, l.Qty)
 	}
 	return m.Type.String()
 }

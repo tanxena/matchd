@@ -4,11 +4,13 @@
 //	engctl cancel  --client 7 --id 12
 //	engctl connect --client 7      (interactive; type "help")
 //
+//	engctl book      --instrument 1 [--depth 10]
+//	engctl subscribe --instrument 1
 //	engctl replay-check --data ./data   (engine stopped)
 //
-// order, cancel and connect take --addr (default 127.0.0.1:9000) and
-// --instrument (default 1). book and subscribe arrive with market data
-// (milestone 6).
+// Every command except replay-check takes --addr (default 127.0.0.1:9000).
+// Instruments are named by numeric id; PRD 5.7's symbol form arrives with
+// milestone 7's instrument endpoint (decision 016).
 package main
 
 import (
@@ -41,6 +43,10 @@ func main() {
 		err = cmdConnect(os.Args[2:])
 	case "replay-check":
 		err = cmdReplayCheck(os.Args[2:])
+	case "book":
+		err = cmdBook(os.Args[2:])
+	case "subscribe":
+		err = cmdSubscribe(os.Args[2:])
 	default:
 		usage()
 	}
@@ -55,6 +61,8 @@ func usage() {
   engctl order   [--addr A] --client N [--instrument I] --side buy|sell --type limit|market [--px P] --qty Q [--tif gtc|day] [--clordid C]
   engctl cancel  [--addr A] --client N [--instrument I] --id ORDER_ID
   engctl connect [--addr A] --client N [--instrument I]
+  engctl book      [--addr A] [--instrument I] [--depth N]
+  engctl subscribe [--addr A] [--instrument I]
   engctl replay-check --data DIR`)
 	os.Exit(2)
 }
@@ -305,4 +313,84 @@ func cmdReplayCheck(args []string) error {
 			res.WALTornBytes, res.FillLogTornBytes)
 	}
 	return nil
+}
+
+// marketData connects without logging in and subscribes to an instrument.
+func marketData(args []string, name string) (*client.Conn, *client.Feed, int, error) {
+	fs := flag.NewFlagSet(name, flag.ExitOnError)
+	addr := fs.String("addr", "127.0.0.1:9000", "engine address")
+	inst := fs.Uint("instrument", 1, "instrument id")
+	depth := fs.Int("depth", 10, "levels per side to print")
+	_ = fs.Parse(args)
+	conn, err := client.Dial(*addr, 0, 5*time.Second) // market data needs no login
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	feed, err := client.NewFeed(conn, uint32(*inst))
+	if err != nil {
+		_ = conn.Close()
+		return nil, nil, 0, err
+	}
+	return conn, feed, *depth, nil
+}
+
+// cmdBook prints the top levels from a fresh snapshot (PRD 5.7).
+func cmdBook(args []string) error {
+	conn, feed, depth, err := marketData(args, "book")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for !feed.Live() {
+		m, err := conn.Next()
+		if err != nil {
+			return err
+		}
+		if m.Type == proto.TypeReject {
+			return fmt.Errorf("subscribe refused: %v", m.Reject.Reason)
+		}
+		if err := feed.Apply(m); err != nil {
+			return err
+		}
+	}
+	fmt.Print(feed.String(depth))
+	return nil
+}
+
+// cmdSubscribe streams market data, keeping a book and recovering from gaps
+// as it goes; it prints every message and any recovery it performs.
+func cmdSubscribe(args []string) error {
+	conn, feed, depth, err := marketData(args, "subscribe")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	printed := false
+	for {
+		m, err := conn.Next()
+		if err != nil {
+			return err
+		}
+		before := feed.Stats
+		if err := feed.Apply(m); err != nil {
+			return err
+		}
+		switch m.Type {
+		case proto.TypeSnapshot, proto.TypeSnapshotLevel, proto.TypeBookDelta, proto.TypeTrade:
+			fmt.Println(m)
+		case proto.TypeReject:
+			fmt.Println("!", m)
+		}
+		if feed.Stats.Gaps > before.Gaps {
+			fmt.Printf("! gap after md_seq %d: resend requested\n", feed.MDSeq())
+		}
+		if feed.Stats.Resnapshots > before.Resnapshots {
+			fmt.Println("! resend unavailable: subscribing again for a fresh snapshot")
+		}
+		if feed.Live() && !printed {
+			fmt.Print(feed.String(depth))
+			printed = true
+		}
+	}
 }

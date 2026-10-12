@@ -56,3 +56,24 @@ func TestOrderAndCancelAgainstServer(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// book: subscribe, wait for the snapshot, print, exit.
+func TestBookAgainstServer(t *testing.T) {
+	gw := gateway.DefaultConfig()
+	gw.Addr = "127.0.0.1:0"
+	srv, err := server.Start(server.Config{DataDir: t.TempDir(), Gateway: gw, Instruments: []book.Instrument{{Symbol: "XYZ", TickSize: 1, LotSize: 1}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	addr := srv.Addr()
+	if err := cmdOrder([]string{"--addr", addr, "--client", "7", "--side", "sell", "--px", "101", "--qty", "5"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdBook([]string{"--addr", addr, "--instrument", "1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdBook([]string{"--addr", addr, "--instrument", "9"}); err == nil || !strings.Contains(err.Error(), "UnknownInstrument") {
+		t.Fatalf("book of an unknown instrument: %v", err)
+	}
+}
