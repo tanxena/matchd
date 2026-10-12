@@ -351,6 +351,28 @@ func runPair(t *testing.T, seed uint64, n int, real, oracle orderBook) coverage 
 			seed, i, c, fmt.Sprintf(format, args...), seed, i+1)
 	}
 
+	// Copy-on-write snapshots (decision 013): at random points freeze the
+	// real book, remember what it held, keep trading, and later check the
+	// frozen view still shows exactly that. A separate generator drives the
+	// freezes so the command stream is the same as without them.
+	rb, _ := real.(*book.Book)
+	freezeRng := rand.New(rand.NewPCG(seed, 0xc0ffee))
+	var (
+		frozen     *book.Frozen
+		frozenWant [2][]book.RestingOrder
+		frozenAt   int
+	)
+	checkFrozen := func(i int, c command) {
+		t.Helper()
+		for si, s := range [2]book.Side{book.Buy, book.Sell} {
+			var got []book.RestingOrder
+			frozen.Each(s, func(r book.RestingOrder) { got = append(got, r) })
+			if !slices.Equal(got, frozenWant[si]) {
+				fail(i, c, "frozen view (taken after command #%d) changed on the %s side:\n got  %+v\n want %+v",
+					frozenAt, s, got, frozenWant[si])
+			}
+		}
+	}
 	for i := range n {
 		c := g.next()
 		// Reset per command so a cancel leaves both fill slices empty.
@@ -430,6 +452,30 @@ func runPair(t *testing.T, seed uint64, n int, real, oracle orderBook) coverage 
 
 		cov.depth = max(cov.depth, oracle.Len())
 		g.observe(c, refRes, refFills, refCxl)
+
+		if rb != nil {
+			switch {
+			case frozen == nil && freezeRng.IntN(300) == 0:
+				frozen, frozenAt = rb.Freeze(), i
+				frozenWant[0] = rb.Orders(book.Buy, nil)
+				frozenWant[1] = rb.Orders(book.Sell, nil)
+				cov.freezes++
+			case frozen != nil && freezeRng.IntN(150) == 0:
+				checkFrozen(i, c)
+				rb.Thaw(frozen)
+				frozen = nil
+				if err := rb.CheckInvariants(); err != nil {
+					fail(i, c, "after thaw: %v", err)
+				}
+			}
+		}
+	}
+	if frozen != nil {
+		checkFrozen(n-1, command{})
+		rb.Thaw(frozen)
+	}
+	if rb != nil {
+		cov.cowCopies += int(rb.CowCopies())
 	}
 	return cov
 }
@@ -445,6 +491,7 @@ type coverage struct {
 	rejects                    [book.RejectUnknownOrder + 1]int
 	reusedClOrdOK              int // accepted orders whose (client, clOrdID) had been used before
 	depth                      int // max resting orders seen
+	freezes, cowCopies         int // snapshots taken mid-stream; chunks copied because of them
 }
 
 func (c *coverage) submit(cmd command, r book.Result, fills []book.Fill) {
@@ -486,6 +533,8 @@ func (c *coverage) add(o coverage) {
 	c.marketExpired += o.marketExpired
 	c.cancelsOK += o.cancelsOK
 	c.reusedClOrdOK += o.reusedClOrdOK
+	c.freezes += o.freezes
+	c.cowCopies += o.cowCopies
 	for i := range c.rejects {
 		c.rejects[i] += o.rejects[i]
 	}
@@ -493,8 +542,8 @@ func (c *coverage) add(o coverage) {
 }
 
 func (c coverage) String() string {
-	s := fmt.Sprintf("commands=%d fills=%d multi-fill-orders=%d rested=%d partial-then-rest=%d market-expired=%d cancels-ok=%d clordid-reused=%d max-depth=%d rejects:",
-		c.commands, c.fills, c.multiFill, c.rested, c.partialRest, c.marketExpired, c.cancelsOK, c.reusedClOrdOK, c.depth)
+	s := fmt.Sprintf("commands=%d fills=%d multi-fill-orders=%d rested=%d partial-then-rest=%d market-expired=%d cancels-ok=%d clordid-reused=%d max-depth=%d snapshots=%d cow-copies=%d rejects:",
+		c.commands, c.fills, c.multiFill, c.rested, c.partialRest, c.marketExpired, c.cancelsOK, c.reusedClOrdOK, c.depth, c.freezes, c.cowCopies)
 	for r := book.RejectInvalidSide; r <= book.RejectUnknownOrder; r++ {
 		s += fmt.Sprintf(" %s=%d", r, c.rejects[r])
 	}
@@ -526,5 +575,11 @@ func (c coverage) requireCoverage(t *testing.T, n int) {
 		if ch.got < floor {
 			t.Errorf("coverage: %s = %d, want >= %d; the generator is not exercising this path", ch.name, ch.got, floor)
 		}
+	}
+	// Copy-on-write snapshots happen about once per 450 commands; each must
+	// have caused at least one chunk copy, or frozen views were never at risk.
+	if c.freezes < n/2000 || c.cowCopies < c.freezes/2 {
+		t.Errorf("coverage: %d mid-stream snapshots and %d chunk copies in %d commands; copy-on-write isn't being exercised",
+			c.freezes, c.cowCopies, n)
 	}
 }

@@ -37,8 +37,8 @@ func (b *Book) Len() int { return b.byID.len() }
 func (b *Book) Orders(s Side, dst []RestingOrder) []RestingOrder {
 	lad := b.ladderFor(s)
 	for i := len(lad.levels) - 1; i >= 0; i-- {
-		for j := lad.levels[i].head; j != nilIdx; j = b.nodes[j].next {
-			n := &b.nodes[j]
+		for j := lad.levels[i].head; j != nilIdx; j = b.node(j).next {
+			n := b.node(j)
 			dst = append(dst, RestingOrder{
 				ID: n.id, Client: n.client, ClOrdID: n.clOrdID,
 				Side: n.side, Price: n.price, Qty: n.qty,
@@ -84,15 +84,15 @@ func (b *Book) CheckInvariants() error {
 			var sum Qty
 			var count uint32
 			prev := nilIdx
-			for j := lv.head; j != nilIdx; j = b.nodes[j].next {
-				if int(j) >= len(b.nodes) {
+			for j := lv.head; j != nilIdx; j = b.node(j).next {
+				if j >= b.nslots {
 					return fmt.Errorf("%s level %d links to slot %d beyond slab", side, lv.price, j)
 				}
 				if seen[j] {
 					return fmt.Errorf("slot %d appears twice (cycle or shared node)", j)
 				}
 				seen[j] = true
-				n := &b.nodes[j]
+				n := b.node(j)
 				if n.prev != prev {
 					return fmt.Errorf("order %d prev=%d, want %d", n.id, n.prev, prev)
 				}
@@ -132,15 +132,28 @@ func (b *Book) CheckInvariants() error {
 	}
 
 	free := 0
-	for j := b.freeNode; j != nilIdx; j = b.nodes[j].next {
+	for j := b.freeNode; j != nilIdx; j = b.node(j).next {
 		if seen[j] {
 			return fmt.Errorf("free slot %d is also resting, or the free list has a cycle", j)
 		}
 		seen[j] = true
 		free++
 	}
-	if live := b.byID.len(); live+free != len(b.nodes)-1 {
-		return fmt.Errorf("slab leak: %d live + %d free != %d slots", live, free, len(b.nodes)-1)
+	if live := b.byID.len(); live+free != int(b.nslots)-1 {
+		return fmt.Errorf("slab leak: %d live + %d free != %d slots", live, free, b.nslots-1)
+	}
+	if int(b.nslots) > len(b.chunks)*chunkSize {
+		return fmt.Errorf("%d slots handed out but only %d chunks", b.nslots, len(b.chunks))
+	}
+	// Copy-on-write: outside a snapshot every chunk belongs to the current
+	// epoch. A stale epoch would make the next write copy a chunk nobody
+	// shares (wasted work, and a sign Thaw missed it).
+	if !b.frozen {
+		for k, c := range b.chunks {
+			if c.epoch != b.epoch {
+				return fmt.Errorf("chunk %d has epoch %d, book is at %d with no snapshot in progress", k, c.epoch, b.epoch)
+			}
+		}
 	}
 	return nil
 }

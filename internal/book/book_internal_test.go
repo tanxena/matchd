@@ -76,15 +76,15 @@ func TestSlabAndLevelReuse(t *testing.T) {
 		}
 	}
 	cycle(1)
-	slots, levels := len(b.nodes), len(b.freeLevels)
+	slots, levels := b.nslots, len(b.freeLevels)
 	for k := range OrderID(10) {
 		cycle(1000 * (k + 2))
 		if err := b.CheckInvariants(); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if len(b.nodes) != slots {
-		t.Errorf("slab grew from %d to %d slots across reuse cycles", slots, len(b.nodes))
+	if b.nslots != slots {
+		t.Errorf("slab grew from %d to %d slots across reuse cycles", slots, b.nslots)
 	}
 	if len(b.freeLevels) != levels {
 		t.Errorf("free level list went from %d to %d", levels, len(b.freeLevels))
@@ -154,13 +154,13 @@ func TestCheckInvariantsDetectsCorruption(t *testing.T) {
 	corruptions := map[string]func(b *Book){
 		"level total":     func(b *Book) { b.bids.levels[0].total++ },
 		"level count":     func(b *Book) { b.bids.levels[0].count++ },
-		"crossed":         func(b *Book) { b.asks.levels[0].price = 100; b.nodes[3].price = 100 },
-		"zero qty order":  func(b *Book) { b.nodes[1].qty = 0; b.bids.levels[0].total -= 5 },
+		"crossed":         func(b *Book) { b.asks.levels[0].price = 100; b.nodeW(3).price = 100 },
+		"zero qty order":  func(b *Book) { b.nodeW(1).qty = 0; b.bids.levels[0].total -= 5 },
 		"stale byID":      func(b *Book) { b.byID.put(99, 1) },
 		"missing byClOrd": func(b *Book) { b.byClOrd.delete(clientOrderKey{1, 2}) },
-		"broken prev":     func(b *Book) { b.nodes[2].prev = nilIdx },
+		"broken prev":     func(b *Book) { b.nodeW(2).prev = nilIdx },
 		"tail wrong":      func(b *Book) { b.bids.levels[0].tail = 1 },
-		"leaked slot":     func(b *Book) { b.nodes = append(b.nodes, orderNode{}) },
+		"leaked slot":     func(b *Book) { b.nslots++ },
 	}
 	for name, corrupt := range corruptions {
 		t.Run(name, func(t *testing.T) {

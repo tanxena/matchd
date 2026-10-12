@@ -1,18 +1,15 @@
 package book
 
-import (
-	"fmt"
-	"math"
-)
+import "fmt"
 
 // nilIdx is the "no node" value for slab indices. Slot 0 of the slab is
 // reserved and never holds an order, so 0 can mean nil (decision 002).
 const nilIdx uint32 = 0
 
-// orderNode is one resting order, stored by value in Book.nodes. The orders at
-// a price level form a doubly linked FIFO list through prev/next, which are
-// slab indices rather than pointers (decision 002). A free slot reuses next to
-// link the free list.
+// orderNode is one resting order, stored by value in a chunk of the slab
+// (cow.go). The orders at a price level form a doubly linked FIFO list
+// through prev/next, which are slab indices rather than pointers (decision
+// 002). A free slot reuses next to link the free list.
 type orderNode struct {
 	id      OrderID
 	clOrdID ClientOrderID
@@ -103,11 +100,23 @@ type Book struct {
 	bids  ladder
 	asks  ladder
 
-	// nodes is the order slab. Index 0 is reserved (nilIdx). Freed slots are
-	// chained through orderNode.next starting at freeNode, and reused before
-	// the slab grows, so steady-state trading does not allocate.
-	nodes    []orderNode
+	// The order slab, in fixed-size chunks so snapshots can share them
+	// (cow.go, decision 013). Slot 0 is reserved (nilIdx). nslots counts the
+	// slots handed out so far. Freed slots are chained through
+	// orderNode.next starting at freeNode and reused before the slab grows,
+	// so steady-state trading does not allocate.
+	chunks   []*chunk
+	nslots   uint32
 	freeNode uint32
+
+	// Copy-on-write state (cow.go). epoch is bumped by Freeze; a chunk whose
+	// epoch is older is shared with a snapshot and is copied before its first
+	// write. spare holds chunks for those copies. Only the owning goroutine
+	// touches these.
+	epoch     uint32
+	frozen    bool
+	spare     []*chunk
+	cowCopies uint64
 
 	// freeLevels holds level structs whose price level emptied, for reuse.
 	freeLevels []*level
@@ -125,7 +134,8 @@ func New(instr Instrument) (*Book, error) {
 		instr:   instr,
 		bids:    ladder{sign: +1},
 		asks:    ladder{sign: -1},
-		nodes:   make([]orderNode, 1, 1024), // slot 0 reserved
+		chunks:  []*chunk{new(chunk)},
+		nslots:  1, // slot 0 reserved
 		byID:    newIndex[OrderID](1024),
 		byClOrd: newIndex[clientOrderKey](1024),
 	}, nil
@@ -178,7 +188,10 @@ func (b *Book) Submit(o Order, fills []Fill) (Result, []Fill) {
 		}
 		for remaining > 0 && lv.head != nilIdx {
 			mi := lv.head
-			m := &b.nodes[mi] // valid until the slab grows; nothing below grows it
+			// Writable pointer to the maker. It stays valid for this whole
+			// loop: chunks never move, and nodeW copies a shared chunk at
+			// most once per snapshot, before handing out the pointer.
+			m := b.nodeW(mi)
 			q := min(remaining, m.qty)
 			m.qty -= q
 			lv.total -= q
@@ -239,7 +252,7 @@ func (b *Book) rest(o *Order, qty Qty) {
 	}
 
 	idx := b.alloc()
-	b.nodes[idx] = orderNode{
+	*b.nodeW(idx) = orderNode{
 		id:      o.ID,
 		clOrdID: o.ClOrdID,
 		client:  o.Client,
@@ -250,7 +263,7 @@ func (b *Book) rest(o *Order, qty Qty) {
 		next:    nilIdx,
 	}
 	if lv.tail != nilIdx {
-		b.nodes[lv.tail].next = idx
+		b.nodeW(lv.tail).next = idx
 	} else {
 		lv.head = idx
 	}
@@ -270,10 +283,10 @@ func (b *Book) rest(o *Order, qty Qty) {
 // if the level empties, an O(L) shift to remove it (decision 002).
 func (b *Book) Cancel(client ClientID, id OrderID) CancelResult {
 	idx, ok := b.byID.get(id)
-	if !ok || b.nodes[idx].client != client {
+	if !ok || b.node(idx).client != client {
 		return CancelResult{Reject: RejectUnknownOrder}
 	}
-	n := b.nodes[idx] // copy: release below clears the slot
+	n := *b.node(idx) // copy: release below clears the slot
 	lad := b.ladderFor(n.side)
 	i, found := lad.search(n.price)
 	if !found {
@@ -293,37 +306,24 @@ func (b *Book) Cancel(client ClientID, id OrderID) CancelResult {
 // unlink removes node i from lv's queue. It does not touch lv.total; callers
 // adjust it because they know how much quantity is leaving.
 func (b *Book) unlink(lv *level, i uint32) {
-	n := &b.nodes[i]
-	if n.prev != nilIdx {
-		b.nodes[n.prev].next = n.next
+	prev, next := b.node(i).prev, b.node(i).next // read before any write copies a chunk
+	if prev != nilIdx {
+		b.nodeW(prev).next = next
 	} else {
-		lv.head = n.next
+		lv.head = next
 	}
-	if n.next != nilIdx {
-		b.nodes[n.next].prev = n.prev
+	if next != nilIdx {
+		b.nodeW(next).prev = prev
 	} else {
-		lv.tail = n.prev
+		lv.tail = prev
 	}
 	lv.count--
-}
-
-// alloc returns a free slab index, reusing a freed slot if there is one.
-func (b *Book) alloc() uint32 {
-	if i := b.freeNode; i != nilIdx {
-		b.freeNode = b.nodes[i].next
-		return i
-	}
-	if len(b.nodes) >= math.MaxUint32 {
-		panic("book: order slab exhausted (2^32-1 resting orders)")
-	}
-	b.nodes = append(b.nodes, orderNode{})
-	return uint32(len(b.nodes) - 1)
 }
 
 // release drops slot i from the indexes and pushes it on the free list. The
 // slot is zeroed so a stale index can never read a plausible-looking order.
 func (b *Book) release(i uint32) {
-	n := &b.nodes[i]
+	n := b.nodeW(i)
 	b.byID.delete(n.id)
 	b.byClOrd.delete(clientOrderKey{n.client, n.clOrdID})
 	*n = orderNode{next: b.freeNode}
