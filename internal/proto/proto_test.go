@@ -70,6 +70,32 @@ var codecs = []codec{
 		},
 		func(dst []byte, m any) []byte { v := m.(Fill); return AppendFill(dst, &v) },
 		func(p []byte) (any, error) { var m Fill; err := m.Decode(p); return m, err }},
+	{TypeResend, SizeResend,
+		func(r *rand.Rand) any { return Resend{Instrument: u32(r), FromMDSeq: u64(r)} },
+		func(dst []byte, m any) []byte { v := m.(Resend); return AppendResend(dst, &v) },
+		func(p []byte) (any, error) { var m Resend; err := m.Decode(p); return m, err }},
+	{TypeBookDelta, SizeBookDelta,
+		func(r *rand.Rand) any {
+			return BookDelta{Seq: u64(r), Time: i64(r), Instrument: u32(r), MDSeq: u64(r), Side: u8(r), Price: i64(r), Qty: i64(r)}
+		},
+		func(dst []byte, m any) []byte { v := m.(BookDelta); return AppendBookDelta(dst, &v) },
+		func(p []byte) (any, error) { var m BookDelta; err := m.Decode(p); return m, err }},
+	{TypeTrade, SizeTrade,
+		func(r *rand.Rand) any {
+			return Trade{Seq: u64(r), Time: i64(r), Instrument: u32(r), MDSeq: u64(r), MatchID: u64(r), Side: u8(r), Price: i64(r), Qty: i64(r)}
+		},
+		func(dst []byte, m any) []byte { v := m.(Trade); return AppendTrade(dst, &v) },
+		func(p []byte) (any, error) { var m Trade; err := m.Decode(p); return m, err }},
+	{TypeSnapshot, SizeSnapshot,
+		func(r *rand.Rand) any { return Snapshot{Instrument: u32(r), MDSeq: u64(r), Levels: u32(r)} },
+		func(dst []byte, m any) []byte { v := m.(Snapshot); return AppendSnapshot(dst, &v) },
+		func(p []byte) (any, error) { var m Snapshot; err := m.Decode(p); return m, err }},
+	{TypeSnapshotLevel, SizeSnapshotLevel,
+		func(r *rand.Rand) any {
+			return SnapshotLevel{Instrument: u32(r), Side: u8(r), Price: i64(r), Qty: i64(r)}
+		},
+		func(dst []byte, m any) []byte { v := m.(SnapshotLevel); return AppendSnapshotLevel(dst, &v) },
+		func(p []byte) (any, error) { var m SnapshotLevel; err := m.Decode(p); return m, err }},
 	{TypeCancelAck, SizeCancelAck,
 		func(r *rand.Rand) any {
 			return CancelAck{Seq: u64(r), Time: i64(r), Instrument: u32(r), ClOrdID: u64(r), OrderID: u64(r),

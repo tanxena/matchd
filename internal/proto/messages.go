@@ -47,6 +47,9 @@ const (
 	ReasonClientInUse     Reason = 102 // another connection is logged in as this client
 	ReasonInvalidClientID Reason = 103 // client id 0
 	ReasonUnsupported     Reason = 104 // a valid message this server doesn't handle yet
+	// ReasonResendUnavailable: a Resend asked for md_seq values the server's
+	// ring buffer no longer holds; Subscribe again for a fresh snapshot.
+	ReasonResendUnavailable Reason = 105
 )
 
 func (r Reason) String() string {
@@ -81,6 +84,8 @@ func (r Reason) String() string {
 		return "InvalidClientID"
 	case ReasonUnsupported:
 		return "Unsupported"
+	case ReasonResendUnavailable:
+		return "ResendUnavailable"
 	}
 	return fmt.Sprintf("reason(%d)", uint8(r))
 }
@@ -98,6 +103,12 @@ const (
 	SizeReject    = 37
 	SizeFill      = 70
 	SizeCancelAck = 54
+
+	SizeResend        = 12
+	SizeBookDelta     = 45
+	SizeSnapshot      = 16
+	SizeTrade         = 53
+	SizeSnapshotLevel = 21
 )
 
 // dec reads little-endian fields from a payload whose length has already
@@ -464,6 +475,194 @@ func (m *CancelAck) Decode(p []byte) error {
 	m.ClOrdID = d.u64()
 	m.OrderID = d.u64()
 	m.Side, m.Reason = d.u8(), d.u8()
+	m.Price = d.i64()
+	m.Qty = d.i64()
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Market data (milestone 6, decision 016)
+
+// Resend asks the server to send again every market-data message for an
+// instrument from FromMDSeq on (inbound). Answered from the server's ring
+// buffer, or with Reject(ResendUnavailable).
+//
+//	0 instrument  u32
+//	4 from_md_seq u64
+type Resend struct {
+	Instrument uint32
+	FromMDSeq  uint64
+}
+
+func AppendResend(dst []byte, m *Resend) []byte {
+	dst = appendHeader(dst, TypeResend, SizeResend)
+	dst = le.AppendUint32(dst, m.Instrument)
+	return le.AppendUint64(dst, m.FromMDSeq)
+}
+
+func (m *Resend) Decode(p []byte) error {
+	if err := checkSize(TypeResend, p, SizeResend); err != nil {
+		return err
+	}
+	d := dec{b: p}
+	m.Instrument = d.u32()
+	m.FromMDSeq = d.u64()
+	return nil
+}
+
+// BookDelta: one price level's new total size (0 = the level is gone).
+//
+//	0  seq        u64 (the command that changed it)
+//	8  time       i64
+//	16 instrument u32
+//	20 md_seq     u64
+//	28 side       u8
+//	29 price      i64
+//	37 qty        i64 (the level's new total)
+type BookDelta struct {
+	Seq        uint64
+	Time       int64
+	Instrument uint32
+	MDSeq      uint64
+	Side       uint8
+	Price      int64
+	Qty        int64
+}
+
+func AppendBookDelta(dst []byte, m *BookDelta) []byte {
+	dst = appendHeader(dst, TypeBookDelta, SizeBookDelta)
+	dst = le.AppendUint64(dst, m.Seq)
+	dst = le.AppendUint64(dst, uint64(m.Time))
+	dst = le.AppendUint32(dst, m.Instrument)
+	dst = le.AppendUint64(dst, m.MDSeq)
+	dst = append(dst, m.Side)
+	dst = le.AppendUint64(dst, uint64(m.Price))
+	return le.AppendUint64(dst, uint64(m.Qty))
+}
+
+func (m *BookDelta) Decode(p []byte) error {
+	if err := checkSize(TypeBookDelta, p, SizeBookDelta); err != nil {
+		return err
+	}
+	d := dec{b: p}
+	m.Seq = d.u64()
+	m.Time = d.i64()
+	m.Instrument = d.u32()
+	m.MDSeq = d.u64()
+	m.Side = d.u8()
+	m.Price = d.i64()
+	m.Qty = d.i64()
+	return nil
+}
+
+// Trade: the public print of one match (anonymous).
+//
+//	0  seq        u64
+//	8  time       i64
+//	16 instrument u32
+//	20 md_seq     u64
+//	28 match_id   u64
+//	36 side       u8  (the aggressor's)
+//	37 price      i64
+//	45 qty        i64
+type Trade struct {
+	Seq        uint64
+	Time       int64
+	Instrument uint32
+	MDSeq      uint64
+	MatchID    uint64
+	Side       uint8
+	Price      int64
+	Qty        int64
+}
+
+func AppendTrade(dst []byte, m *Trade) []byte {
+	dst = appendHeader(dst, TypeTrade, SizeTrade)
+	dst = le.AppendUint64(dst, m.Seq)
+	dst = le.AppendUint64(dst, uint64(m.Time))
+	dst = le.AppendUint32(dst, m.Instrument)
+	dst = le.AppendUint64(dst, m.MDSeq)
+	dst = le.AppendUint64(dst, m.MatchID)
+	dst = append(dst, m.Side)
+	dst = le.AppendUint64(dst, uint64(m.Price))
+	return le.AppendUint64(dst, uint64(m.Qty))
+}
+
+func (m *Trade) Decode(p []byte) error {
+	if err := checkSize(TypeTrade, p, SizeTrade); err != nil {
+		return err
+	}
+	d := dec{b: p}
+	m.Seq = d.u64()
+	m.Time = d.i64()
+	m.Instrument = d.u32()
+	m.MDSeq = d.u64()
+	m.MatchID = d.u64()
+	m.Side = d.u8()
+	m.Price = d.i64()
+	m.Qty = d.i64()
+	return nil
+}
+
+// Snapshot starts a market-data snapshot: the instrument's book as of
+// MDSeq, sent as Levels SnapshotLevel frames that follow immediately (best
+// bids first, then best asks first). Deltas after it continue from MDSeq+1.
+//
+//	0  instrument u32
+//	4  md_seq     u64
+//	12 levels     u32
+type Snapshot struct {
+	Instrument uint32
+	MDSeq      uint64
+	Levels     uint32
+}
+
+func AppendSnapshot(dst []byte, m *Snapshot) []byte {
+	dst = appendHeader(dst, TypeSnapshot, SizeSnapshot)
+	dst = le.AppendUint32(dst, m.Instrument)
+	dst = le.AppendUint64(dst, m.MDSeq)
+	return le.AppendUint32(dst, m.Levels)
+}
+
+func (m *Snapshot) Decode(p []byte) error {
+	if err := checkSize(TypeSnapshot, p, SizeSnapshot); err != nil {
+		return err
+	}
+	d := dec{b: p}
+	m.Instrument = d.u32()
+	m.MDSeq = d.u64()
+	m.Levels = d.u32()
+	return nil
+}
+
+// SnapshotLevel is one price level of a snapshot.
+//
+//	0  instrument u32
+//	4  side       u8
+//	5  price      i64
+//	13 qty        i64
+type SnapshotLevel struct {
+	Instrument uint32
+	Side       uint8
+	Price      int64
+	Qty        int64
+}
+
+func AppendSnapshotLevel(dst []byte, m *SnapshotLevel) []byte {
+	dst = appendHeader(dst, TypeSnapshotLevel, SizeSnapshotLevel)
+	dst = le.AppendUint32(dst, m.Instrument)
+	dst = append(dst, m.Side)
+	dst = le.AppendUint64(dst, uint64(m.Price))
+	return le.AppendUint64(dst, uint64(m.Qty))
+}
+
+func (m *SnapshotLevel) Decode(p []byte) error {
+	if err := checkSize(TypeSnapshotLevel, p, SizeSnapshotLevel); err != nil {
+		return err
+	}
+	d := dec{b: p}
+	m.Instrument = d.u32()
+	m.Side = d.u8()
 	m.Price = d.i64()
 	m.Qty = d.i64()
 	return nil

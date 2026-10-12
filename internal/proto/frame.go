@@ -53,14 +53,19 @@ const (
 	TypeCancel    MsgType = 0x03
 	TypeSubscribe MsgType = 0x04
 	TypeHeartbeat MsgType = 0x05
+	TypeResend    MsgType = 0x06
 
 	TypeLoginAck  MsgType = 0x81
 	TypeAck       MsgType = 0x82
 	TypeReject    MsgType = 0x83
 	TypeFill      MsgType = 0x84
 	TypeCancelAck MsgType = 0x85
-	// 0x86 BookDelta and 0x87 Snapshot are reserved for market data
-	// (milestone 6).
+
+	// Market data (milestone 6, decision 016).
+	TypeBookDelta     MsgType = 0x86
+	TypeSnapshot      MsgType = 0x87
+	TypeTrade         MsgType = 0x88
+	TypeSnapshotLevel MsgType = 0x89
 )
 
 func (t MsgType) String() string {
@@ -75,6 +80,16 @@ func (t MsgType) String() string {
 		return "Subscribe"
 	case TypeHeartbeat:
 		return "Heartbeat"
+	case TypeResend:
+		return "Resend"
+	case TypeBookDelta:
+		return "BookDelta"
+	case TypeSnapshot:
+		return "Snapshot"
+	case TypeTrade:
+		return "Trade"
+	case TypeSnapshotLevel:
+		return "SnapshotLevel"
 	case TypeLoginAck:
 		return "LoginAck"
 	case TypeAck:
