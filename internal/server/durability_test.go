@@ -97,6 +97,7 @@ func TestAckGatedOnFsync(t *testing.T) {
 			cl := dial(t, s, 1)
 
 			g.hold()
+			t.Cleanup(g.open) // a failing test must not hang Close on a held fsync
 			_ = cl.NewOrder(limit(1, 1, proto.SideBuy, 100, 5))
 			noMessage(t, cl, 300*time.Millisecond, "fsync held")
 			if pol != "always" {

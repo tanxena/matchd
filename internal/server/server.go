@@ -13,8 +13,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/tanxena/matchd/internal/book"
 	"github.com/tanxena/matchd/internal/durable"
@@ -22,13 +22,19 @@ import (
 	"github.com/tanxena/matchd/internal/gateway"
 	"github.com/tanxena/matchd/internal/publisher"
 	"github.com/tanxena/matchd/internal/sequencer"
+	"github.com/tanxena/matchd/internal/snapshot"
 	"github.com/tanxena/matchd/internal/wal"
 )
 
 // Config configures a server.
 type Config struct {
-	// DataDir holds the WAL (DataDir/wal). Required.
+	// DataDir holds the WAL, snapshots, manifest and fill log. Required.
 	DataDir string
+	// Snapshots: after SnapshotEvery commands or every SnapshotInterval,
+	// whichever comes first (decision 013). 0 disables that trigger; both 0
+	// disables snapshots.
+	SnapshotEvery    uint64
+	SnapshotInterval time.Duration
 	// Fsync is the durability policy. Zero value = always.
 	Fsync sequencer.Policy
 	// WAL options (segment size; tests inject file wrappers here).
@@ -49,19 +55,23 @@ type Server struct {
 	pub     *publisher.Publisher
 	eng     *engine.Engine
 	wal     *wal.Log
+	fills   *snapshot.FillLog
+	snaps   *snapshot.Writer
 	durable *durable.Seq
 	cmds    chan engine.Command
 	done    chan struct{} // closed when the publisher goroutine has finished
 	log     *slog.Logger
 
-	seqErr    error // the sequencer's result; written before done is closed
+	seqErr    error         // the sequencer's result; written before done is closed
+	snapDone  chan struct{} // closed when the snapshot writer has finished
+	ticker    *time.Ticker  // snapshot time trigger (nil if disabled)
 	closeOnce sync.Once
 	closeErr  error
 }
 
-// Start recovers state from the WAL, ensures the configured instruments
-// exist, starts the pipeline, and returns once the server is accepting
-// connections.
+// Start recovers state (latest snapshot, then the WAL after it), ensures
+// the configured instruments exist, starts the pipeline, and returns once
+// the server is accepting connections.
 func Start(cfg Config) (*Server, error) {
 	if cfg.DataDir == "" {
 		return nil, errors.New("server: DataDir is required")
@@ -85,38 +95,40 @@ func Start(cfg Config) (*Server, error) {
 		cfg.WAL.Log = cfg.Log
 	}
 
-	// Recovery: replay every logged command into a fresh engine. The engine
-	// is deterministic, so this rebuilds exactly the state it had. Events
-	// are discarded: they were delivered (or not) before the restart.
-	eng := engine.New()
-	var cmd engine.Command
-	var evs []engine.Event
-	replay := func(r wal.Record) error {
-		if err := engine.DecodeCommand(r.Payload, &cmd); err != nil {
-			return err
-		}
-		cmd.Seq, cmd.Time = engine.Seq(r.Seq), engine.Timestamp(r.Time)
-		if cmd.Seq != eng.LastSeq()+1 {
-			// No snapshots yet (milestone 5), so the log must start at 1.
-			return fmt.Errorf("log starts at seq %d but there is no snapshot to start from", cmd.Seq)
-		}
-		evs = eng.Step(&cmd, evs[:0])
-		return nil
-	}
-	walDir := filepath.Join(cfg.DataDir, "wal")
-	wl, info, err := wal.Open(walDir, cfg.WAL, replay)
+	// Recovery (PRD 5.4): manifest -> latest snapshot -> replay the WAL
+	// records after it. The engine is deterministic, so this rebuilds
+	// exactly the state it had. Replayed events are discarded: they were
+	// delivered (or not) before the restart.
+	eng, wl, rec, err := snapshot.Recover(cfg.DataDir, cfg.WAL, cfg.Log)
 	if err != nil {
-		return nil, fmt.Errorf("server: recovering %s: %w", walDir, err)
+		return nil, fmt.Errorf("server: recovering %s: %w", cfg.DataDir, err)
 	}
-	cfg.Log.Info("recovered from WAL", "dir", walDir, "records", info.Records, "segments", info.Segments,
-		"last_seq", info.LastSeq, "torn_bytes", info.TornBytes, "last_order_id", eng.LastOrderID())
-
-	d := durable.New(info.LastSeq)
-	seq := sequencer.New(cfg.Clock, wl, cfg.Fsync, d)
-	fail := func(err error) (*Server, error) {
+	cfg.Log.Info("recovered", "snapshot_seq", rec.SnapshotSeq, "wal_replayed", rec.Replayed,
+		"wal_segments", rec.WAL.Segments, "last_seq", eng.LastSeq(), "torn_bytes", rec.WAL.TornBytes,
+		"last_order_id", eng.LastOrderID(), "last_match_id", eng.LastMatchID())
+	fills, err := snapshot.OpenFillLog(cfg.DataDir, cfg.Log)
+	if err != nil {
 		_ = wl.Close()
 		return nil, err
 	}
+	if fills.LastMatchID() > eng.LastMatchID() {
+		// The fill log may lag the engine (unreleased matches), never lead
+		// it: a logged fill whose command isn't in the WAL was released
+		// before it was durable.
+		_ = wl.Close()
+		_ = fills.Close()
+		return nil, fmt.Errorf("server: fill log reaches match %d but the recovered engine only reaches %d",
+			fills.LastMatchID(), eng.LastMatchID())
+	}
+
+	d := durable.New(uint64(eng.LastSeq()))
+	seq := sequencer.New(cfg.Clock, wl, cfg.Fsync, d)
+	fail := func(err error) (*Server, error) {
+		_ = wl.Close()
+		_ = fills.Close()
+		return nil, err
+	}
+	var evs []engine.Event
 
 	// Configured instruments: present already (from the log) and identical,
 	// or added now through the log like any other command.
@@ -144,9 +156,10 @@ func Start(cfg Config) (*Server, error) {
 	}
 
 	s := &Server{
-		pub:     publisher.New(cfg.Log, d),
+		pub:     publisher.New(cfg.Log, d, fills),
 		eng:     eng,
 		wal:     wl,
+		fills:   fills,
 		durable: d,
 		cmds:    make(chan engine.Command, cfg.CommandQueue), // gateway readers -> sequencer
 		done:    make(chan struct{}),
@@ -168,7 +181,29 @@ func Start(cfg Config) (*Server, error) {
 		s.seqErr = seq.Run(s.cmds, sequenced)
 		close(seqDone)
 	}()
-	go eng.Run(sequenced, events)
+	// Snapshots (decision 013): the engine freezes itself between commands
+	// and hands the frozen view to the writer goroutine, which writes it
+	// while the engine carries on, then hands it back to be thawed.
+	var hooks *engine.SnapshotHooks
+	s.snapDone = make(chan struct{})
+	if cfg.SnapshotEvery > 0 || cfg.SnapshotInterval > 0 {
+		snapOut := make(chan *engine.Snapshot, 1)  // engine -> writer; at most one in flight
+		snapBack := make(chan *engine.Snapshot, 1) // writer -> engine, for Thaw
+		hooks = &engine.SnapshotHooks{Every: cfg.SnapshotEvery, Out: snapOut, Done: snapBack}
+		if cfg.SnapshotInterval > 0 {
+			s.ticker = time.NewTicker(cfg.SnapshotInterval)
+			hooks.Tick = s.ticker.C
+		}
+		s.snaps = &snapshot.Writer{DataDir: cfg.DataDir, WAL: wl, Fills: fills, Durable: d, Log: cfg.Log}
+		go func() { s.snaps.Run(snapOut, snapBack); close(s.snapDone) }()
+		go func() {
+			eng.Run(sequenced, events, hooks)
+			close(snapOut) // the engine has stopped: no more snapshots
+		}()
+	} else {
+		close(s.snapDone)
+		go eng.Run(sequenced, events, nil)
+	}
 	go func() { s.pub.Run(events); <-seqDone; close(s.done) }()
 	go func() {
 		if err := s.gw.Serve(); err != nil {
@@ -193,18 +228,32 @@ func (s *Server) Addr() string { return s.gw.Addr().String() }
 
 // Close stops accepting and disconnects clients, then lets every command
 // already accepted flow through the sequencer (final fsync), engine and
-// publisher before returning. (Snapshot-on-shutdown is milestone 7.) It
-// returns the durability error if one occurred.
+// publisher, waits for an in-progress snapshot, and closes the files.
+// (Snapshot-on-shutdown is milestone 7.) It returns the durability error if
+// one occurred.
 func (s *Server) Close() error {
 	s.closeOnce.Do(func() {
 		gwErr := s.gw.Close() // after this, nothing sends on cmds
 		close(s.cmds)
 		<-s.done
+		<-s.snapDone
+		if s.ticker != nil {
+			s.ticker.Stop()
+		}
 		walErr := s.wal.Close()
-		s.closeErr = errors.Join(s.seqErr, gwErr, walErr)
+		fillErr := s.fills.Close()
+		s.closeErr = errors.Join(s.seqErr, gwErr, walErr, fillErr)
 		s.log.Info("server stopped", "last_seq", s.eng.LastSeq(), "durable_seq", s.durable.Load(), "err", s.closeErr)
 	})
 	return s.closeErr
+}
+
+// Snapshots returns the snapshot writer's counters (zero if disabled).
+func (s *Server) Snapshots() snapshot.Stats {
+	if s.snaps == nil {
+		return snapshot.Stats{}
+	}
+	return s.snaps.Stats()
 }
 
 // Failed is closed if durability fails; Err then says why.

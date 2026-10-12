@@ -9,6 +9,9 @@
 //
 // -fsync is always (default), group:<duration> (e.g. group:1ms) or never
 // (tests only: acknowledged work can be lost on power failure).
+//
+// Snapshots are taken every -snapshot-every commands or every
+// -snapshot-interval, whichever comes first (0 disables a trigger).
 package main
 
 import (
@@ -21,11 +24,13 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/tanxena/matchd/internal/book"
 	"github.com/tanxena/matchd/internal/gateway"
 	"github.com/tanxena/matchd/internal/sequencer"
 	"github.com/tanxena/matchd/internal/server"
+	"github.com/tanxena/matchd/internal/wal"
 )
 
 // instrumentFlags collects repeated -instrument values.
@@ -64,6 +69,9 @@ func main() {
 	flag.Var(&instruments, "instrument", "SYMBOL:TICK:LOT to register (repeatable; ids from 1 in order)")
 	dataDir := flag.String("data", "./data", "data directory (the WAL lives in DATA/wal)")
 	fsync := flag.String("fsync", "always", "fsync policy: always, group:<duration> (e.g. group:1ms), or never (tests only)")
+	snapEvery := flag.Uint64("snapshot-every", 1_000_000, "snapshot after this many commands (0 = no command trigger)")
+	snapInterval := flag.Duration("snapshot-interval", 10*time.Second, "snapshot at least this often while commands arrive (0 = no time trigger)")
+	segBytes := flag.Int64("wal-segment-bytes", 64<<20, "start a new WAL segment after this many bytes")
 	debug := flag.Bool("debug", false, "debug logging")
 	flag.Parse()
 	policy, err := sequencer.ParsePolicy(*fsync)
@@ -84,7 +92,11 @@ func main() {
 	if policy.Mode == sequencer.Never {
 		log.Warn("fsync=never: acknowledged orders can be lost on power failure; for tests only")
 	}
-	srv, err := server.Start(server.Config{DataDir: *dataDir, Fsync: policy, Gateway: gw, Instruments: instruments, Log: log})
+	srv, err := server.Start(server.Config{
+		DataDir: *dataDir, Fsync: policy, Gateway: gw, Instruments: instruments, Log: log,
+		SnapshotEvery: *snapEvery, SnapshotInterval: *snapInterval,
+		WAL: wal.Options{SegmentSize: *segBytes},
+	})
 	if err != nil {
 		log.Error("start failed", "err", err)
 		os.Exit(1)

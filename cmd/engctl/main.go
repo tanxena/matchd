@@ -4,9 +4,11 @@
 //	engctl cancel  --client 7 --id 12
 //	engctl connect --client 7      (interactive; type "help")
 //
-// Every subcommand takes --addr (default 127.0.0.1:9000) and --instrument
-// (default 1). book, subscribe and replay-check arrive with market data
-// (milestone 6) and recovery (milestone 5).
+//	engctl replay-check --data ./data   (engine stopped)
+//
+// order, cancel and connect take --addr (default 127.0.0.1:9000) and
+// --instrument (default 1). book and subscribe arrive with market data
+// (milestone 6).
 package main
 
 import (
@@ -22,6 +24,7 @@ import (
 
 	"github.com/tanxena/matchd/internal/client"
 	"github.com/tanxena/matchd/internal/proto"
+	"github.com/tanxena/matchd/internal/snapshot"
 )
 
 func main() {
@@ -36,6 +39,8 @@ func main() {
 		err = cmdCancel(os.Args[2:])
 	case "connect":
 		err = cmdConnect(os.Args[2:])
+	case "replay-check":
+		err = cmdReplayCheck(os.Args[2:])
 	default:
 		usage()
 	}
@@ -49,7 +54,8 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
   engctl order   [--addr A] --client N [--instrument I] --side buy|sell --type limit|market [--px P] --qty Q [--tif gtc|day] [--clordid C]
   engctl cancel  [--addr A] --client N [--instrument I] --id ORDER_ID
-  engctl connect [--addr A] --client N [--instrument I]`)
+  engctl connect [--addr A] --client N [--instrument I]
+  engctl replay-check --data DIR`)
 	os.Exit(2)
 }
 
@@ -280,4 +286,23 @@ func cmdConnect(args []string) error {
 	}
 	waitQuiet() // stdin ended (e.g. piped input): still show the answers
 	return in.Err()
+}
+
+// cmdReplayCheck runs the data directory's WAL through a fresh engine and
+// compares it with the newest snapshot and the fill log (PRD 5.4). The
+// engine must be stopped: the check reads the files as they are.
+func cmdReplayCheck(args []string) error {
+	fs := flag.NewFlagSet("replay-check", flag.ExitOnError)
+	dir := fs.String("data", "./data", "the engine's data directory")
+	_ = fs.Parse(args)
+	res, err := snapshot.ReplayCheck(*dir)
+	if err != nil {
+		return fmt.Errorf("replay-check FAILED: %w", err)
+	}
+	fmt.Println("replay-check OK:", res.Report)
+	if res.WALTornBytes > 0 || res.FillLogTornBytes > 0 {
+		fmt.Printf("note: torn tails (WAL %d bytes, fill log %d bytes) will be truncated at the next start\n",
+			res.WALTornBytes, res.FillLogTornBytes)
+	}
+	return nil
 }
