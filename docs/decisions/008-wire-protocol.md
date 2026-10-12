@@ -27,13 +27,13 @@ offset  size  field
 ```
 
 - **Length prefix** rather than a delimiter (newline) or a self-describing encoding. A reader always knows exactly how many bytes to wait for. With a delimiter it would have to scan every byte, and binary payloads can contain the delimiter.
-- **u32 rather than u16.** Two bytes per frame is a small price for never needing a second framing scheme when market-data snapshots (milestone 6) carry a whole book. Size is still bounded by `MaxPayload`, below.
+- **u32 rather than u16.** Two bytes per frame is a small price for never needing a second framing scheme when market-data snapshots (milestone 6) carry a whole book. *(In the end, milestone 6 sends a snapshot as a header plus one fixed-size frame per level, so frames stay small; [decision 016](016-market-data.md).)* Size is still bounded by `MaxPayload`, below.
 - **The length counts version and type** as well as the payload, so the length alone says how far to skip.
 - **Version in every frame**, not only at login: it costs one byte and makes every frame self-checking. A frame with any version other than 1 closes the connection.
 
 ### Bounding the length (`MaxPayload = 1024`)
 
-The length field comes from the network. Without a bound, a corrupt or hostile frame claiming 4 GB would make the server try to buffer 4 GB. The reader rejects any frame whose payload is over 1,024 bytes before reading it. The largest current message is 70 bytes. The bound will rise, per message type, when snapshots arrive.
+The length field comes from the network. Without a bound, a corrupt or hostile frame claiming 4 GB would make the server try to buffer 4 GB. The reader rejects any frame whose payload is over 1,024 bytes before reading it. The largest current message is 70 bytes. Milestone 6 kept it: snapshots are sent one level per frame, so no message grew.
 
 ### Fixed layouts, exact sizes
 
@@ -59,7 +59,11 @@ There is no padding and no alignment. Fields are read with `binary.LittleEndian.
 | Reject | 0x83 | out | 37 |
 | Fill | 0x84 | out | 70 |
 | CancelAck | 0x85 | out | 54 |
-| BookDelta, Snapshot | 0x86, 0x87 | out | reserved for milestone 6 |
+| Resend | 0x06 | in | 12 (milestone 6) |
+| BookDelta | 0x86 | out | 45 (milestone 6) |
+| Snapshot | 0x87 | out | 16: header; levels follow (milestone 6) |
+| Trade | 0x88 | out | 53 (milestone 6) |
+| SnapshotLevel | 0x89 | out | 21 (milestone 6) |
 
 The field-by-field layouts are in the doc comment on each type in `messages.go`. **`LoginAck` is an addition to PRD 5.5's list**: nothing in that list answers a successful login. Without it, a client couldn't tell "logged in" from "the server hasn't answered yet".
 
@@ -71,7 +75,7 @@ Side, type, TIF, role, cancel reason and reject reason are defined in `proto` wi
 
 **Reject reasons:**
 - 1–99 are the engine's reasons, which are sequenced and logged;
-- 100 and up are the gateway's, raised before sequencing (`NotLoggedIn`, `AlreadyLoggedIn`, `ClientInUse`, `InvalidClientID`, `Unsupported`), and always carry `seq = 0`.
+- 100 and up are the gateway's, raised before sequencing (`NotLoggedIn`, `AlreadyLoggedIn`, `ClientInUse`, `InvalidClientID`, `Unsupported`, and since milestone 6 `ResendUnavailable`), and always carry `seq = 0`.
 
 ### Hand-written codec
 

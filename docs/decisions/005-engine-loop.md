@@ -37,7 +37,7 @@ when in is closed:        close out
 
 ### Events are sent one at a time, by value
 
-`Run` sends each `Event` (96 bytes, no pointers) on a `chan Event`. The alternative was sending one slice per command, which would need a pool of event buffers and a protocol for returning them. Otherwise the publisher could read a buffer while the engine overwrites it.
+`Run` sends each `Event` (96 bytes at the time, 112 since milestone 6; no pointers) on a `chan Event`. The alternative was sending one slice per command, which would need a pool of event buffers and a protocol for returning them. Otherwise the publisher could read a buffer while the engine overwrites it.
 
 Sending by value can't share memory, and it doesn't allocate. The cost is one channel operation per event rather than per command, measured in milestone 9.
 

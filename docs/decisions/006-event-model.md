@@ -14,7 +14,7 @@ Milestone 3 will encode events onto the wire, milestone 4 will hold them until t
 
 ## Decision: one flat, pointer-free struct
 
-`Event` is a single 96-byte struct. Its `Kind` field says which fields are meaningful:
+`Event` is a single 96-byte struct (112 bytes since milestone 6, which added `MDSeq`). Its `Kind` field says which fields are meaningful:
 
 - `EvAck`, `EvReject`, `EvFill`, `EvCancelled`, `EvBookDelta`, `EvInstrumentAdded`.
 - Unused fields are zero.
@@ -26,7 +26,7 @@ The alternative was a Go interface with one concrete type per event (`type Ack s
 - **GC cost.** A slice of pointer-free structs is one block of memory that the GC never needs to scan.
 - **Simple copying.** Events can be passed by value, compared with `==` in tests, and written into ring buffers (milestone 6) without aliasing.
 
-**Cost:** a 96-byte event carries fields that its kind doesn't use. For a reject, most of it is zeros. This is the same trade NASDAQ's binary protocols make, with fixed layouts per message type. Here the in-memory struct is shared, while the wire format (milestone 3) will encode only the fields each kind needs.
+**Cost:** a 96-byte (now 112-byte) event carries fields that its kind doesn't use. For a reject, most of it is zeros. This is the same trade NASDAQ's binary protocols make, with fixed layouts per message type. Here the in-memory struct is shared, while the wire format (milestone 3) will encode only the fields each kind needs.
 
 `Command` is flat for the same reasons (104 bytes).
 
@@ -69,5 +69,5 @@ A client can reconcile entirely from events. `TestEventStreamRebuildsState` chec
 
 ## Costs
 
-- **Two fill events per match** instead of one shared "trade" event. That is simpler routing (each event has exactly one recipient client), at the cost of twice the fill events. Milestone 6 may add a separate anonymous trade print for market data; the deltas already describe level changes.
-- **Deltas carry absolute level sizes, not changes.** A consumer that misses one delta and then sees the next is still correct for that level. Gap *detection* is still needed and comes from `md_seq` (milestone 6).
+- **Two fill events per match** instead of one shared "trade" event. *(Since milestone 6 a third, public `EvTrade` print follows each fill pair, for market data, and deltas and trades carry a per-instrument `md_seq`; [decision 016](016-market-data.md).)* That is simpler routing (each event has exactly one recipient client), at the cost of twice the fill events.
+- **Deltas carry absolute level sizes, not changes.** A consumer that misses one delta and then sees the next is still correct for that level. Gap *detection* is still needed, and comes from `md_seq` (milestone 6; a trade print, unlike a delta, is lost for good if missed, which is why the Feed resends rather than waiting for the next delta).

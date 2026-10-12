@@ -97,5 +97,5 @@ Planted bugs, each caught: advancing durability without fsync under `always`; a 
 
 - **Under `group`, the book runs ahead of the disk** by up to one window. A crash loses those applied-but-unacknowledged commands. Nobody was told about them, so nothing visible is lost, but their effects are visible to no one either.
 - **Under `always`, everything stops for an fsync.** About 1.5 ms per batch here; the benchmark (milestone 9) measures the throughput difference between policies.
-- **The publisher's hold queue** costs memory (up to 65,536 × 96 bytes ≈ 6 MB) and adds a queue operation to every event, even under `always`.
+- **The publisher's hold queue** costs memory (up to 65,536 × 96 bytes ≈ 6 MB; 112 bytes, ≈ 7.3 MB, since milestone 6) and adds a queue operation to every event, even under `always`.
 - **Fail-stop:** one bad disk write takes the whole engine down. That's correct for an exchange, and an operational burden.

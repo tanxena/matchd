@@ -125,8 +125,20 @@ Terms used in this repo's code and docs. Each entry names the milestone where th
 - **replay-check** (M5): an offline tool that rebuilds the newest snapshot from an older base plus the WAL, and checks the fill log against the replay.
 - **Crash harness** (M5): a test that runs the real binary, kills it at random moments under load, and verifies recovery each time. It proves recovery logic, not fsync.
 
+## Market data (milestone 6)
+
+- **md_seq** (M6): the per-instrument, gap-free sequence number on every book delta and trade, assigned by the engine. Subscribers use it to detect gaps.
+- **Trade print** (M6): the public, anonymous report of one match: price, quantity, the aggressor's side, the match id.
+- **Aggressor** (M6): the incoming order that caused a trade; the taker.
+- **Market-data snapshot** (M6): a full price-level book for one instrument at a stated `md_seq`, sent to a new subscriber before any deltas. (Not the same as a recovery snapshot, milestone 5.)
+- **Snapshot then deltas** (M6): the join rule: after a snapshot at S, the subscriber applies deltas from S + 1, with nothing missing or doubled.
+- **Gap** (M6): a jump in `md_seq` (4,005 then 4,007): something was lost.
+- **Resend** (M6): a request to send again the market-data messages from a given `md_seq`, served from the ring buffer.
+- **Ring buffer** (M6): fixed-size circular storage of the last N messages per instrument (65,536 here); older ones are overwritten.
+- **Re-snapshot** (M6): starting over with a fresh snapshot when a gap is older than the ring holds.
+- **Feed** (M6): the client-side book builder (`client.Feed`) that applies snapshots and deltas and recovers from gaps.
+
 ## Later milestones
-- **md_seq** *(later, M6)*: the per-instrument market-data sequence number subscribers use to detect gaps.
 - **ITCH / OUCH** (reference): NASDAQ's market-data (ITCH) and order-entry (OUCH) protocols. They are cited for terminology:
   - [TotalView-ITCH 5.0](https://www.nasdaqtrader.com/content/technicalsupport/specifications/dataproducts/NQTVITCHspecification.pdf)
   - [OUCH 4.2](https://www.nasdaqtrader.com/content/technicalsupport/specifications/TradingProducts/OUCH4.2.pdf)

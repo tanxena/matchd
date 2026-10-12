@@ -101,7 +101,7 @@ Milestone 3 needs sequence numbers before milestone 4's WAL exists. `sequencer.S
 
 ## Costs
 
-- **Two goroutines and a 4,096-event queue (about 390 KB) per connection.** Fine for hundreds of clients; at tens of thousands, the queue size would need revisiting.
+- **Two goroutines and a 4,096-event queue (about 390 KB; about 460 KB since milestone 6 enlarged `Event` to 112 bytes) per connection.** Fine for hundreds of clients; at tens of thousands, the queue size would need revisiting.
 - **A disconnected client loses events** (above).
 - **Slow-consumer detection is by queue depth, not by time.** A client that reads slowly but steadily is fine until its queue fills during a burst, and then it is disconnected at once.
 - **Closing on any protocol error is strict**: one malformed frame ends the session. A buggy client is told immediately, rather than limping on with a desynchronised stream.
