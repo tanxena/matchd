@@ -87,7 +87,7 @@ A **fuzzer** generates millions of inputs, mutating towards ones that reach new 
   - **`ErrVersion`, `ErrFrameLength`, `ErrPayloadSize`** are sentinel errors. Each means the stream can't be trusted.
   - **`MsgType`** ([frame.go:46](../../internal/proto/frame.go#L46)): inbound types are below 0x80, outbound types 0x80 and up, and Heartbeat (0x05) is used in both directions.
   - **`appendHeader`** writes the length, version and type.
-  - **`Reader`** ([frame.go:102](../../internal/proto/frame.go#L102)) holds a `bufio.Reader`, a 6-byte header array and a 1,024-byte payload buffer, all reused. **`Next`** ([frame.go:119](../../internal/proto/frame.go#L119)):
+  - **`Reader`** ([frame.go:117](../../internal/proto/frame.go#L117)) holds a `bufio.Reader`, a 6-byte header array and a 1,024-byte payload buffer, all reused. **`Next`** ([frame.go:134](../../internal/proto/frame.go#L134)):
     1. `io.ReadFull` the header;
     2. reject a bad length or version;
     3. `io.ReadFull` the payload;
@@ -97,7 +97,7 @@ A **fuzzer** generates millions of inputs, mutating towards ones that reach new 
 - **`messages.go`**
   - The **field enums** (`SideBuy`, `TypeLimit`, `RoleTaker`, `CancelExpired`, ...) and **`Reason`** ([messages.go:31](../../internal/proto/messages.go#L31)): 1–99 are the engine's reasons, 100 and up the gateway's.
   - **`Size*` constants** give each message's one valid payload size.
-  - **`dec`** ([messages.go:106](../../internal/proto/messages.go#L106)) is a tiny cursor (`u8`, `u32`, `u64`, `i64`) used on the stack, so decoding doesn't allocate.
+  - **`dec`** ([messages.go:117](../../internal/proto/messages.go#L117)) is a tiny cursor (`u8`, `u32`, `u64`, `i64`) used on the stack, so decoding doesn't allocate.
   - **`checkSize`** enforces the exact payload size.
   - Then one block per message, each with a layout table in its doc comment:
     - a struct;
@@ -116,14 +116,14 @@ Arrival order on the one shared `cmds` channel *is* the global order of all clie
 
 ### `internal/publisher/publisher.go`: routing and the slow-consumer policy
 
-- **`Subscriber`** ([publisher.go:45](../../internal/publisher/publisher.go#L45)) is the publisher's view of a session. `Deliver` must not block; `SlowConsumer` tells the session to disconnect.
-- **`Publisher`** ([publisher.go:58](../../internal/publisher/publisher.go#L58)):
+- **`Subscriber`** ([publisher.go:48](../../internal/publisher/publisher.go#L48)) is the publisher's view of a session. `Deliver` must not block; `SlowConsumer` tells the session to disconnect.
+- **`Publisher`** ([publisher.go:65](../../internal/publisher/publisher.go#L65)):
   - `clients` is an `atomic.Pointer` to an immutable map, so reads take no lock;
   - `mu` serialises the rare writers;
   - three atomic counters: delivered, dropped, slow consumers.
-- **`Register`** ([publisher.go:104](../../internal/publisher/publisher.go#L104)) copies the map, adds the session, and swaps the pointer. It refuses if the id is taken.
+- **`Register`** ([publisher.go:134](../../internal/publisher/publisher.go#L134)) copies the map, adds the session, and swaps the pointer. It refuses if the id is taken.
 - **`Unregister`** removes the entry only if it is *this* session.
-- **`route`** ([publisher.go:223](../../internal/publisher/publisher.go#L223)):
+- **`route`** ([publisher.go:256](../../internal/publisher/publisher.go#L256)):
   - skip client 0 (book deltas, startup commands);
   - look up the session; if it's missing, count the event as dropped;
   - otherwise `Deliver`; if that fails, unregister, count, log, and call `SlowConsumer()`.
@@ -149,31 +149,31 @@ Arrival order on the one shared `cmds` channel *is* the global order of all clie
   - `done`, closed once to release both goroutines;
   - `client`, which is 0 until login.
 - **`Deliver`** ([session.go:67](../../internal/gateway/session.go#L67)) is a `select` with a `default` case: a send that gives up instead of waiting.
-- **`close`** ([session.go:85](../../internal/gateway/session.go#L85)) runs once, through `sync.Once`. It records `closed`, closes `done` and the socket, unregisters the client, and logs the reason.
-- **`readLoop`** ([session.go:121](../../internal/gateway/session.go#L121)) sets the idle deadline, calls `Next`, then switches on the type:
+- **`close`** ([session.go:95](../../internal/gateway/session.go#L95)) runs once, through `sync.Once`. It records `closed`, closes `done` and the socket, unregisters the client, and logs the reason.
+- **`readLoop`** ([session.go:131](../../internal/gateway/session.go#L131)) sets the idle deadline, calls `Next`, then switches on the type:
   - `Login` → `handleLogin`;
   - `NewOrder` and `Cancel` → refuse if not logged in, otherwise build an `engine.Command` with **`Client: s.client`** and `submit` it;
-  - `Subscribe` → `Reject(Unsupported)` until milestone 6;
+  - `Subscribe` → `Reject(Unsupported)` in milestone 3; since milestone 6 it subscribes to market data, with no login needed ([06-market-data.md](06-market-data.md));
   - `Heartbeat` → echo it;
   - anything else → close with a protocol error.
-- **`handleLogin`** ([session.go:216](../../internal/gateway/session.go#L216)) refuses a second login, client 0, and a client id already in use. It sets `client` and registers with the publisher under `closeMu`, so a concurrent `close` either sees the id and unregisters it, or the login notices the session is closed.
-- **`submit`** ([session.go:247](../../internal/gateway/session.go#L247)) sends on `cmds`, or gives up if the session closes. Blocking here is the inbound backpressure.
-- **`readErrorReason`** ([session.go:256](../../internal/gateway/session.go#L256)) turns read errors into log reasons: EOF, idle timeout, protocol error, reset. **`isConnReset`** has a Windows version and an other-platforms version ([decision 010](../decisions/010-windows-gotchas.md)).
-- **`writeLoop`** ([session.go:277](../../internal/gateway/session.go#L277)) selects on `out`, `ctrl` and `done`, encodes into a reused buffer, writes to a 32 KB `bufio.Writer`, and **flushes when both queues are empty**. A `control` with `closeAfter` (a fatal reject) is written and flushed, and then the session is closed.
-- **`appendEvent`** ([session.go:321](../../internal/gateway/session.go#L321)) maps engine events to wire messages, converting enums by casting, which `wire_test.go` makes safe. **`appendControl`** encodes the gateway's own replies.
+- **`handleLogin`** ([session.go:231](../../internal/gateway/session.go#L231)) refuses a second login, client 0, and a client id already in use. It sets `client` and registers with the publisher under `closeMu`, so a concurrent `close` either sees the id and unregisters it, or the login notices the session is closed.
+- **`submit`** ([session.go:262](../../internal/gateway/session.go#L262)) sends on `cmds`, or gives up if the session closes. Blocking here is the inbound backpressure.
+- **`readErrorReason`** ([session.go:271](../../internal/gateway/session.go#L271)) turns read errors into log reasons: EOF, idle timeout, protocol error, reset. **`isConnReset`** has a Windows version and an other-platforms version ([decision 010](../decisions/010-windows-gotchas.md)).
+- **`writeLoop`** ([session.go:292](../../internal/gateway/session.go#L292)) selects on `out`, `ctrl` and `done`, encodes into a reused buffer, writes to a 32 KB `bufio.Writer`, and **flushes when both queues are empty**. A `control` with `closeAfter` (a fatal reject) is written and flushed, and then the session is closed.
+- **`appendEvent`** ([session.go:337](../../internal/gateway/session.go#L337)) maps engine events to wire messages, converting enums by casting, which `wire_test.go` makes safe. **`appendControl`** encodes the gateway's own replies.
 
 ### `internal/server/server.go`: the wiring
 
-**`Start`** ([server.go:75](../../internal/server/server.go#L75)):
+**`Start`** ([server.go:79](../../internal/server/server.go#L79)):
 1. applies the configured instruments **synchronously**, through `Stamp` and `Step` before any goroutine starts, so a bad config fails startup;
 2. creates the three channels;
 3. starts the sequencer, engine and publisher goroutines and the accept loop.
 
-**`Close`** ([server.go:234](../../internal/server/server.go#L234)) closes the gateway, then closes `cmds`. The sequencer, engine and publisher then each drain their input and close their output in turn, and `Close` waits for the publisher to finish.
+**`Close`** ([server.go:248](../../internal/server/server.go#L248)) closes the gateway, then closes `cmds`. The sequencer, engine and publisher then each drain their input and close their output in turn, and `Close` waits for the publisher to finish.
 
 ### `internal/client` and the binaries
 
-- **`client.Dial`** ([client.go:41](../../internal/client/client.go#L41)) connects, sends `Login`, and waits for `LoginAck`; a `Reject` becomes `ErrLoginRejected`. **`Next`** decodes into a `Msg` union. Sends hold a mutex, so several goroutines may send.
+- **`client.Dial`** ([client.go:48](../../internal/client/client.go#L48)) connects, sends `Login`, and waits for `LoginAck`; a `Reject` becomes `ErrLoginRejected`. **`Next`** decodes into a `Msg` union. Sends hold a mutex, so several goroutines may send.
 - **`cmd/engine`** has flags for the gateway config and repeatable `-instrument SYMBOL:TICK:LOT`. It runs `server.Start` and shuts down on Ctrl-C or SIGTERM.
 - **`cmd/engctl`**:
   - `order` and `cancel` connect, send, and print messages until none arrives for `--wait` (300 ms). A one-shot command can't know how many fills are coming.
@@ -198,7 +198,7 @@ Arrival order on the one shared `cmds` channel *is* the global order of all clie
   - Owner-only cancel; engine rejects carry a `seq`; market orders expire.
   - Login rules: before login, client 0, a second login, client in use, and the id freed after disconnect.
   - Five kinds of malformed frame each close only their own connection.
-  - Subscribe gets `Unsupported`; heartbeats are answered; idle timeout.
+  - Subscribe gets `Unsupported` (milestone 3; since milestone 6 a snapshot, `TestSubscribeAndHeartbeat`); heartbeats are answered; idle timeout.
   - **Slow consumer:** the slow client is disconnected, and the healthy client keeps trading meanwhile.
   - **8 concurrent clients × 400 orders:** every order answered exactly once, order ids gap-free, every match reported to exactly two parties.
 - **`client`, `cmd/engine`, `cmd/engctl`:**

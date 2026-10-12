@@ -93,15 +93,15 @@ A **crash harness** starts the real program, drives load, kills it, and checks w
 
 ### `internal/engine/snapshot.go` and `Run`
 
-- **`Engine.Freeze`/`Thaw`** ([snapshot.go:24, 35](../../internal/engine/snapshot.go#L24)) freeze or thaw every book, plus `Seq`, `LastOrderID` and `LastMatchID`.
-- **`State`** ([snapshot.go:52](../../internal/engine/snapshot.go#L52)) is the engine as plain data: instruments, and their orders in priority order. **`Snapshot.State()`** materialises a frozen view, safe from any goroutine. **`Restore`** ([snapshot.go:82](../../internal/engine/snapshot.go#L82)) rebuilds an engine from a `State`.
-- **`SnapshotHooks`** ([snapshot.go:110](../../internal/engine/snapshot.go#L110)) has `Every`, `Tick`, `Out` and `Done`. **`Run`** ([engine.go:76](../../internal/engine/engine.go#L76)) now selects on three channels: commands, ticks, and returned snapshots. After each command it checks the count. `trigger` freezes and sends the snapshot, unless one is in flight (it then remembers to take another as soon as the current one returns) or nothing changed since the last.
+- **`Engine.Freeze`/`Thaw`** ([snapshot.go:25, 36](../../internal/engine/snapshot.go#L25)) freeze or thaw every book, plus `Seq`, `LastOrderID` and `LastMatchID`.
+- **`State`** ([snapshot.go:63](../../internal/engine/snapshot.go#L63)) is the engine as plain data: instruments, and their orders in priority order. **`Snapshot.State()`** materialises a frozen view, safe from any goroutine. **`Restore`** ([snapshot.go:84](../../internal/engine/snapshot.go#L84)) rebuilds an engine from a `State`.
+- **`SnapshotHooks`** ([snapshot.go:113](../../internal/engine/snapshot.go#L113)) has `Every`, `Tick`, `Out` and `Done`. **`Run`** ([engine.go:78](../../internal/engine/engine.go#L78)) now selects on three channels: commands, ticks, and returned snapshots. After each command it checks the count. `trigger` freezes and sends the snapshot, unless one is in flight (it then remembers to take another as soon as the current one returns) or nothing changed since the last.
 
 ### `internal/snapshot`: files, manifest, writer, fill log, recovery, check
 
 - **`format.go`:**
-  - **`Encode`** ([format.go:48](../../internal/snapshot/format.go#L48)) writes the layout in the comment: header, counters, per-instrument orders, CRC32C.
-  - **`Decode`** ([format.go:82](../../internal/snapshot/format.go#L82)) verifies header and checksum *before* parsing, then reads with a bounds-checked `reader`. It rejects truncation and trailing bytes, and leaves empty sides `nil`, exactly as `engine.State` produces them (otherwise `reflect.DeepEqual` would report a difference).
+  - **`Encode`** ([format.go:50](../../internal/snapshot/format.go#L50)) writes the layout in the comment: header, counters, per-instrument orders, CRC32C.
+  - **`Decode`** ([format.go:85](../../internal/snapshot/format.go#L85)) verifies header and checksum *before* parsing, then reads with a bounds-checked `reader`. It rejects truncation and trailing bytes, and leaves empty sides `nil`, exactly as `engine.State` produces them (otherwise `reflect.DeepEqual` would report a difference).
 - **`manifest.go`:**
   - **`ReadManifest`** ([manifest.go:45](../../internal/snapshot/manifest.go#L45)) reads `manifest.json`, then the `.tmp`, then scans the snapshot files.
   - **`readPublished`** ([manifest.go:58](../../internal/snapshot/manifest.go#L58)) is the no-scan version the writer uses.

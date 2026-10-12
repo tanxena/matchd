@@ -92,6 +92,11 @@ func TestCodeLinksPointAtDeclarations(t *testing.T) {
 			if !declRe.MatchString(lines[anchor-1]) {
 				t.Errorf("%s: %s: line %d is %q, not a declaration (code moved; update the link)",
 					doc, m[0], anchor, strings.TrimSpace(lines[anchor-1]))
+			} else if names := namedBefore(string(data), m[0]); len(names) > 0 && !mentionsAny(lines[anchor-1], names) {
+				// The link lands on a declaration, but not of what the text
+				// names (e.g. a link re-pointed to the wrong function).
+				t.Errorf("%s: %s: line %d declares %q, but the text names %v",
+					doc, m[0], anchor, strings.TrimSpace(lines[anchor-1]), names)
 			}
 			// The anchor must be one of the line numbers in the link text.
 			nums := regexp.MustCompile(`\d+`).FindAllString(strings.SplitN(m[0], "](", 2)[0], -1)
@@ -111,4 +116,33 @@ func TestCodeLinksPointAtDeclarations(t *testing.T) {
 		t.Fatalf("checked only %d code links; the pattern may be broken", checked)
 	}
 	t.Logf("%d code links checked", checked)
+}
+
+var identRe = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)
+
+// namedBefore returns the identifiers in the backtick-quoted spans that
+// precede link on the same line ("**`Sequencer.Stamp`** ([...](...))" gives
+// Sequencer, Stamp; "**`Role`, `CancelReason`** (...)" gives both, for a
+// link that covers several declarations). Empty if there are none.
+func namedBefore(doc, link string) []string {
+	i := strings.Index(doc, link)
+	if i < 0 {
+		return nil
+	}
+	lineStart := strings.LastIndex(doc[:i], "\n") + 1
+	prefix := doc[lineStart:i]
+	var names []string
+	for _, span := range spanRe.FindAllString(prefix, -1) {
+		names = append(names, identRe.FindAllString(span, -1)...)
+	}
+	return names
+}
+
+func mentionsAny(line string, names []string) bool {
+	for _, n := range names {
+		if regexp.MustCompile(`\b` + regexp.QuoteMeta(n) + `\b`).MatchString(line) {
+			return true
+		}
+	}
+	return false
 }

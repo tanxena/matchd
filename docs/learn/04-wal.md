@@ -147,18 +147,18 @@ The layout is persistent: changing it means a new WAL format version.
 ### `internal/publisher/publisher.go`: the gate
 
 - **`MaxPending`** = 65,536 held events.
-- **`Run`** ([publisher.go:142](../../internal/publisher/publisher.go#L142)) selects on three channels:
+- **`Run`** ([publisher.go:172](../../internal/publisher/publisher.go#L172)) selects on three channels:
   - the event channel. It is set to `nil` while 65,536 events are held, so the engine waits; that is the backpressure.
   - `durable.Notify`;
   - `durable.Failed`.
 
   It returns only when its input has closed **and** nothing is still held, or when durability fails.
-- **`release`** ([publisher.go:175](../../internal/publisher/publisher.go#L175)) routes the prefix of held events whose seq is ≤ durable. Seqs never decrease, so the releasable events are always a prefix. It then reuses or compacts the slice so it doesn't grow forever.
-- **`withhold`** ([publisher.go:209](../../internal/publisher/publisher.go#L209)) drops everything held, drains the rest of the engine's output so the engine is never left blocked, counts it in `Withheld`, and logs an error.
+- **`release`** ([publisher.go:208](../../internal/publisher/publisher.go#L208)) routes the prefix of held events whose seq is ≤ durable. Seqs never decrease, so the releasable events are always a prefix. It then reuses or compacts the slice so it doesn't grow forever.
+- **`withhold`** ([publisher.go:242](../../internal/publisher/publisher.go#L242)) drops everything held, drains the rest of the engine's output so the engine is never left blocked, counts it in `Withheld`, and logs an error.
 
 ### `internal/server/server.go`: recovery and failure
 
-**`Start`** ([server.go:75](../../internal/server/server.go#L75)):
+**`Start`** ([server.go:79](../../internal/server/server.go#L79)):
 1. opens `DataDir/wal` with a `replay` callback that decodes each command, restores its seq and time, and calls `engine.Step`, discarding the events. It refuses a log that doesn't start at seq 1, because there are no snapshots yet.
 2. logs the recovery summary;
 3. checks configured instruments against the log, or adds them via `LogNow`;
@@ -166,7 +166,7 @@ The layout is persistent: changing it means a new WAL format version.
 
 *Superseded in milestone 5:* step 1 now loads the newest snapshot first and replays only the WAL after it (`snapshot.Recover`), so the WAL no longer has to start at seq 1. See [05-recovery.md](05-recovery.md#2-code-walkthrough).
 
-**`Close`** ([server.go:234](../../internal/server/server.go#L234)) runs once: gateway, then `cmds`, then wait for the pipeline (which ends with the sequencer's final fsync), then close the WAL. It returns the durability error, if any. **`Failed`** and **`Err`** expose the failure to `cmd/engine`, which shuts down on it.
+**`Close`** ([server.go:248](../../internal/server/server.go#L248)) runs once: gateway, then `cmds`, then wait for the pipeline (which ends with the sequencer's final fsync), then close the WAL. It returns the durability error, if any. **`Failed`** and **`Err`** expose the failure to `cmd/engine`, which shuts down on it.
 
 ### Tests
 
