@@ -412,7 +412,7 @@ func FuzzScan(f *testing.F) {
 	f.Add(append(append([]byte{}, seed...), 0, 0, 0, 0))
 	f.Add([]byte("MTCH"))
 	f.Fuzz(func(t *testing.T, data []byte) {
-		res, err := scanBytes("fuzz.log", data, 1, 0, true, nil)
+		res, err := scanBytes("fuzz.log", data, 1, 0, true, false, nil)
 		if err != nil {
 			if !errors.Is(err, ErrCorrupt) {
 				t.Fatalf("non-corruption error from pure scan: %v", err)
@@ -425,7 +425,7 @@ func FuzzScan(f *testing.F) {
 		if res.tornAt < headerSize {
 			return // recovery removes the whole file
 		}
-		again, err := scanBytes("fuzz.log", data[:res.tornAt], 1, 0, true, nil)
+		again, err := scanBytes("fuzz.log", data[:res.tornAt], 1, 0, true, false, nil)
 		if err != nil || again.tornAt != -1 || again.records != res.records || again.lastSeq != res.lastSeq {
 			t.Fatalf("after truncating at %d: %+v %v (before: %+v)", res.tornAt, again, err, res)
 		}
@@ -482,5 +482,92 @@ func BenchmarkAppendFlush(b *testing.B) {
 		if err := l.Flush(); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+// The fill log's mode: gaps allowed, but seqs must still increase.
+func TestAllowGaps(t *testing.T) {
+	dir := t.TempDir()
+	opts := Options{AllowGaps: true, SegmentSize: 200}
+	l, _, err := Open(dir, opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, seq := range []uint64{3, 4, 9, 20, 21, 50} {
+		l.Append(seq, 0, payloadFor(seq))
+		_ = l.Flush()
+	}
+	_ = l.Close()
+	var seqs []uint64
+	l, info, err := Open(dir, opts, func(r Record) error { seqs = append(seqs, r.Seq); return nil })
+	if err != nil || fmt.Sprint(seqs) != "[3 4 9 20 21 50]" || info.LastSeq != 50 {
+		t.Fatalf("%v %+v %v", seqs, info, err)
+	}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("non-increasing append accepted")
+			}
+		}()
+		l.Append(50, 0, nil)
+	}()
+	_ = l.Close()
+	// Without AllowGaps the same log is corrupt.
+	if _, _, err := Open(dir, Options{SegmentSize: 200}, nil); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("gapped log opened without AllowGaps: %v", err)
+	}
+}
+
+func TestRemoveSegmentsBelow(t *testing.T) {
+	dir := t.TempDir()
+	opts := Options{SegmentSize: 300}
+	writeLog(t, dir, opts, 1, 100, 5)
+	segs := segPaths(t, dir)
+	l, _, err := Open(dir, opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	// A snapshot at seq 50: segments whose last record is below 50 can go.
+	n, err := l.RemoveSegmentsBelow(50)
+	if err != nil || n == 0 {
+		t.Fatalf("removed %d, %v", n, err)
+	}
+	var seqs []uint64
+	l2, info, err := Open(dir, opts, func(r Record) error { seqs = append(seqs, r.Seq); return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = l2.Close()
+	if info.FirstSeq > 50 || info.LastSeq != 100 || seqs[0] != info.FirstSeq {
+		t.Fatalf("after removal: first %d last %d; everything from 50 on must remain", info.FirstSeq, info.LastSeq)
+	}
+	if left := segPaths(t, dir); len(left) != len(segs)-n {
+		t.Fatalf("%d segments left, removed %d of %d", len(left), n, len(segs))
+	}
+	// Even a huge seq never removes the last segment.
+	if _, err := l.RemoveSegmentsBelow(1 << 60); err != nil || len(segPaths(t, dir)) != 1 {
+		t.Fatalf("%v; %d segments left, want the last one", err, len(segPaths(t, dir)))
+	}
+}
+
+// ReadOnly reports a torn tail without truncating it.
+func TestReadOnlyLeavesTornTail(t *testing.T) {
+	dir := t.TempDir()
+	writeLog(t, dir, Options{}, 1, 5, 5)
+	path := segPaths(t, dir)[0]
+	data, _ := os.ReadFile(path)
+	if err := os.WriteFile(path, data[:len(data)-7], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, info, err := Open(dir, Options{ReadOnly: true}, nil)
+	if err != nil || info.LastSeq != 4 || info.TornBytes == 0 {
+		t.Fatalf("%+v %v", info, err)
+	}
+	if after, _ := os.ReadFile(path); len(after) != len(data)-7 {
+		t.Fatalf("read-only open changed the file: %d bytes, was %d", len(after), len(data)-7)
+	}
+	if _, info, err := Open(filepath.Join(dir, "missing"), Options{ReadOnly: true}, nil); err != nil || info.LastSeq != 0 {
+		t.Fatalf("missing dir: %+v %v", info, err)
 	}
 }

@@ -30,6 +30,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"github.com/tanxena/matchd/internal/fsutil"
 )
 
 const (
@@ -68,6 +70,14 @@ type Options struct {
 	// OpenFile opens (creating if needed) a segment for appending. nil =
 	// os.OpenFile with O_CREATE|O_WRONLY|O_APPEND.
 	OpenFile func(path string) (File, error)
+	// AllowGaps relaxes sequence continuity from "each record is the
+	// previous seq + 1" to "strictly increasing". The command WAL never sets
+	// it; the fill log, keyed by match id, does (decision 014).
+	AllowGaps bool
+	// ReadOnly opens the log only to read it: a torn tail is reported in
+	// RecoveryInfo but not truncated, nothing is created, and the returned
+	// Log must not be appended to. replay-check uses it.
+	ReadOnly bool
 	// Log receives recovery messages (torn tails). nil = discard.
 	Log *slog.Logger
 }
@@ -141,7 +151,11 @@ func Open(dir string, opts Options, replay func(Record) error) (*Log, RecoveryIn
 	if l.log == nil {
 		l.log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if opts.ReadOnly {
+		if _, err := os.Stat(dir); os.IsNotExist(err) {
+			return l, RecoveryInfo{}, nil // nothing logged yet
+		}
+	} else if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, RecoveryInfo{}, err
 	}
 	segs, err := listSegments(dir)
@@ -154,7 +168,7 @@ func Open(dir string, opts Options, replay func(Record) error) (*Log, RecoveryIn
 	var lastSize int64 // size of the last remaining segment after recovery
 	for i, seg := range segs {
 		isLast := i == len(segs)-1
-		res, err := scanSegment(seg.path, seg.first, last, isLast, replay)
+		res, err := scanSegment(seg.path, seg.first, last, isLast, opts.AllowGaps, replay)
 		if err != nil {
 			return nil, info, err
 		}
@@ -166,7 +180,9 @@ func Open(dir string, opts Options, replay func(Record) error) (*Log, RecoveryIn
 			last = res.lastSeq
 		}
 		lastSize = res.size
-		if isLast && res.tornAt >= 0 {
+		if isLast && res.tornAt >= 0 && opts.ReadOnly {
+			info.TornBytes = res.size - res.tornAt
+		} else if isLast && res.tornAt >= 0 {
 			info.TornBytes = res.size - res.tornAt
 			l.log.Warn("wal: truncating torn tail", "segment", seg.path,
 				"offset", res.tornAt, "bytes", info.TornBytes, "last_good_seq", last)
@@ -201,7 +217,7 @@ func Open(dir string, opts Options, replay func(Record) error) (*Log, RecoveryIn
 	l.appended.Store(last)
 	l.synced.Store(last) // everything that survived on disk counts as durable
 
-	if l.curPath != "" {
+	if l.curPath != "" && !opts.ReadOnly {
 		f, err := opts.OpenFile(l.curPath)
 		if err != nil {
 			return nil, info, err
@@ -252,17 +268,17 @@ type scanResult struct {
 
 // scanSegment reads one segment file and scans it. prev is the seq of the
 // record before this segment (0 at the start of the log).
-func scanSegment(path string, first, prev uint64, isLast bool, replay func(Record) error) (scanResult, error) {
+func scanSegment(path string, first, prev uint64, isLast, gaps bool, replay func(Record) error) (scanResult, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return scanResult{tornAt: -1}, err
 	}
-	return scanBytes(filepath.Base(path), data, first, prev, isLast, replay)
+	return scanBytes(filepath.Base(path), data, first, prev, isLast, gaps, replay)
 }
 
 // scanBytes is the whole segment-parsing logic, on bytes in memory, so it
 // can be fuzzed without touching the file system.
-func scanBytes(name string, data []byte, first, prev uint64, isLast bool, replay func(Record) error) (scanResult, error) {
+func scanBytes(name string, data []byte, first, prev uint64, isLast, gaps bool, replay func(Record) error) (scanResult, error) {
 	res := scanResult{tornAt: -1, size: int64(len(data))}
 	corrupt := func(off int, format string, args ...any) (scanResult, error) {
 		return res, fmt.Errorf("%w: %s at offset %d: %s", ErrCorrupt, name, off, fmt.Sprintf(format, args...))
@@ -302,7 +318,11 @@ func scanBytes(name string, data []byte, first, prev uint64, isLast bool, replay
 		if res.records == 0 && rec.Seq != first {
 			return corrupt(off, "first record has seq %d, segment name says %d", rec.Seq, first)
 		}
-		if rec.Seq != expect {
+		if gaps {
+			if rec.Seq < expect {
+				return corrupt(off, "seq %d after %d: not increasing", rec.Seq, expect-1)
+			}
+		} else if rec.Seq != expect {
 			return corrupt(off, "seq %d, expected %d (gap or repeat)", rec.Seq, expect)
 		}
 		if replay != nil {
@@ -382,8 +402,8 @@ func (l *Log) Append(seq uint64, time int64, payload []byte) {
 	if len(payload) > MaxPayload {
 		panic(fmt.Sprintf("wal: payload of %d bytes exceeds MaxPayload", len(payload)))
 	}
-	if want := l.lastAppendedOrPending() + 1; l.lastAppendedOrPending() != 0 && seq != want {
-		panic(fmt.Sprintf("wal: append seq %d, expected %d", seq, want))
+	if last := l.lastAppendedOrPending(); last != 0 && (seq != last+1 && !l.opts.AllowGaps || seq <= last) {
+		panic(fmt.Sprintf("wal: append seq %d after %d", seq, last))
 	}
 	start := len(l.pending)
 	l.pending = binary.LittleEndian.AppendUint32(l.pending, uint32(recordFixed+len(payload)))
@@ -455,7 +475,7 @@ func (l *Log) roll(first uint64) error {
 		return fmt.Errorf("wal: write segment header: %w", err)
 	}
 	// Make the new file's directory entry durable too (decision 011).
-	if err := syncDir(l.dir); err != nil {
+	if err := fsutil.SyncDir(l.dir); err != nil {
 		return fmt.Errorf("wal: sync directory: %w", err)
 	}
 	l.mu.Lock()
@@ -501,4 +521,31 @@ func (l *Log) Close() error {
 	}
 	l.closed = true
 	return l.cur.Close()
+}
+
+// RemoveSegmentsBelow deletes every segment whose records all have seq < seq
+// (PRD 5.4: a segment is deletable once a snapshot's seq exceeds its last
+// seq). A segment's last seq is its successor's first seq - 1, so the last
+// segment is never removed, and neither is the one being appended to. Safe
+// to call while another goroutine appends. Returns how many were removed.
+func (l *Log) RemoveSegmentsBelow(seq uint64) (int, error) {
+	l.mu.Lock()
+	current := l.curPath
+	l.mu.Unlock()
+	segs, err := listSegments(l.dir)
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for i := 0; i+1 < len(segs); i++ {
+		lastSeq := segs[i+1].first - 1
+		if lastSeq >= seq || segs[i].path == current {
+			break // segments are in order: nothing later qualifies either
+		}
+		if err := os.Remove(segs[i].path); err != nil {
+			return removed, fmt.Errorf("wal: remove %s: %w", segs[i].path, err)
+		}
+		removed++
+	}
+	return removed, nil
 }
