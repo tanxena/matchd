@@ -99,6 +99,22 @@ const (
 	// EvInstrumentAdded: an AddInstrument command succeeded; Instrument is
 	// the new instrument's id.
 	EvInstrumentAdded EventKind = 6
+	// EvTrade: the public print of one match, for market data: Price, Qty,
+	// the aggressor's Side, MatchID. Emitted right after the match's two
+	// EvFill events.
+	EvTrade EventKind = 7
+
+	// Kinds the publisher creates (never the engine), so that everything a
+	// session sends travels through its one queue of Events (decision 016).
+
+	// EvSnapshotBegin starts a market-data snapshot for Instrument at
+	// MDSeq; Qty is how many EvSnapshotLevel events follow.
+	EvSnapshotBegin EventKind = 8
+	// EvSnapshotLevel is one price level of a snapshot: Side, Price, Qty.
+	EvSnapshotLevel EventKind = 9
+	// EvResendUnavailable: a Resend asked for MDSeq values the ring buffer
+	// no longer holds; the client must subscribe again for a snapshot.
+	EvResendUnavailable EventKind = 10
 )
 
 func (k EventKind) String() string {
@@ -115,6 +131,14 @@ func (k EventKind) String() string {
 		return "BookDelta"
 	case EvInstrumentAdded:
 		return "InstrumentAdded"
+	case EvTrade:
+		return "Trade"
+	case EvSnapshotBegin:
+		return "SnapshotBegin"
+	case EvSnapshotLevel:
+		return "SnapshotLevel"
+	case EvResendUnavailable:
+		return "ResendUnavailable"
 	}
 	return fmt.Sprintf("event(%d)", uint8(k))
 }
@@ -161,8 +185,11 @@ type Event struct {
 	// Leaves is the party's open quantity after a fill: for the taker, what
 	// is still to be matched; for the maker, what is still resting.
 	Leaves  book.Qty
-	MatchID uint64 // Fill: shared by the taker and maker events of one match
+	MatchID uint64 // Fill, Trade: shared by the taker, maker and trade events of one match
 	Role    Role   // Fill
+	// MDSeq numbers market-data events (BookDelta, Trade) per instrument,
+	// gap-free from 1; SnapshotBegin carries the md_seq the snapshot is at.
+	MDSeq uint64
 
 	Reason       book.RejectReason // Reject
 	CancelReason CancelReason      // Cancelled

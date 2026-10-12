@@ -22,20 +22,22 @@ import (
 
 // Snapshot file layout (all integers little-endian):
 //
-//	header        "MTCHSNP" version(1)                     8 bytes
+//	header        "MTCHSNP" version(2)                     8 bytes
 //	seq           u64   last command included
 //	last_order_id u64
 //	last_match_id u64
 //	n_instruments u32
 //	per instrument, in id order:
-//	  symbol_len u8, symbol, tick_size i64, lot_size i64
+//	  symbol_len u8, symbol, tick_size i64, lot_size i64, md_seq u64
 //	  n_bids u32, bids...    in priority order
 //	  n_asks u32, asks...    in priority order
 //	  order = id u64, client u32, clordid u64, price i64, qty i64   (36 bytes)
 //	crc           u32   CRC32C of every byte before it
 const (
-	snapMagic   = "MTCHSNP"
-	snapVersion = 1
+	snapMagic = "MTCHSNP"
+	// Version 2 (milestone 6) added each instrument's md_seq. Version 1
+	// files are refused: none exist outside tests (decision 016).
+	snapVersion = 2
 	orderBytes  = 36
 )
 
@@ -49,7 +51,7 @@ func Encode(st engine.State) []byte {
 	le := binary.LittleEndian
 	n := 8 + 28
 	for _, is := range st.Instruments {
-		n += 1 + len(is.Spec.Symbol) + 16 + 8 + orderBytes*(len(is.Bids)+len(is.Asks))
+		n += 1 + len(is.Spec.Symbol) + 24 + 8 + orderBytes*(len(is.Bids)+len(is.Asks))
 	}
 	b := make([]byte, 0, n+4)
 	b = append(b, snapMagic...)
@@ -63,6 +65,7 @@ func Encode(st engine.State) []byte {
 		b = append(b, is.Spec.Symbol...)
 		b = le.AppendUint64(b, uint64(is.Spec.TickSize))
 		b = le.AppendUint64(b, uint64(is.Spec.LotSize))
+		b = le.AppendUint64(b, is.MDSeq)
 		for _, side := range [2][]book.RestingOrder{is.Bids, is.Asks} {
 			b = le.AppendUint32(b, uint32(len(side)))
 			for _, r := range side {
@@ -104,6 +107,7 @@ func Decode(b []byte) (engine.State, error) {
 		is.Spec.Symbol = string(r.bytes(int(r.u8())))
 		is.Spec.TickSize = int64(r.u64())
 		is.Spec.LotSize = int64(r.u64())
+		is.MDSeq = r.u64()
 		for si, side := range [2]book.Side{book.Buy, book.Sell} {
 			n := int(r.u32())
 			if n*orderBytes > len(body)-r.off {

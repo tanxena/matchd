@@ -80,6 +80,7 @@ type levelKey struct {
 
 // views are the two pictures of the world a consumer can build from events.
 type views struct {
+	md     map[engine.InstrumentID]uint64     // last md_seq seen per instrument
 	levels map[levelKey]book.Qty              // market data: from BookDelta only
 	open   map[book.OrderID]book.RestingOrder // clients: from Ack, Fill, Cancelled
 	inst   map[book.OrderID]engine.InstrumentID
@@ -87,6 +88,7 @@ type views struct {
 
 func newViews() *views {
 	return &views{
+		md:     make(map[engine.InstrumentID]uint64),
 		levels: make(map[levelKey]book.Qty),
 		open:   make(map[book.OrderID]book.RestingOrder),
 		inst:   make(map[book.OrderID]engine.InstrumentID),
@@ -101,6 +103,15 @@ func (v *views) apply(c engine.Command, evs []engine.Event, lastOrderID *book.Or
 		e := evs[i]
 		if e.Seq != c.Seq || e.Time != c.Time {
 			return fmt.Errorf("event %d (%v) carries seq=%d time=%d, command has %d/%d", i, e.Kind, e.Seq, e.Time, c.Seq, c.Time)
+		}
+		// Market-data events are numbered per instrument, gap-free.
+		if e.Kind == engine.EvBookDelta || e.Kind == engine.EvTrade {
+			if e.MDSeq != v.md[e.Instrument]+1 {
+				return fmt.Errorf("%v md_seq %d after %d on instrument %d", e.Kind, e.MDSeq, v.md[e.Instrument], e.Instrument)
+			}
+			v.md[e.Instrument] = e.MDSeq
+		} else if e.MDSeq != 0 {
+			return fmt.Errorf("%v carries md_seq %d", e.Kind, e.MDSeq)
 		}
 		switch e.Kind {
 		case engine.EvAck:
@@ -141,7 +152,16 @@ func (v *views) apply(c engine.Command, evs []engine.Event, lastOrderID *book.Or
 					v.open[f.OrderID] = o
 				}
 			}
-			i++ // consumed the maker event
+			// Then the public trade print for the same match.
+			if i+2 >= len(evs) {
+				return fmt.Errorf("match %d has no trade print", e.MatchID)
+			}
+			if tr := evs[i+2]; tr.Kind != engine.EvTrade || tr.MatchID != e.MatchID || tr.Price != e.Price ||
+				tr.Qty != e.Qty || tr.Side != e.Side || tr.Client != 0 || tr.MDSeq != v.md[e.Instrument]+1 {
+				return fmt.Errorf("match %d: trade print %+v doesn't match fill %+v", e.MatchID, tr, e)
+			}
+			v.md[e.Instrument]++
+			i += 2 // consumed the maker event and the trade
 		case engine.EvCancelled:
 			o, ok := v.open[e.OrderID]
 			if !ok || o.Qty != e.Qty {
@@ -235,13 +255,13 @@ func TestEventStreamRebuildsState(t *testing.T) {
 		t.Run(fmt.Sprint(seed+1), func(t *testing.T) {
 			t.Parallel()
 			log := runStream(t, seed+1, streamCmds)
-			var kinds [engine.EvInstrumentAdded + 1]int
+			var kinds [engine.EvTrade + 1]int
 			for _, e := range log {
 				kinds[e.Kind]++
 			}
 			// Every event kind must actually occur, or the checks above
 			// passed vacuously.
-			for k := engine.EvAck; k <= engine.EvBookDelta; k++ {
+			for _, k := range []engine.EventKind{engine.EvAck, engine.EvReject, engine.EvFill, engine.EvCancelled, engine.EvBookDelta, engine.EvTrade} {
 				if kinds[k] < streamCmds/100 {
 					t.Errorf("only %d %v events in %d commands", kinds[k], k, streamCmds)
 				}

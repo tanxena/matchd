@@ -16,6 +16,7 @@ type Snapshot struct {
 	LastOrderID book.OrderID
 	LastMatchID uint64
 	Books       []*book.Frozen // index i is instrument id i+1
+	MDSeq       []uint64       // index i is instrument id i+1
 }
 
 // Freeze captures the engine's state for a snapshot. It copies only counters
@@ -23,7 +24,7 @@ type Snapshot struct {
 // doesn't grow with the number of resting orders. Engine goroutine only.
 func (e *Engine) Freeze() *Snapshot {
 	s := &Snapshot{Seq: e.lastSeq, LastOrderID: e.lastOrderID, LastMatchID: e.lastMatchID,
-		Books: make([]*book.Frozen, 0, len(e.books)-1)}
+		Books: make([]*book.Frozen, 0, len(e.books)-1), MDSeq: append([]uint64(nil), e.mdSeq[1:]...)}
 	for _, b := range e.books[1:] {
 		s.Books = append(s.Books, b.Freeze())
 	}
@@ -42,9 +43,10 @@ func (e *Engine) Thaw(s *Snapshot) {
 // InstrumentState is one instrument in a State: its definition and its
 // resting orders in priority order.
 type InstrumentState struct {
-	Spec book.Instrument
-	Bids []book.RestingOrder
-	Asks []book.RestingOrder
+	Spec  book.Instrument
+	MDSeq uint64 // md_seq of the instrument's last market-data event
+	Bids  []book.RestingOrder
+	Asks  []book.RestingOrder
 }
 
 // State is the engine's complete state as plain data: what a snapshot file
@@ -60,8 +62,8 @@ type State struct {
 // snapshot is not yet thawed.
 func (s *Snapshot) State() State {
 	st := State{Seq: s.Seq, LastOrderID: s.LastOrderID, LastMatchID: s.LastMatchID}
-	for _, f := range s.Books {
-		is := InstrumentState{Spec: f.Instrument()}
+	for i, f := range s.Books {
+		is := InstrumentState{Spec: f.Instrument(), MDSeq: s.MDSeq[i]}
 		f.Each(book.Buy, func(r book.RestingOrder) { is.Bids = append(is.Bids, r) })
 		f.Each(book.Sell, func(r book.RestingOrder) { is.Asks = append(is.Asks, r) })
 		st.Instruments = append(st.Instruments, is)
@@ -90,6 +92,7 @@ func Restore(st State) (*Engine, error) {
 			return nil, fmt.Errorf("engine: restore: %w", err)
 		}
 		e.books = append(e.books, b)
+		e.mdSeq = append(e.mdSeq, is.MDSeq)
 		e.symbols[is.Spec.Symbol] = InstrumentID(i + 1)
 		for _, side := range [2][]book.RestingOrder{is.Bids, is.Asks} {
 			for _, r := range side {

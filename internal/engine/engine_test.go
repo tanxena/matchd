@@ -71,10 +71,11 @@ type ev struct {
 	role   engine.Role
 	reason book.RejectReason
 	cxl    engine.CancelReason
+	md     uint64
 }
 
 func toEv(e engine.Event) ev {
-	return ev{e.Kind, e.Client, e.ClOrdID, e.OrderID, e.Side, e.Price, e.Qty, e.Leaves, e.MatchID, e.Role, e.Reason, e.CancelReason}
+	return ev{e.Kind, e.Client, e.ClOrdID, e.OrderID, e.Side, e.Price, e.Qty, e.Leaves, e.MatchID, e.Role, e.Reason, e.CancelReason, e.MDSeq}
 }
 
 func expect(t *testing.T, got []engine.Event, want ...ev) {
@@ -113,8 +114,14 @@ func ack(client book.ClientID, clOrd book.ClientOrderID, id book.OrderID, side b
 	return ev{kind: engine.EvAck, client: client, clOrd: clOrd, order: id, side: side, px: px, qty: qty}
 }
 
-func delta(side book.Side, px book.Price, qty book.Qty) ev {
-	return ev{kind: engine.EvBookDelta, side: side, px: px, qty: qty}
+// delta is a book delta with its md_seq.
+func delta(side book.Side, px book.Price, qty book.Qty, md uint64) ev {
+	return ev{kind: engine.EvBookDelta, side: side, px: px, qty: qty, md: md}
+}
+
+// trade is the public print of match `match`; side is the aggressor's.
+func trade(side book.Side, px book.Price, qty book.Qty, match, md uint64) ev {
+	return ev{kind: engine.EvTrade, side: side, px: px, qty: qty, match: match, md: md}
 }
 
 func fillT(client book.ClientID, clOrd book.ClientOrderID, id book.OrderID, side book.Side, px book.Price, qty, leaves book.Qty, match uint64) ev {
@@ -129,36 +136,38 @@ func TestNewOrderEventSequence(t *testing.T) {
 	d := newDriver(t)
 	x := d.addInstrument("XYZ")
 
-	// Resting limit: Ack then a delta for its own level.
-	expect(t, d.step(limit(x, 1, 11, sell, 100, 5)), ack(1, 11, 1, sell, 100, 5), delta(sell, 100, 5))
-	expect(t, d.step(limit(x, 2, 21, sell, 100, 3)), ack(2, 21, 2, sell, 100, 3), delta(sell, 100, 8))
-	expect(t, d.step(limit(x, 1, 12, sell, 101, 4)), ack(1, 12, 3, sell, 101, 4), delta(sell, 101, 4))
+	// Resting limit: Ack then a delta for its own level. Market-data events
+	// (deltas, trades) are numbered per instrument from md_seq 1.
+	expect(t, d.step(limit(x, 1, 11, sell, 100, 5)), ack(1, 11, 1, sell, 100, 5), delta(sell, 100, 5, 1))
+	expect(t, d.step(limit(x, 2, 21, sell, 100, 3)), ack(2, 21, 2, sell, 100, 3), delta(sell, 100, 8, 2))
+	expect(t, d.step(limit(x, 1, 12, sell, 101, 4)), ack(1, 12, 3, sell, 101, 4), delta(sell, 101, 4, 3))
 
-	// Sweep: per level, the fill pairs then that level's delta.
+	// Sweep: per match the fill pair then its trade print; per level, then
+	// that level's delta.
 	expect(t, d.step(limit(x, 3, 31, buy, 101, 10)),
 		ack(3, 31, 4, buy, 101, 10),
-		fillT(3, 31, 4, buy, 100, 5, 5, 1), fillM(1, 11, 1, sell, 100, 5, 0, 1),
-		fillT(3, 31, 4, buy, 100, 3, 2, 2), fillM(2, 21, 2, sell, 100, 3, 0, 2),
-		delta(sell, 100, 0),
-		fillT(3, 31, 4, buy, 101, 2, 0, 3), fillM(1, 12, 3, sell, 101, 2, 2, 3),
-		delta(sell, 101, 2),
+		fillT(3, 31, 4, buy, 100, 5, 5, 1), fillM(1, 11, 1, sell, 100, 5, 0, 1), trade(buy, 100, 5, 1, 4),
+		fillT(3, 31, 4, buy, 100, 3, 2, 2), fillM(2, 21, 2, sell, 100, 3, 0, 2), trade(buy, 100, 3, 2, 5),
+		delta(sell, 100, 0, 6),
+		fillT(3, 31, 4, buy, 101, 2, 0, 3), fillM(1, 12, 3, sell, 101, 2, 2, 3), trade(buy, 101, 2, 3, 7),
+		delta(sell, 101, 2, 8),
 	)
 
-	// Market order larger than the book: fills, delta, then the remainder expires.
+	// Market order larger than the book: fills, trade, delta, then the remainder expires.
 	expect(t, d.step(market(x, 3, 32, buy, 5)),
 		ack(3, 32, 5, buy, 0, 5),
-		fillT(3, 32, 5, buy, 101, 2, 3, 4), fillM(1, 12, 3, sell, 101, 2, 0, 4),
-		delta(sell, 101, 0),
+		fillT(3, 32, 5, buy, 101, 2, 3, 4), fillM(1, 12, 3, sell, 101, 2, 0, 4), trade(buy, 101, 2, 4, 9),
+		delta(sell, 101, 0, 10),
 		ev{kind: engine.EvCancelled, client: 3, clOrd: 32, order: 5, side: buy, qty: 3, cxl: engine.CancelExpired},
 	)
 
 	// Partial fill then rest: the taker's last fill leaves 4, which rests.
-	d.step(limit(x, 1, 13, sell, 102, 6))
+	d.step(limit(x, 1, 13, sell, 102, 6)) // md 11
 	expect(t, d.step(limit(x, 2, 22, buy, 102, 10)),
 		ack(2, 22, 7, buy, 102, 10),
-		fillT(2, 22, 7, buy, 102, 6, 4, 5), fillM(1, 13, 6, sell, 102, 6, 0, 5),
-		delta(sell, 102, 0),
-		delta(buy, 102, 4),
+		fillT(2, 22, 7, buy, 102, 6, 4, 5), fillM(1, 13, 6, sell, 102, 6, 0, 5), trade(buy, 102, 6, 5, 12),
+		delta(sell, 102, 0, 13),
+		delta(buy, 102, 4, 14),
 	)
 }
 
@@ -173,12 +182,12 @@ func TestCancelEvents(t *testing.T) {
 	// Owner: Cancelled (echoing clOrdID, side, price, qty) then the level's new size.
 	expect(t, d.step(cancel(x, 1, 1)),
 		ev{kind: engine.EvCancelled, client: 1, clOrd: 11, order: 1, side: buy, px: 99, qty: 5, cxl: engine.CancelRequested},
-		delta(buy, 99, 2),
+		delta(buy, 99, 2, 3),
 	)
 	expect(t, d.step(cancel(x, 1, 1)), ev{kind: engine.EvReject, client: 1, order: 1, reason: book.RejectUnknownOrder})
 	expect(t, d.step(cancel(x, 2, 2)),
 		ev{kind: engine.EvCancelled, client: 2, clOrd: 21, order: 2, side: buy, px: 99, qty: 2, cxl: engine.CancelRequested},
-		delta(buy, 99, 0),
+		delta(buy, 99, 0, 4),
 	)
 }
 
@@ -206,9 +215,10 @@ func TestRegistry(t *testing.T) {
 		expect(t, d.step(cancel(bad, 1, 1)), ev{kind: engine.EvReject, client: 1, order: 1, reason: book.RejectUnknownInstrument})
 	}
 
-	// Books are independent: a buy on BBB doesn't see a sell on AAA.
+	// Books are independent: a buy on BBB doesn't see a sell on AAA, and
+	// each instrument numbers its own market data from 1.
 	d.step(limit(a, 1, 1, sell, 100, 5))
-	expect(t, d.step(limit(b, 2, 1, buy, 100, 5)), ack(2, 1, 2, buy, 100, 5), delta(buy, 100, 5))
+	expect(t, d.step(limit(b, 2, 1, buy, 100, 5)), ack(2, 1, 2, buy, 100, 5), delta(buy, 100, 5, 1))
 }
 
 func TestOrderIDsAreGapFreeAcrossRejects(t *testing.T) {
@@ -238,8 +248,8 @@ func TestEventsCarryCommandSeqAndTime(t *testing.T) {
 	d := newDriver(t)
 	x := d.addInstrument("XYZ")
 	d.step(limit(x, 1, 1, sell, 100, 5))
-	evs := d.step(market(x, 2, 1, buy, 9)) // Ack, 2 fills, delta, expired
-	if len(evs) != 5 {
+	evs := d.step(market(x, 2, 1, buy, 9)) // Ack, 2 fills, trade, delta, expired
+	if len(evs) != 6 {
 		t.Fatalf("got %d events", len(evs))
 	}
 	for _, e := range evs {

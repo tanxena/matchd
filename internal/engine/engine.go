@@ -14,6 +14,7 @@ import (
 // concurrency lives outside it, at the channel edges (decision 005).
 type Engine struct {
 	books   []*book.Book            // indexed by InstrumentID; [0] is unused
+	mdSeq   []uint64                // per instrument: md_seq of its last market-data event (decision 016)
 	symbols map[string]InstrumentID // registry: symbol -> id
 
 	lastSeq     Seq          // Seq of the last command applied
@@ -27,6 +28,7 @@ type Engine struct {
 func New() *Engine {
 	return &Engine{
 		books:   make([]*book.Book, 1), // slot 0 reserved: InstrumentID 0 is invalid
+		mdSeq:   make([]uint64, 1),
 		symbols: make(map[string]InstrumentID),
 	}
 }
@@ -140,10 +142,19 @@ func (e *Engine) reject(c *Command, reason book.RejectReason, out []Event) []Eve
 	})
 }
 
+// nextMD returns the next md_seq for instrument id. Market-data events
+// (book deltas and trades) are numbered per instrument, gap-free, by the
+// engine, so the numbering is part of the deterministic state: replay and
+// snapshots reproduce it exactly (decision 016).
+func (e *Engine) nextMD(id InstrumentID) uint64 {
+	e.mdSeq[id]++
+	return e.mdSeq[id]
+}
+
 func (e *Engine) delta(c *Command, side book.Side, px book.Price, qty book.Qty) Event {
 	return Event{
 		Seq: c.Seq, Time: c.Time, Kind: EvBookDelta, Instrument: c.Instrument,
-		Side: side, Price: px, Qty: qty,
+		Side: side, Price: px, Qty: qty, MDSeq: e.nextMD(c.Instrument),
 	}
 }
 
@@ -198,6 +209,13 @@ func (e *Engine) newOrder(c *Command, out []Event) []Event {
 				Client: f.MakerClient, ClOrdID: f.MakerClOrdID, OrderID: f.Maker,
 				Side: opp, Price: f.Price, Qty: f.Qty, Leaves: f.MakerLeft,
 				MatchID: e.lastMatchID, Role: RoleMaker,
+			},
+			// The public trade print for market data: anonymous, with the
+			// aggressor's side.
+			Event{
+				Seq: c.Seq, Time: c.Time, Kind: EvTrade, Instrument: c.Instrument,
+				Side: c.Side, Price: f.Price, Qty: f.Qty,
+				MatchID: e.lastMatchID, MDSeq: e.nextMD(c.Instrument),
 			},
 		)
 		// Fills arrive grouped by level, best first. After the last fill at a
@@ -259,6 +277,7 @@ func (e *Engine) addInstrument(c *Command, out []Event) []Event {
 	}
 	id := InstrumentID(len(e.books))
 	e.books = append(e.books, bk)
+	e.mdSeq = append(e.mdSeq, 0)
 	e.symbols[c.Spec.Symbol] = id
 	return append(out, Event{
 		Seq: c.Seq, Time: c.Time, Kind: EvInstrumentAdded, Instrument: id,
