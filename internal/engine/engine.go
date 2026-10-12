@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/tanxena/matchd/internal/book"
 )
@@ -64,13 +65,62 @@ func (e *Engine) Step(c *Command, out []Event) []Event {
 // Backpressure: sends on out block when the consumer is behind, which stalls
 // the engine. The consumer (the publisher) is therefore responsible for never
 // blocking on a slow client; it must buffer or disconnect instead (PRD 5.5).
-func (e *Engine) Run(in <-chan Command, out chan<- Event) {
+//
+// If snap is non-nil, Run also takes copy-on-write snapshots between
+// commands (decision 013): when Every commands have been applied since the
+// last snapshot, or a Tick arrives after at least one command, it freezes
+// the engine and sends the snapshot to snap.Out, and thaws it when it comes
+// back on snap.Done. At most one snapshot is in flight. Freezing costs
+// O(instruments + price levels + chunks), never O(orders), so it doesn't
+// stall matching.
+func (e *Engine) Run(in <-chan Command, out chan<- Event, snap *SnapshotHooks) {
 	defer close(out)
 	var buf []Event // reused for every command's events
-	for c := range in {
-		buf = e.Step(&c, buf[:0])
-		for i := range buf {
-			out <- buf[i]
+	var (
+		tick     <-chan time.Time
+		done     <-chan *Snapshot
+		inFlight bool   // a snapshot is out and not yet thawed
+		since    uint64 // commands applied since the last snapshot
+		wanted   bool   // a trigger fired while a snapshot was in flight
+	)
+	if snap != nil {
+		tick, done = snap.Tick, snap.Done
+	}
+	trigger := func() {
+		if inFlight || since == 0 {
+			wanted = inFlight && since > 0
+			return
+		}
+		s := e.Freeze()
+		select {
+		case snap.Out <- s:
+			inFlight, since, wanted = true, 0, false
+		default: // the writer isn't ready (it shouldn't happen with capacity 1)
+			e.Thaw(s)
+		}
+	}
+	for {
+		select {
+		case c, ok := <-in:
+			if !ok {
+				return // a snapshot still in flight is the writer's to finish
+			}
+			buf = e.Step(&c, buf[:0])
+			for i := range buf {
+				out <- buf[i]
+			}
+			since++
+			if snap != nil && snap.Every > 0 && since >= snap.Every {
+				trigger()
+			}
+		case <-tick:
+			trigger()
+		case s := <-done:
+			e.Thaw(s)
+			inFlight = false
+			if wanted {
+				trigger()
+			}
 		}
 	}
 }

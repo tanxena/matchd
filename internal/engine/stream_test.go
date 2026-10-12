@@ -293,7 +293,7 @@ func TestRunMatchesStep(t *testing.T) {
 	// Replay the identical commands through Run on its own goroutine.
 	in := make(chan engine.Command, 64) // producer -> engine goroutine
 	out := make(chan engine.Event, 64)  // engine goroutine -> this test
-	go engine.New().Run(in, out)
+	go engine.New().Run(in, out, nil)
 	go func() { // producer: sends every command, then closes in
 		for _, c := range cmds {
 			in <- c
