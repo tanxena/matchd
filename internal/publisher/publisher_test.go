@@ -49,7 +49,7 @@ func ev(client book.ClientID, seq engine.Seq) engine.Event {
 }
 
 func TestRoutesByClient(t *testing.T) {
-	p := New(quiet, nil)
+	p := New(quiet, nil, nil)
 	a, b := newFakeSub(10), newFakeSub(10)
 	p.Register(1, a)
 	p.Register(2, b)
@@ -70,7 +70,7 @@ func TestRoutesByClient(t *testing.T) {
 }
 
 func TestOneSessionPerClient(t *testing.T) {
-	p := New(quiet, nil)
+	p := New(quiet, nil, nil)
 	first, second := newFakeSub(1), newFakeSub(1)
 	if !p.Register(5, first) {
 		t.Fatal("first register failed")
@@ -91,7 +91,7 @@ func TestOneSessionPerClient(t *testing.T) {
 
 // A full queue must disconnect the client without blocking, and only once.
 func TestSlowConsumer(t *testing.T) {
-	p := New(quiet, nil)
+	p := New(quiet, nil, nil)
 	slow, ok := newFakeSub(3), newFakeSub(100)
 	p.Register(1, slow)
 	p.Register(2, ok)
@@ -128,7 +128,7 @@ func TestSlowConsumer(t *testing.T) {
 
 // Register/Unregister from many goroutines while Run routes: run with -race.
 func TestConcurrentRegistration(t *testing.T) {
-	p := New(quiet, nil)
+	p := New(quiet, nil, nil)
 	events := make(chan engine.Event, 64) // test -> Run goroutine
 	finished := make(chan struct{})       // closed when Run returns
 	go func() { p.Run(events); close(finished) }()
@@ -162,7 +162,7 @@ func TestConcurrentRegistration(t *testing.T) {
 
 func runGated(t *testing.T, d *durable.Seq, buf int) (*Publisher, chan engine.Event, chan struct{}, *fakeSub) {
 	t.Helper()
-	p := New(quiet, d)
+	p := New(quiet, d, nil)
 	sub := newFakeSub(MaxPending + 1000)
 	p.Register(1, sub)
 	events := make(chan engine.Event, buf) // test -> Run goroutine

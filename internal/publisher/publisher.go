@@ -27,6 +27,14 @@ import (
 	"github.com/tanxena/matchd/internal/engine"
 )
 
+// FillRecorder is told about every event the publisher releases (the fill
+// log, decision 014). Released runs on the publisher goroutine and must not
+// block for long; Flush is called once after each batch of releases.
+type FillRecorder interface {
+	Released(ev *engine.Event)
+	Flush() error
+}
+
 // MaxPending bounds the events held for durability. When it is reached the
 // publisher stops taking events from the engine until fsync catches up,
 // which back-pressures the engine (group commit only; under fsync=always
@@ -62,6 +70,9 @@ type Publisher struct {
 
 	// durable is the gate: nil means release at once (unit tests).
 	durable *durable.Seq
+	// fills records released fills (nil = none). Publisher goroutine only.
+	fills      FillRecorder
+	fillErrors atomic.Uint64
 	// pending holds events not yet durable, oldest first, from index head.
 	// Event seqs never decrease, so the releasable ones are always a prefix.
 	// Only the Run goroutine touches it.
@@ -78,9 +89,10 @@ type Publisher struct {
 }
 
 // New returns a publisher with no clients. Events are released only once
-// d covers their seq; d == nil releases them immediately.
-func New(log *slog.Logger, d *durable.Seq) *Publisher {
-	p := &Publisher{log: log, durable: d, pending: make([]engine.Event, 0, 1024)}
+// d covers their seq; d == nil releases them immediately. Every released
+// event is also given to fills, if non-nil.
+func New(log *slog.Logger, d *durable.Seq, fills FillRecorder) *Publisher {
+	p := &Publisher{log: log, durable: d, fills: fills, pending: make([]engine.Event, 0, 1024)}
 	empty := registry{}
 	p.clients.Store(&empty)
 	return p
@@ -165,10 +177,23 @@ func (p *Publisher) release() {
 	if p.durable != nil {
 		limit = p.durable.Load()
 	}
+	released := false
 	for p.head < len(p.pending) && uint64(p.pending[p.head].Seq) <= limit {
-		p.route(p.pending[p.head])
+		ev := &p.pending[p.head]
+		if p.fills != nil {
+			p.fills.Released(ev)
+		}
+		p.route(*ev)
 		p.head++
 		p.held.Add(-1)
+		released = true
+	}
+	if released && p.fills != nil {
+		// The fill log is an audit trail, not part of the durability
+		// contract: a write failure is logged and counted, never fatal.
+		if err := p.fills.Flush(); err != nil && p.fillErrors.Add(1) == 1 {
+			p.log.Error("fill log write failed; replay-check will see a gap", "err", err)
+		}
 	}
 	if p.head == len(p.pending) {
 		p.pending, p.head = p.pending[:0], 0 // empty: reuse from the start
