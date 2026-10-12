@@ -1,6 +1,6 @@
 # 010 — Windows-specific gotchas
 
-- **Status:** living record. Started in milestone 3; milestones 4 (fsync), 5 (atomic rename, process kill) and 7 (Linux pass) add to it.
+- **Status:** living record. Started in milestone 3; extended in milestones 4 (fsync) and 5 (rename, process kill); milestone 7 (Linux pass) adds to it.
 - **Why:** PRD 6.1: developed on Windows 11, must also build and pass on Linux; "record Windows-specific gotchas in a decision record".
 
 Each entry gives what happens, how we found out, and what the code does about it.
@@ -63,7 +63,28 @@ On Linux a new file's directory entry is only durable after fsyncing the directo
 
 Manual crash checks in this milestone stopped `engine.exe` with `taskkill //F` (Git Bash needs the doubled slash, or it rewrites `/F` as a path). That is a `TerminateProcess` kill: no deferred code runs, and nothing is flushed. Restart then replayed the WAL correctly. The milestone 5 harness will do this programmatically (`os.Process.Kill`, which is `TerminateProcess` on Windows and `SIGKILL` on Linux).
 
+## 10. `os.Rename` is not atomic on Windows (milestone 5)
+
+Snapshots and the manifest are written "atomically": write a temp file, fsync it, rename it over the target, fsync the directory (`fsutil.WriteFileAtomic`). On Linux, `rename` over an existing file is atomic ([POSIX rename](https://pubs.opengroup.org/onlinepubs/9799919799/functions/rename.html)): any observer sees the old file or the new one. Go's own documentation for [`os.Rename`](https://pkg.go.dev/os#Rename) says: *"Even within the same directory, on non-Unix platforms Rename is not an atomic operation."* Go uses [`MoveFileEx`](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw) with `MOVEFILE_REPLACE_EXISTING` there.
+
+What that means for us:
+- **Snapshot files** are renamed to new names that never existed (`<seq>.snap`), so nothing is replaced. The worst case is that the new file doesn't appear, and the previous snapshot is still listed.
+- **The manifest is replaced** on every snapshot. A crash in the middle of that rename could, on Windows, leave `manifest.json` missing.
+
+**How we found out:** reading the `os.Rename` documentation while writing decision 013. No test could have shown it, because a crash *inside* a rename can't be arranged.
+
+**Fix:** if `manifest.json` is missing, `snapshot.ReadManifest` falls back to `manifest.json.tmp` (complete and fsynced before the rename), and then to scanning the snapshot files, which are only renamed into place after being fsynced. `TestRecoveryWithoutManifest` covers both fallbacks.
+
+The fallback itself **introduced a bug**: the writer also used `ReadManifest`, so on the first snapshot it "found" the file it had just renamed into place, and listed it twice. Every later manifest write then failed its order check. The writer now reads only what it published (`readPublished`), never the scan. The new test caught this because it asserts that the writer had no failures.
+
+## 11. Killing the engine from the crash harness (milestone 5)
+
+`exec.Cmd.Process.Kill()` is `TerminateProcess` on Windows and SIGKILL on Linux, so one call works on both. Two details:
+- The built binary needs an `.exe` suffix on Windows. `TestMain` adds it when `os.PathSeparator == '\\'`.
+- The engine is started with `-listen 127.0.0.1:0`, and the harness reads the chosen port from the `gateway listening addr=...` log line, so concurrent test runs never fight over a port.
+
+After a `TerminateProcess` kill, Windows closes the dead process's file handles. Restarting on the same directory immediately was never blocked by a lingering handle in 150 kill-and-restart runs. That is consistent with handles being released at process exit, though not a guarantee about antivirus or indexer software holding files open.
+
 ## Pending (later milestones)
 
-- **Atomic replace by rename:** `os.Rename` over an existing file on Windows (milestone 5).
-- **Process kill** inside the crash harness, and file handles still open at kill time (milestone 5).
+- **Linux pass (milestone 7):** run the crash test and the fsync benchmark on Linux, and record the differences.

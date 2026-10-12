@@ -9,7 +9,7 @@ This folder is a study guide to the matching engine, written milestone by milest
 3. [02-engine.md](02-engine.md): **milestone 2**. Why one goroutine owns the engine, commands and events, the three gap-free counters, market-by-price deltas, why the book stopped using Go maps, and how to measure "zero allocations" honestly.
 4. [03-gateway.md](03-gateway.md): **milestone 3**. TCP framing, fixed binary layouts, two goroutines per connection, backpressure in both directions, the slow-consumer policy, sessions and identity, and fuzzing.
 5. [04-wal.md](04-wal.md): **milestone 4**. Write-ahead logging, what `write` and `fsync` guarantee, torn writes and checksums, group commit, the durability gate, fail-stop on fsync errors, and recovery by replay.
-6. *(milestone 5: snapshots, recovery and crash test, not yet written)*
+6. [05-recovery.md](05-recovery.md): **milestone 5**. Snapshots without pausing the engine (copy-on-write over a chunked slab), atomic file replacement and why it isn't atomic on Windows, the manifest and retention, the fill log and replay-check, and a crash harness that kills the real binary more than 50 times.
 7. *(milestone 6: market data, not yet written)*
 8. *(milestone 7: metrics and polish, not yet written)*
 9. *(milestone 8: IOC / FOK, not yet written)*
@@ -30,7 +30,11 @@ client ──TCP frame──▶ gateway ✅ ──command──▶ sequencer ✅
                                               ▼ events (ack, fills, book deltas) │ gates release
                                           publisher ✅* ◀─────────────────────────┘
                                               ├──▶ client writer ✅ ──TCP──▶ client
+                                              ├──▶ fill log ✅ (every released match)
                                               └──▶ market-data subscribers
+
+  in the background: engine ──freeze (copy-on-write)──▶ snapshot writer ✅ ──▶ snapshots + manifest ✅
+  at startup:        manifest → newest snapshot → WAL records after it → engine ✅
 
 ✅* = partly built: the publisher gates on durability and routes to clients,
       but doesn't serve market data yet (M6).
@@ -44,4 +48,4 @@ client ──TCP frame──▶ gateway ✅ ──command──▶ sequencer ✅
 6. **Publisher** ✅* *(M3 routing; M4 durability gate; M6 market data)*: **holds** each event until the durable seq covers it. Nothing leaves the process before its command is on disk (decision 012). It then routes the event by client id to that client's session queue, **never blocking**; a full queue disconnects the client as a slow consumer. From milestone 6 it also sends book deltas, stamped with `md_seq`, to market-data subscribers.
 7. **Writer** ✅ *(M3)*: the connection's writer goroutine encodes each event as a wire message (`Ack`, `Fill`, `CancelAck`, `Reject`) and writes it to the socket, flushing when it has nothing more queued.
 
-Today the whole client path runs, durably. Start `engine -data ./data -instrument XYZ:1:1` and use `engctl connect --client 1` to watch an order go socket → gateway → sequencer → WAL → engine → book → publisher (waiting for fsync) → writer → socket. Kill the engine and start it again: it replays `./data/wal` and carries on. `internal/server/server_test.go` and `durability_test.go` drive the same path over loopback in tests.
+Today the whole client path runs, durably. Start `engine -data ./data -instrument XYZ:1:1` and use `engctl connect --client 1` to watch an order go socket → gateway → sequencer → WAL → engine → book → publisher (waiting for fsync) → writer → socket. Kill the engine and start it again: it loads its newest snapshot, replays the WAL after it, and carries on. `engctl replay-check --data ./data` (with the engine stopped) independently rebuilds the newest snapshot from the WAL and checks the fill log against it. `internal/server/server_test.go` and `durability_test.go` drive the same path over loopback in tests.

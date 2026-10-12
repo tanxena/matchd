@@ -115,15 +115,15 @@ The general lesson: **a test of "nothing happened" needs its own test showing it
 
 ### `internal/engine/engine.go`: the engine
 
-- **`Engine`** ([engine.go:14](../../internal/engine/engine.go#L14)) holds:
+- **`Engine`** ([engine.go:15](../../internal/engine/engine.go#L15)) holds:
   - `books []*book.Book`, indexed by `InstrumentID`, with slot 0 unused;
   - `symbols map[string]InstrumentID`, which is only touched by `AddInstrument`, so its rare allocations don't matter;
   - the three counters `lastSeq`, `lastOrderID`, `lastMatchID`;
   - `fills`, a scratch buffer reused across commands.
 
   The doc comment states the ownership rule: one goroutine, no locks.
-- **`Step`** ([engine.go:40](../../internal/engine/engine.go#L40)) checks `c.Seq == lastSeq+1` (panicking otherwise), records it, and dispatches on `Kind`. It panics on an unknown kind.
-- **`Run`** ([engine.go:67](../../internal/engine/engine.go#L67)) is the goroutine body:
+- **`Step`** ([engine.go:41](../../internal/engine/engine.go#L41)) checks `c.Seq == lastSeq+1` (panicking otherwise), records it, and dispatches on `Kind`. It panics on an unknown kind.
+- **`Run`** ([engine.go:76](../../internal/engine/engine.go#L76)) is the goroutine body:
 
   ```
   defer close(out)
@@ -133,15 +133,17 @@ The general lesson: **a test of "nothing happened" needs its own test showing it
   ```
 
   When `in` is closed, the loop ends, the deferred `close(out)` runs, and the consumer's `range` loop ends. That is how shutdown propagates (draining is PRD 6's graceful shutdown, milestone 7).
-- **`newOrder`** ([engine.go:111](../../internal/engine/engine.go#L111)):
+
+  *Since milestone 5,* `Run` also takes snapshot hooks and selects on two more channels (a snapshot-trigger tick, and snapshots coming back to be thawed). It freezes the engine between commands when a trigger fires ([05-recovery.md](05-recovery.md#2-code-walkthrough)).
+- **`newOrder`** ([engine.go:161](../../internal/engine/engine.go#L161)):
   1. Look up the book. If it doesn't exist, reject with `UnknownInstrument`.
   2. Build a `book.Order` with id `lastOrderID+1` and call `Submit` with the scratch fills buffer.
   3. If the book rejects it, emit a `Reject`. The id was never committed.
   4. Otherwise commit `lastOrderID`, then emit the `Ack`.
   5. For each fill: bump `lastMatchID`, reduce the taker's `leaves`, and emit the taker event then the maker event. Fills arrive grouped by price, best first, so after the **last fill at a price** (the next fill has a different price, or there isn't one), emit `BookDelta` with `bk.LevelQty(opp, price)`, the level's final size, because matching has already finished.
   6. Emit `Cancelled(expired)` for a market order's remainder, and a `BookDelta` for the taker's own level if a limit remainder rested.
-- **`cancel`** ([engine.go:176](../../internal/engine/engine.go#L176)) calls `book.Cancel` and emits `Cancelled(requested)`, echoing the client order id, side and price returned in `CancelResult`, then the level's delta. Or it emits a `Reject`.
-- **`addInstrument`** ([engine.go:199](../../internal/engine/engine.go#L199)) validates the spec, rejects duplicate symbols, creates the book, and appends it, so its id is `len(books)`.
+- **`cancel`** ([engine.go:226](../../internal/engine/engine.go#L226)) calls `book.Cancel` and emits `Cancelled(requested)`, echoing the client order id, side and price returned in `CancelResult`, then the level's delta. Or it emits a `Reject`.
+- **`addInstrument`** ([engine.go:249](../../internal/engine/engine.go#L249)) validates the spec, rejects duplicate symbols, creates the book, and appends it, so its id is `len(books)`.
 - **Accessors:** `LastSeq`, `LastOrderID`, `Lookup`, `Book`, `NumInstruments`. They are for tests now, and for snapshots in milestone 5.
 
 ### `internal/book/index.go`: the hash index (new)
@@ -275,7 +277,7 @@ The test passed 400 consecutive runs (300, then 100 after the final change).
 
 **Goroutines: `go f()`.** Starts `f` running concurrently and returns at once. There is no handle or join: you coordinate through channels, or through `sync` primitives. In `TestRunMatchesStep`, `go engine.New().Run(in, out)` starts the engine goroutine, and a second goroutine feeds it commands.
 
-**Channels and directional channel types.** `make(chan engine.Command, 64)` creates a buffered channel. `Run(in <-chan Command, out chan<- Event)` uses **directional** types: inside `Run`, `in` can only be received from and `out` only sent to. The compiler enforces the data flow, the way a read-only type would in TypeScript.
+**Channels and directional channel types.** `make(chan engine.Command, 64)` creates a buffered channel. `Run(in <-chan Command, out chan<- Event, snap *SnapshotHooks)` uses **directional** types: inside `Run`, `in` can only be received from and `out` only sent to. The compiler enforces the data flow, the way a read-only type would in TypeScript.
 
 **`close` and `range` over a channel.** `close(out)` signals "no more values". `for e := range out` receives until the channel is closed **and** empty, then exits. That is how the end of the command stream propagates through the pipeline with no extra "done" message. Only the sender closes a channel. Sending on a closed channel panics.
 

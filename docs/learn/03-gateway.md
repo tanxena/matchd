@@ -107,7 +107,7 @@ A **fuzzer** generates millions of inputs, mutating towards ones that reach new 
 ### `internal/sequencer/sequencer.go`: the minimal sequencer
 
 - **`Clock`** and **`WallClock`**: the system reads the time in exactly one place.
-- **`Sequencer.Stamp`** ([sequencer.go:37](../../internal/sequencer/sequencer.go#L37)) assigns `lastSeq+1` and the current time.
+- **`Sequencer.Stamp`** ([sequencer.go:122](../../internal/sequencer/sequencer.go#L122)) assigns `lastSeq+1` and the current time.
 - **`Run`** stamps everything from `in` in arrival order and closes `out` when `in` closes.
 
 Arrival order on the one shared `cmds` channel *is* the global order of all clients' commands.
@@ -116,14 +116,14 @@ Arrival order on the one shared `cmds` channel *is* the global order of all clie
 
 ### `internal/publisher/publisher.go`: routing and the slow-consumer policy
 
-- **`Subscriber`** ([publisher.go:25](../../internal/publisher/publisher.go#L25)) is the publisher's view of a session. `Deliver` must not block; `SlowConsumer` tells the session to disconnect.
-- **`Publisher`** ([publisher.go:38](../../internal/publisher/publisher.go#L38)):
+- **`Subscriber`** ([publisher.go:45](../../internal/publisher/publisher.go#L45)) is the publisher's view of a session. `Deliver` must not block; `SlowConsumer` tells the session to disconnect.
+- **`Publisher`** ([publisher.go:58](../../internal/publisher/publisher.go#L58)):
   - `clients` is an `atomic.Pointer` to an immutable map, so reads take no lock;
   - `mu` serialises the rare writers;
   - three atomic counters: delivered, dropped, slow consumers.
-- **`Register`** ([publisher.go:69](../../internal/publisher/publisher.go#L69)) copies the map, adds the session, and swaps the pointer. It refuses if the id is taken.
+- **`Register`** ([publisher.go:104](../../internal/publisher/publisher.go#L104)) copies the map, adds the session, and swaps the pointer. It refuses if the id is taken.
 - **`Unregister`** removes the entry only if it is *this* session.
-- **`route`** ([publisher.go:112](../../internal/publisher/publisher.go#L112)):
+- **`route`** ([publisher.go:223](../../internal/publisher/publisher.go#L223)):
   - skip client 0 (book deltas, startup commands);
   - look up the session; if it's missing, count the event as dropped;
   - otherwise `Deliver`; if that fails, unregister, count, log, and call `SlowConsumer()`.
@@ -142,7 +142,7 @@ Arrival order on the one shared `cmds` channel *is* the global order of all clie
   2. creates the session;
   3. under `mu`, checks the gateway isn't closing and does `wg.Add(2)`, so `Close` can never miss a goroutine;
   4. starts `readLoop` and `writeLoop`.
-- **`Close`** ([gateway.go:158](../../internal/gateway/gateway.go#L158)) marks the gateway closed, closes the listener, closes every session, and waits for `wg`. After it returns, nothing will send on `cmds`, so the server can close that channel safely.
+- **`Close`** ([gateway.go:162](../../internal/gateway/gateway.go#L162)) marks the gateway closed, closes the listener, closes every session, and waits for `wg`. After it returns, nothing will send on `cmds`, so the server can close that channel safely.
 - **`session`** ([session.go:31](../../internal/gateway/session.go#L31)) holds:
   - `out`, the bounded event queue fed by the publisher;
   - `ctrl`, the reader's replies to the writer;
@@ -164,12 +164,12 @@ Arrival order on the one shared `cmds` channel *is* the global order of all clie
 
 ### `internal/server/server.go`: the wiring
 
-**`Start`** ([server.go:44](../../internal/server/server.go#L44)):
+**`Start`** ([server.go:75](../../internal/server/server.go#L75)):
 1. applies the configured instruments **synchronously**, through `Stamp` and `Step` before any goroutine starts, so a bad config fails startup;
 2. creates the three channels;
 3. starts the sequencer, engine and publisher goroutines and the accept loop.
 
-**`Close`** ([server.go:114](../../internal/server/server.go#L114)) closes the gateway, then closes `cmds`. The sequencer, engine and publisher then each drain their input and close their output in turn, and `Close` waits for the publisher to finish.
+**`Close`** ([server.go:234](../../internal/server/server.go#L234)) closes the gateway, then closes `cmds`. The sequencer, engine and publisher then each drain their input and close their output in turn, and `Close` waits for the publisher to finish.
 
 ### `internal/client` and the binaries
 

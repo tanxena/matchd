@@ -110,8 +110,22 @@ Terms used in this repo's code and docs. Each entry names the milestone where th
 - **Replay / recovery** (M4): rebuilding the engine's state at startup by feeding every logged command back through it.
 - **Fail-stop on fsync error** (M4): after a failed fsync nothing more is acknowledged and the process stops, because a retry can falsely succeed.
 
+## Snapshots and recovery (milestone 5)
+
+- **Snapshot** (M5): a saved copy of the engine's full state (every resting order in priority order, plus the last seq, order id and match id) after some command seq. Recovery loads one and replays only the WAL after it.
+- **Consistent snapshot** (M5): one that is exactly the state after a single seq, not a mix of moments. Ours are taken between two commands on the engine goroutine.
+- **Copy-on-write (COW)** (M5): sharing data with a reader until the writer changes it, and only then copying the part being changed. Lets the engine keep trading while a snapshot is written.
+- **Chunk** (M5): a fixed block of 4,096 order slots, the unit of sharing and copying.
+- **Epoch** (M5): a counter bumped at each freeze. A chunk with an older epoch is shared with a snapshot and is copied before its first write.
+- **Freeze / thaw** (M5): starting a snapshot (share chunks, copy level heads) and ending it (unshare, recycle replaced chunks).
+- **Atomic replace** (M5): write a temp file, fsync it, rename it over the target, fsync the directory, so a crash leaves the old file or the new one, never a mix. Not guaranteed atomic on Windows.
+- **Manifest** (M5): `manifest.json`, the list of snapshots that are complete and durable. Recovery trusts only these (or, if the manifest is lost, the snapshot files themselves).
+- **Retention** (M5): keeping the newest two snapshots, and the WAL from the older one onward, so one damaged snapshot is always survivable.
+- **Fill log** (M5): an append-only record of every match the publisher released to clients, checked by replay-check.
+- **replay-check** (M5): an offline tool that rebuilds the newest snapshot from an older base plus the WAL, and checks the fill log against the replay.
+- **Crash harness** (M5): a test that runs the real binary, kills it at random moments under load, and verifies recovery each time. It proves recovery logic, not fsync.
+
 ## Later milestones
-- **Snapshot** *(later, M5)*: a saved copy of the full book state at some seq.
 - **md_seq** *(later, M6)*: the per-instrument market-data sequence number subscribers use to detect gaps.
 - **ITCH / OUCH** (reference): NASDAQ's market-data (ITCH) and order-entry (OUCH) protocols. They are cited for terminology:
   - [TotalView-ITCH 5.0](https://www.nasdaqtrader.com/content/technicalsupport/specifications/dataproducts/NQTVITCHspecification.pdf)

@@ -62,7 +62,7 @@ Go 1.24+ maps (Swiss tables) mark a deleted slot with a **tombstone** so that la
 
 ## Decision (revision 2)
 
-- **Order storage:** option 2 (indexed slab). Unchanged from revision 1.
+- **Order storage:** option 2 (indexed slab). Unchanged from revision 1. *Since milestone 5* the slab is split into fixed-size chunks of 4,096 slots, so snapshots can share it copy-on-write ([decision 013](013-copy-on-write-snapshots.md)); slot indices, links and the free list work exactly as described here.
   - `orderNode` holds id, client order id, client, side, price, remaining qty, and `prev`/`next uint32`.
   - `release` zeroes a slot before pushing it on the free list, so a stale index can never read a plausible-looking order.
 - **Lookups:** two instances of the generic `index[K comparable]`:
@@ -93,7 +93,7 @@ So cancel is **O(1) for the order plus O(log L) for the level** in the common ca
   Four planted bugs in the deletion logic were each caught within 391 operations (see `docs/learn/02-engine.md`).
 - **Memory: at most 50% load**, so the table has 2–4 slots per live entry. Each slot is small (16 bytes for an order-id key, 24 for the client-order-id key), so this is cheap at book scale.
 - **Growth still allocates**, by doubling the table, when the book reaches a new peak order count. That is unavoidable without a fixed maximum size, and it is not steady state. Snapshots or a configured size hint can pre-grow it later if the benchmark shows it matters.
-- **The slab grows the same way.** `append` doubles the backing array when the book reaches a new peak. The pointer `m := &b.nodes[i]` is only valid until the next growth, so `Submit` finishes matching, which never grows the slab, before calling `rest`, which may. That rule is commented in the code and is a "what breaks if" scenario in `docs/learn/01-book-core.md`.
+- **The slab grows the same way.** *(Milestone 1–4 wording; since milestone 5 the slab grows by adding a chunk, and existing chunks never move, so the pointer hazard below no longer exists. Decision 013.)* `append` doubles the backing array when the book reaches a new peak. The pointer `m := &b.nodes[i]` is only valid until the next growth, so `Submit` finishes matching, which never grows the slab, before calling `rest`, which may. That rule is commented in the code and is a "what breaks if" scenario in `docs/learn/01-book-core.md`.
 - **2³²−1 resting orders at most per book.** `alloc` panics beyond that.
 - **No level pointer in the node.** This keeps `orderNode` pointer-free, so the GC never scans the slab. The price is the O(log L) level search on cancel.
 - **Two hash lookups per accepted order:** the duplicate check on arrival, and an insert when it rests. This is the price of the PRD 5.1 rule.

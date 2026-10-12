@@ -91,6 +91,8 @@ Three things make this trustworthy rather than theatrical:
 - **Sorted slice with the hot end at the back.** Removing the last element of a slice costs nothing; removing the first means shifting everything. We put the **best** price level at the *end* of each side's slice, so the most frequent operation, consuming the best level, is free ([decision 001](../decisions/001-price-level-storage.md)).
 - **Slab plus free list plus index links.** Instead of allocating a separate heap object per order and linking them with pointers, every order lives by value in one big slice (`[]orderNode`). The queue at a level is linked by **indices** into that slice. Freed slots go on a free list and are reused before the slice grows. In steady state there are no allocations and no pointers for the garbage collector to trace ([decision 002](../decisions/002-order-storage-and-cancel.md); background in the [Go GC guide](https://go.dev/doc/gc-guide)).
 
+  *Revised in milestone 5:* the slab is now a list of fixed-size **chunks** of 4,096 orders, so snapshots can share them copy-on-write ([decision 013](../decisions/013-copy-on-write-snapshots.md), [05-recovery.md](05-recovery.md)). Everything in this section still holds: slots, index links, free list, no per-order allocation.
+
 ---
 
 ## 2. Code walkthrough
@@ -112,32 +114,32 @@ Three things make this trustworthy rather than theatrical:
 
 **Storage types.**
 
-- **`nilIdx`** ([book.go:10](../../internal/book/book.go#L10)). The index 0, meaning "no node". Slot 0 of the slab is reserved so that a zeroed link reads as nil.
-- **`orderNode`** ([book.go:16](../../internal/book/book.go#L16)). One resting order, stored by value. It holds id, client order id, client, side, price and remaining qty, plus `prev`/`next uint32` links within its level's queue. It contains **no pointers**.
-- **`level`** ([book.go:28](../../internal/book/book.go#L28)). One price on one side. `total` is the summed qty, `count` the number of orders, and `head`/`tail` the oldest and newest slots in the queue.
-- **`ladder`** ([book.go:43](../../internal/book/book.go#L43)). One side: `levels []*level`, sorted so the **best level is last**. `sign` is +1 for bids and −1 for asks.
+- **`nilIdx`** ([book.go:7](../../internal/book/book.go#L7)). The index 0, meaning "no node". Slot 0 of the slab is reserved so that a zeroed link reads as nil.
+- **`orderNode`** ([book.go:13](../../internal/book/book.go#L13)). One resting order, stored by value. It holds id, client order id, client, side, price and remaining qty, plus `prev`/`next uint32` links within its level's queue. It contains **no pointers**.
+- **`level`** ([book.go:25](../../internal/book/book.go#L25)). One price on one side. `total` is the summed qty, `count` the number of orders, and `head`/`tail` the oldest and newest slots in the queue.
+- **`ladder`** ([book.go:40](../../internal/book/book.go#L40)). One side: `levels []*level`, sorted so the **best level is last**. `sign` is +1 for bids and −1 for asks.
   - `key(p)` = `p × sign`, so both sides are sorted ascending by key, and for both sides the best price has the largest key.
-  - `search(p)` ([book.go:53](../../internal/book/book.go#L53)) is a lower-bound binary search. It returns where `p` is, or where it would be inserted.
+  - `search(p)` ([book.go:50](../../internal/book/book.go#L50)) is a lower-bound binary search. It returns where `p` is, or where it would be inserted.
   - `best()` returns the last element, or nil.
   - `insertAt(i, lv)` grows the slice by one, shifts the levels from `i` upward by one with `copy`, and stores `lv` at `i`.
   - `removeAt(i)` shifts the levels above `i` down by one and **sets the vacated last slot to nil**, so the slice doesn't keep the removed level reachable.
-- **`clientOrderKey`** ([book.go:95](../../internal/book/book.go#L95)). The `(client, clOrdID)` pair, used as the key of the duplicate-check index.
+- **`clientOrderKey`** ([book.go:92](../../internal/book/book.go#L92)). The `(client, clOrdID)` pair, used as the key of the duplicate-check index.
 
-**`Book`** ([book.go:101](../../internal/book/book.go#L101)) holds:
+**`Book`** ([book.go:98](../../internal/book/book.go#L98)) holds:
 
 - `bids`, `asks`;
-- the slab `nodes` and the free-list head `freeNode`;
+- the order slab: `chunks` (fixed-size blocks of 4,096 slots since milestone 5), `nslots` and the free-list head `freeNode`;
 - `freeLevels`, a stack of reusable `*level`;
 - `byID`, an `index[OrderID]` from order id to slot (for cancel);
 - `byClOrd`, an `index[clientOrderKey]` from `(client, clOrdID)` to slot (for the duplicate check).
 
 *Revised in milestone 2:* these two were Go maps in milestone 1. They are now the book's own open-addressing hash table (`internal/book/index.go`), because Go maps were measured allocating in steady state. See [02-engine.md](02-engine.md) and [decision 002, revision 2](../decisions/002-order-storage-and-cancel.md).
 
-**`New`** ([book.go:120](../../internal/book/book.go#L120)) validates the instrument, sets the ladder signs, and creates the slab with slot 0 reserved and room for 1,024 orders.
+**`New`** ([book.go:129](../../internal/book/book.go#L129)) validates the instrument, sets the ladder signs, and creates the first chunk, with slot 0 reserved.
 
-**`crosses(s, limit, resting)`** ([book.go:146](../../internal/book/book.go#L146)) says whether a level is tradable for a limit taker on side `s`. For a buy, that means resting ≤ limit; for a sell, resting ≥ limit. **Equality crosses**: a bid at 100 trades with an ask at 100.
+**`crosses(s, limit, resting)`** ([book.go:156](../../internal/book/book.go#L156)) says whether a level is tradable for a limit taker on side `s`. For a buy, that means resting ≤ limit; for a sell, resting ≥ limit. **Equality crosses**: a bid at 100 trades with an ask at 100.
 
-**`Submit(o, fills)`** ([book.go:161](../../internal/book/book.go#L161)) is the main path:
+**`Submit(o, fills)`** ([book.go:171](../../internal/book/book.go#L171)) is the main path:
 
 1. `o.Validate()`. If it fails, return the reject with no fills and the book untouched.
 2. Look up `(client, clOrdID)` in `byClOrd`. If the pair is live, reject with `DuplicateClientOrderID`.
@@ -151,16 +153,16 @@ Three things make this trustworthy rather than theatrical:
    A partially filled maker isn't touched further: it stays at the head with less quantity. When a level empties, it is removed from the end of the ladder (it was the best level, the last element) and its struct goes on the free list.
 4. Build the `Result`. If everything filled, return. A market order's leftover goes into `Expired`. A limit order's leftover is passed to `rest` and goes into `Rested`.
 
-`m := &b.nodes[mi]` is a pointer into the slab. It is only safe because nothing inside the match loop grows the slab; see "what breaks if" below.
+`m := b.nodeW(mi)` returns a writable pointer to the maker. Since milestone 5 it is always safe to hold across the loop: chunks never move when the slab grows, and `nodeW` copies a shared chunk (during a snapshot) at most once, before handing out the pointer. In milestone 1 the slab was one slice, and this pointer was only safe because nothing in the loop grew it; see "What breaks if" #5.
 
-**`rest(o, qty)`** ([book.go:225](../../internal/book/book.go#L225)):
+**`rest(o, qty)`** ([book.go:238](../../internal/book/book.go#L238)):
 
 - Panics if `o.ID` is already resting. That is a caller bug: the engine guarantees unique ids, and continuing would corrupt `byID`.
 - Finds or creates the level, inserting it into the ladder if it is new.
 - `alloc`s a slot, fills it in, and links it at the **tail**, which is what gives time priority.
 - Updates `count` and `total`, then records the order in `byID` and `byClOrd`.
 
-**`Cancel(client, id)`** ([book.go:271](../../internal/book/book.go#L271)):
+**`Cancel(client, id)`** ([book.go:284](../../internal/book/book.go#L284)):
 
 - Looks up `id` in `byID`. If it is missing **or owned by a different client**, returns `UnknownOrder`.
 - Otherwise copies the node (the slot is about to be cleared) and binary-searches for its level.
@@ -169,11 +171,11 @@ Three things make this trustworthy rather than theatrical:
 
 Cost: O(1) for the order plus O(log L) to find the level (decision 002).
 
-**`unlink(lv, i)`** ([book.go:295](../../internal/book/book.go#L295)) is the standard doubly linked list removal: point the neighbours at each other, fixing up `head`/`tail` when `i` was at an end, then decrement `count`. It deliberately does **not** change `total`; the caller knows how much quantity left.
+**`unlink(lv, i)`** ([book.go:308](../../internal/book/book.go#L308)) is the standard doubly linked list removal: point the neighbours at each other, fixing up `head`/`tail` when `i` was at an end, then decrement `count`. It deliberately does **not** change `total`; the caller knows how much quantity left.
 
-**`alloc` and `release`** ([book.go:311, 325](../../internal/book/book.go#L311)) manage the slab.
+**`alloc`** ([cow.go:78](../../internal/book/cow.go#L78)) and **`release`** ([book.go:325](../../internal/book/book.go#L325)) manage the slab.
 
-- `alloc` pops a slot from the free list, or appends a new one. It panics at 2³²−1 slots.
+- `alloc` pops a slot from the free list, or hands out the next one, adding a chunk when the last is full. It panics at 2³²−1 slots.
 - `release` deletes the order from both indexes, **zeroes** the slot (so a stale index reads as an obviously empty order), and pushes it on the free list through `next`.
 
 **`newLevel` and `freeLevel`** ([book.go:333, 344](../../internal/book/book.go#L333)) do the same for level structs.
@@ -259,6 +261,8 @@ Each of these was either run for real against the harness (the "caught" results 
 
 5. **Holding a pointer into the slab across a slab growth.** `m := &b.nodes[mi]` points into the slab's current backing array. If something inside the match loop called `alloc()` and the `append` had to grow the slab, Go would copy the slab to a new, larger array. `m` would still point into the *old* array, and every later write through `m` (reducing the maker's qty) would silently go to memory that is no longer the book. The book would then show a maker with its old quantity and fill it twice. **Avoided by construction:** `Submit` finishes the whole match loop, which never allocates a slot, before calling `rest`, which may. The comment on that line states the rule. If milestone 8's FOK pre-check or any future change adds an allocation inside the loop, the differential test is what would catch the double fill.
 
+   *Since milestone 5 this hazard is gone by construction:* the slab is a list of chunks that never move, so growing it can't invalidate a pointer. Writes go through `nodeW` for a different reason, copy-on-write during snapshots ([05-recovery.md](05-recovery.md#4-what-breaks-if), item 1).
+
 ---
 
 ## 5. Go idioms introduced
@@ -277,7 +281,7 @@ Each of these was either run for real against the harness (the "caught" results 
 
 **Append to a caller-supplied buffer.** `Submit(o, fills []Fill) (Result, []Fill)` appends to `fills` and returns the possibly-reallocated slice. The caller passes `buf[:0]`, which keeps the backing array but sets the length to zero, and stores the result back. After a few calls the buffer is big enough and matching never allocates again. The same pattern is used by `strconv.AppendInt` and `Orders(s, dst)`. It works because a slice is a small `(pointer, len, cap)` header, not the data itself ([Go slices: usage and internals](https://go.dev/blog/slices-intro)).
 
-**Pointers into slices, and `append` moving the data.** `&b.nodes[i]` is a real pointer into the slice's backing array. `append` beyond capacity allocates a *new* array and copies, and old pointers keep pointing at the old one. Python lists and JS arrays hide this; Go doesn't. See "What breaks if" #5.
+**Pointers into slices, and `append` moving the data.** `&b.nodes[i]` is a real pointer into the slice's backing array. `append` beyond capacity allocates a *new* array and copies, and old pointers keep pointing at the old one. Python lists and JS arrays hide this; Go doesn't. See "What breaks if" #5. (The book itself avoids this since milestone 5 by storing orders in fixed chunks.)
 
 **`copy` for insert and remove, and clearing the vacated slot.** `insertAt` does `append(s, nil)`, then `copy(s[i+1:], s[i:])`, then `s[i] = x`. `removeAt` does the reverse, then sets the now-unused last element to nil. Without that, the backing array would keep a pointer to the removed level and the GC couldn't reclaim what it references. The `slices` package (`slices.Insert`, `slices.Delete`, which the reference book uses) does the same thing; the real book writes it out to keep control of the hot path.
 
@@ -287,7 +291,7 @@ Each of these was either run for real against the harness (the "caught" results 
 
 **`internal/` packages.** Code under `internal/` can only be imported by code rooted at the parent of `internal`, here this module. It is the compiler-enforced version of "private to this project". See the [go command docs](https://pkg.go.dev/cmd/go#hdr-Internal_packages).
 
-**Internal vs external test packages.** `book_internal_test.go` declares `package book` and can see unexported fields such as `b.nodes`. `scenario_test.go` and `diff_test.go` declare `package book_test`: same directory, but compiled as a separate package that sees only exported names, like a real user would. That external package can import `ref`, which itself imports `book`, without an import cycle.
+**Internal vs external test packages.** `book_internal_test.go` declares `package book` and can see unexported fields such as `b.chunks`. `scenario_test.go` and `diff_test.go` declare `package book_test`: same directory, but compiled as a separate package that sees only exported names, like a real user would. That external package can import `ref`, which itself imports `book`, without an import cycle.
 
 **Table-driven tests and subtests.** A slice of cases plus a loop that calls `t.Run(name, func(t *testing.T) {...})` for each is idiomatic Go testing. Each case is a named subtest you can run alone with `-run 'TestScenarios/book/FIFO'`. `t.Helper()` makes failure line numbers point at the caller. `t.Fatalf` stops the current subtest; `t.Errorf` records a failure and continues. `t.Parallel()` lets the seed subtests run concurrently. See [package testing](https://pkg.go.dev/testing).
 
