@@ -45,9 +45,11 @@ type Config struct {
 	// IdleTimeout disconnects a client that sends nothing (not even a
 	// Heartbeat) for this long. 0 disables it.
 	IdleTimeout time.Duration
-	// WriteTimeout bounds a single flush to the socket, and how long a
-	// client's queue may stay above OutQueue (decision 022). A client that
-	// stops reading eventually makes a flush block; after this long the
+	// WriteTimeout bounds each socket write, and how long a client's queue
+	// may stay above OutQueue (decision 022). Every write gets a fresh
+	// deadline, including those the write buffer makes when it fills
+	// (review F-001). A client that stops reading eventually makes a write
+	// block; after this long the
 	// session is closed as a slow consumer. 0 disables both, leaving only
 	// the hard limit.
 	WriteTimeout time.Duration

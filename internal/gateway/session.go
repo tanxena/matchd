@@ -336,7 +336,9 @@ func readErrorReason(err error) string {
 // once.
 func (s *session) writeLoop() {
 	defer s.g.wg.Done()
-	bw := bufio.NewWriterSize(s.conn, 32<<10)
+	// Every socket write gets a fresh deadline, including the ones bufio
+	// makes on its own when its buffer fills (review F-001).
+	bw := bufio.NewWriterSize(deadlineWriter{s}, 32<<10)
 	buf := make([]byte, 0, 128)           // one encoded frame at a time, reused
 	batch := make([]engine.Event, 0, 256) // events taken from out, written in order
 	next := 0                             // batch[next:] are still to write
@@ -467,17 +469,27 @@ func (s *session) streamSnapshot(bw *bufio.Writer) error {
 	return nil
 }
 
-// write buffers one frame, first flushing under the write deadline if the
-// frame doesn't fit, so every socket write a long snapshot causes is
-// bounded by WriteTimeout.
+// write buffers one frame. Every socket write it causes, when the buffer
+// fills, is bounded by WriteTimeout (deadlineWriter).
 func (s *session) write(bw *bufio.Writer, frame []byte) error {
-	if bw.Available() < len(frame) {
-		if err := s.flush(bw); err != nil {
-			return err
-		}
-	}
 	_, err := bw.Write(frame)
 	return err
+}
+
+// deadlineWriter is the writer's view of the socket: each Write first sets
+// the write deadline to now + WriteTimeout. bufio.Writer writes through it
+// on an explicit Flush and also, by itself, whenever its buffer fills.
+// Setting the deadline only at explicit flushes (as before review F-001)
+// left those implicit writes under a deadline set at the last flush. After
+// an idle spell longer than WriteTimeout, a burst bigger than the buffer
+// then failed at once and a healthy client was cut off as a slow consumer.
+type deadlineWriter struct{ s *session }
+
+func (w deadlineWriter) Write(p []byte) (int, error) {
+	if t := w.s.g.cfg.WriteTimeout; t > 0 {
+		_ = w.s.conn.SetWriteDeadline(time.Now().Add(t))
+	}
+	return w.s.conn.Write(p)
 }
 
 // lingerTimeout bounds lingerClose's wait for the client to close.
@@ -502,12 +514,8 @@ func (s *session) lingerClose() {
 	_, _ = io.Copy(io.Discard, tc)
 }
 
-func (s *session) flush(bw *bufio.Writer) error {
-	if s.g.cfg.WriteTimeout > 0 {
-		_ = s.conn.SetWriteDeadline(time.Now().Add(s.g.cfg.WriteTimeout))
-	}
-	return bw.Flush()
-}
+// flush writes what is buffered; deadlineWriter bounds it by WriteTimeout.
+func (s *session) flush(bw *bufio.Writer) error { return bw.Flush() }
 
 // appendEvent encodes an event as its wire message: the engine's events for
 // this client, and market data (deltas, trades, and the publisher's resend

@@ -1,0 +1,335 @@
+# Full review — 2026-10-13 — commit 2d75636
+
+## Build and test results
+
+All of this ran on the development machine (Windows 11, go1.27.0, MSYS2 gcc for `-race`) at HEAD `2d75636`, with a clean tree.
+
+| command | result |
+|---|---|
+| `go build ./...` | ok |
+| `go vet ./...` | ok |
+| `gofmt -l .` | clean |
+| `golangci-lint run ./...` | `0 issues.` |
+| `go test -count=1 ./...` | all packages ok (`internal/server` 50 s, `internal/crashtest` 14 s) |
+| `go test -race -count=1 ./...` | all packages ok (`internal/server` 56 s) |
+| `make test-long` (MSYS2 make from PowerShell) | ok: differential 6.1 s; crash test 32.2 s, 0.67 min in total |
+| `GOOS=linux go vet ./...`, `GOOS=linux go build ./...` | ok. Linux tests were **not** run: there is no Linux machine here, and CI has never run (see F-010). |
+| `bench/report`, with `make bench-report`'s arguments, against a copy of README.md | **byte-identical** to the committed README (`diff` and `cmp` print nothing) |
+
+**What the long runs actually exercised**, from `-v` re-runs:
+- **Differential:** `20 seeds x 60000 commands … max-depth=177 snapshots=2643 cow-copies=2637`.
+- **Crash, 50 runs:** `405668 acknowledged commands (284455 checked against the WAL, the rest pruned behind snapshots), 364791 fills received (104726 compared with the replay) … torn WAL tails recovered in 0 runs`.
+
+**Flaky test:** `go test ./bench/internal/sysinfo -run TestAffinityAndTimes` failed 2 of 6 consecutive runs (`probe_test.go:106: self times {0s 0s}`) and failed independently in the benchmark audit (F-016). It passed in both full-suite runs above.
+
+**Reproductions (F-001, F-002, F-003):** these were run in a `git archive HEAD` copy under a scratch directory, with added `zz_review_test.go` files. Nothing in the repository was changed.
+
+**Not run, per REVIEWER.md:** `make bench-full` and `make bench-balanced`. `make bench-smoke` was also not run, because the regeneration check above already covers what it would show for the committed results.
+
+## Acceptance criteria audit
+
+| # | Criterion (PRD §8) | Status | Evidence / gap |
+|---|---|---|---|
+| 1 | Differential test: 1M+ commands across ≥ 20 seeds, zero divergence; normal suite 10k per seed, ≥ 10 seeds | Met (coverage gap) | `internal/book/diff_test.go:28-33,36-81`. The 1.2M / 20-seed run passes. The generator never builds a book deeper than 177 orders, so the book's slab never leaves one chunk and its indexes never grow under the oracle. Separately, extreme quantities make the books diverge (F-002, F-004). |
+| 2 | Crash test: ≥ 50 consecutive runs, zero lost acked commands, zero duplicate fills, recovered book identical, sequence continuous | Met (weaker than the README states) | `internal/crashtest/crash_test.go:222-380`. 50 runs pass. In the run measured here, 30% of acked commands and 71% of received fills were never compared with the WAL or the replay, and 0 torn tails occurred (F-007). |
+| 3 | Zero allocations on the engine's steady-state path for limit add, cancel, match (proven by test) | Met | `internal/engine/alloc_test.go:117-139` (AllocsPerRun plus the strict `OwnAllocations` check), `run_alloc_test.go:16`; `TestZeroAllocWhileFrozen` in `internal/book/cow_test.go:203`. All pass. |
+| 4 | A new md subscriber joins mid-stream, gets a snapshot, detects an induced gap, resends, and converges to the from-start subscriber's book (test) | Met | `internal/server/marketdata_test.go:161-229`. It also compares against the engine's book and md_seq after Close. |
+| 5 | A subscriber that stops reading is disconnected and the engine's latency histogram does not move | Partially met | `internal/server/ops_test.go:437-497`. The disconnect is asserted. "Does not move" is asserted only at p50 and p99, with one bucket of slack on buckets 2–2.5× wide, so up to about a 4× shift passes (F-008). |
+| 6 | Benchmark tables per section 7, with the generated-from-results script committed | Partially met | `bench/report` regenerates the README byte-for-byte. The fsync, snapshot and Balanced tables omit the count (and some quantiles) that PRD 7.1 requires on every reported latency (F-011). The Balanced row reports n=3 against PRD 7.5's ≥ 5 (F-014). |
+| 7 | `go test -race ./...` and lint clean; Linux and Windows both pass | Not met | Race and lint are clean on Windows. The suite has never run on Linux (`README.md:372`), and `.github/workflows/ci.yml` has never executed. `bench/internal/sysinfo` is flaky on Windows (F-010, F-016). |
+| 8 | README: architecture, single-threaded rationale, wire protocol, WAL/recovery diagram, quick start, benchmark tables, known limitations | Met | `README.md:14-41, 43-70, 72-106, 115-129, 143-324, 340-350`. The quick-start commands were run against the built binaries and work as written. Several README statements are inaccurate (F-009, F-010, F-012, F-013). |
+
+## Findings
+
+### F-001 — Stale socket write deadline disconnects healthy clients as "slow consumers", losing their fills
+- **Severity:** Critical
+- **Location:** `internal/gateway/session.go:L337-L418`, `internal/gateway/session.go:L505-L510`
+- **Category:** Concurrency
+- **Problem:**
+  - The writer sets the socket's write deadline only in `flush()` (L505-L510), to `now + WriteTimeout`.
+  - Event frames are written with `bw.Write(buf)` (L406) into a 32 KiB `bufio.Writer` (L339). When that buffer fills, `bufio` flushes to the socket by itself, with whatever deadline was set at the last explicit `flush()`.
+  - Suppose a session has been quiet for longer than `WriteTimeout`, and then gets a burst of 32 KiB or more (about 430 Fill frames) before the writer's queue first empties. The implicit flush then hits an already-expired deadline and fails at once with a timeout.
+  - `writeFailed` (L423ff) counts that as a slow consumer and closes the session.
+- **Why it matters:** a client that is reading perfectly well is disconnected, and every event in the burst is gone. That includes its fills. v1 has no order-status query, so the client never learns its orders traded.
+  - **Reproduction:** a maker rests 600 one-lot asks; both sessions then sit idle for 700 ms with `WriteTimeout` 300 ms; a taker sends a market buy for 600, under `group:150ms`. With `GOMAXPROCS=1`, 3 of 3 runs ended with both maker and taker cut off after **0 of 601** messages. The log says `slow consumer: socket write blocked for longer than WriteTimeout`, and `SlowWrites: 2`.
+  - With the same test at `WriteTimeout=0`, all 601 messages arrive.
+  - **Trigger:** with more cores it is a scheduling race: the writer usually wakes early, empties the queue and does an explicit flush, which refreshes the deadline. So it bites under CPU load, when the publisher pushes hundreds of events before the writer runs. That covers a large sweep, a large `Resend` answer, or the backlog released after a durability stall longer than `WriteTimeout` (decision 022's burst path).
+- **Suggested fix:**
+  - Give the `bufio.Writer` a wrapper `io.Writer` that sets `SetWriteDeadline(now+WriteTimeout)` before *every* `conn.Write`. Alternatively, refresh the deadline before each `bw.Write` whenever `bw.Available() < len(frame)`, as `write()` (L473ff) already does for snapshots.
+  - Add a test that idles longer than `WriteTimeout`, then forces a burst larger than 32 KiB with `GOMAXPROCS=1`, or with the writer held back.
+
+### F-002 — Quantities are unbounded: price-level totals overflow int64 and the book diverges from the reference book
+- **Severity:** Critical
+- **Location:** `internal/book/types.go:L280-L291` (only `Qty <= 0` is rejected), `internal/book/book.go:L200`, `internal/book/book.go:L254-L268`, `internal/book/book.go:L306`
+- **Category:** Matching
+- **Problem:**
+  - Validation accepts any positive `int64` quantity, and `level.total` is a plain `int64` sum (L306 `lv.total += qty`). Two resting orders at one price, `MaxInt64` and `1`, give `LevelQty = -9223372036854775808`.
+  - `fillCheck` sums those totals (L263), so a FOK for 3 lots against that level is rejected with `FOKNoLiquidity`, while the reference book fills it. Reproduced:
+
+    ```
+    book: {Reject:FOKNoLiquidity Filled:0 ...}   ref: {Reject:none Filled:3 ...}
+    ```
+
+  - `CheckInvariants` doesn't notice, because it sums with the same overflow.
+  - The engine then publishes `BookDelta` events with a negative level quantity (`engine.go:268,286`). The publisher's md view and every snapshot carry it.
+- **Why it matters:**
+  - **Matching:** any client can make matching diverge from the oracle just by sending large quantities. It needs no special access, and it persists in the WAL and replays identically.
+  - **Market data:** the feed shows nonsense quantities.
+  - **Tests:** the differential test can't find this, because quantities stay in 1..70 (`diff_test.go:211,215`).
+- **Suggested fix:**
+  - Define a maximum order quantity (and price) in the integer-domain decision (003). Reject above it with `InvalidQty` / `InvalidPrice` in both books.
+  - Choose the bound so that a level's total, and a FOK's running sum, can't overflow: for example `MaxQty = 2^40` with a cap on resting orders per level, or 128-bit / saturating sums.
+  - Extend the generator with edge quantities.
+
+### F-003 — The duplicate client-order-id rule is enforced per instrument, not per client
+- **Severity:** Should-fix
+- **Location:** `internal/book/book.go:L125`, `internal/book/book.go:L175`, `internal/engine/engine.go:L18`, `internal/engine/engine.go:L225`
+- **Category:** Matching
+- **Problem:**
+  - PRD 5.1: "`client_order_id` is unique **per client among live orders**". `docs/learn/01-book-core.md:67` restates it as "among that client's live orders".
+  - The `byClOrd` index lives inside each per-instrument `Book`, and the engine keeps one book per instrument. So client 7 can rest ClOrdID 5 on instrument 1 and have ClOrdID 5 accepted on instrument 2 while the first still rests. Reproduced at engine level: both get `Ack`.
+  - The reference book is per instrument too, so the differential test can't see it.
+- **Why it matters:** this is a spec deviation in an externally visible rule, documented as if it were implemented. A client that keys its own state by ClOrdID alone gets two live orders under one id.
+- **Suggested fix:** do one of the following:
+  - Move the `(client, clOrdID)` index to the engine, across instruments, so it is rejected before `bk.Submit`. Remove it from the book, or keep the book's for the oracle.
+  - Or explicitly re-scope the rule to "(client, instrument, client_order_id)" in decision 003 and the learning doc.
+
+  Either way, add an engine-level test.
+
+### F-004 — The differential test cannot reach the book's multi-chunk, index-growth or extreme-value paths
+- **Severity:** Should-fix
+- **Location:** `internal/book/diff_test.go:L193`, `internal/book/diff_test.go:L211-L216`, `internal/book/cow.go:L24-L25`, `internal/book/book.go:L139-L140`
+- **Category:** Tests
+- **Problem:**
+  - Measured max depth across the 1.2M-command run is **177 orders**. The slab chunk holds 4,096 orders (`cow.go:L25`) and the indexes start sized for 1,024 (`book.go:L139-L140`).
+  - So under the oracle, the following never run:
+    - a second chunk, or slab growth while frozen;
+    - `prev`/`next` links that cross chunks, or copy-on-write of more than one chunk;
+    - `index.grow()`, or backward-shift deletion in a table that has grown.
+  - `cow-copies=2637` against `snapshots=2643` confirms it: one chunk per freeze.
+  - Prices stay in about 860..1140 and quantities in 1..70, so overflow and boundary values are never generated (F-002).
+  - Multi-chunk copy-on-write *is* covered by `TestFrozenViewSurvivesHeavyTradingAcrossChunks` (`cow_test.go:75`), but against the book's own `Orders`, not the oracle.
+- **Why it matters:** the benchmark runs against a book of about 10,000 orders (3 chunks), a regime the "zero divergence" result never covered. A bug in the chunk or index code at that depth would pass acceptance 1.
+- **Suggested fix:**
+  - Add a regime, or a `-long` seed group, that builds and holds a deep book (more than 10k resting orders, several chunks, index growth past 1,024) while freezing.
+  - Add an edge-value regime (huge quantities, price 1, `MaxInt64` prices).
+  - Assert the depth and chunk count in `requireCoverage`.
+
+### F-005 — Unauthenticated `Subscribe`/`Resend` frames make the publisher goroutine do unbounded work
+- **Severity:** Should-fix
+- **Location:** `internal/gateway/session.go:L238-L250`, `internal/publisher/marketdata.go:L178-L213`, `internal/publisher/marketdata.go:L234-L252`
+- **Category:** Concurrency
+- **Problem:**
+  - Market-data requests need no login (`session.go:L238-L250`). They run on the publisher goroutine, which every client's answers and the engine's output channel depend on.
+  - **Resend:** one 18-byte frame makes the publisher push up to `ringSize` (65,536) events into that session (`marketdata.go:L207-L211`). Each push takes a mutex and appends.
+  - **Subscribe:** each one copies and sorts the whole level map (`marketdata.go:L234-L244`).
+  - Nothing limits connections, request rate, or per-request work.
+- **Why it matters:**
+  - Each Resend costs milliseconds of publisher time. A handful of connections that read fast and repeat `Resend(oldest)` can keep the publisher busy.
+  - Then `pending` fills, the 65,536-event channel fills, and the engine blocks on `out <- buf[i]` (`engine.go:150`). Every client's latency moves.
+  - That contradicts "It is never allowed to stall the engine or other clients" (`README.md:70`). The trusted-network caveat (`README.md:347`) covers authentication, not this.
+- **Suggested fix:**
+  - Serve resends from the session's own goroutine, out of an immutable or locked copy of the ring range. Or bound each Resend (for example to the soft queue limit) and rate-limit requests per session.
+  - Snapshot copying could be shared per md_seq across concurrent subscribers.
+
+### F-006 — The fill log is "not part of the durability contract", yet it fsyncs on the publisher goroutine and can refuse startup
+- **Severity:** Should-fix
+- **Location:** `internal/snapshot/filllog.go:L96-L115`, `internal/publisher/publisher.go:L288-L294`, `internal/wal/wal.go:L447-L501`, `internal/server/server.go:L176-L189`
+- **Category:** Durability
+- **Problem:**
+  - **Fsync on the publisher:** the fill log is a `wal.Log` with default 64 MiB segments, written by `p.fills.Flush()` on the publisher goroutine (`publisher.go:L291`). `Flush` rolls a full segment, and `roll` always fsyncs the old segment first (`wal.go:L476-L479`). So about every 615k matches, the publisher, which "must never block" (`publisher.go:L16-L20`), does a synchronous 64 MiB fsync. The benchmark measured WAL roll fsyncs of the same size at 6.7–20 ms. Release stalls for every client meanwhile.
+  - **Startup coupling:** opening it at startup uses the WAL's strict scanner. Damage that isn't a clean torn tail (possible after power loss, because the file is never fsynced except at rolls) returns `ErrCorrupt`, and `server.Start` fails (`server.go:L176-L180`). An audit-only file thus gates recovery of the real state.
+- **Why it matters:** these are periodic release stalls on a path documented as non-blocking, and a possible refusal to start for a file the docs say may lose its tail.
+- **Suggested fix:**
+  - Give the fill log `wal.Options` that skip the roll fsync (a `NoSync` option), or move fill-log writing to its own goroutine.
+  - On open, treat fill-log damage as "truncate and warn", not fatal.
+
+### F-007 — The crash test checks much less than the README says, and never exercises a torn tail
+- **Severity:** Should-fix
+- **Location:** `internal/crashtest/crash_test.go:L305-L310`, `internal/crashtest/crash_test.go:L330-L339`, `internal/crashtest/crash_test.go:L357-L358`, `README.md:L98-L103`
+- **Category:** Tests
+- **Problem:**
+  - **Fills:** a received fill whose match isn't in the replay because it is at or before replay-check's base is skipped (L338). In the 50-run measurement here, 104,726 of 364,791 received fills (29%) were compared with anything. The rest were only checked for duplicates.
+  - **Acks:** acks whose WAL record has been pruned are skipped (L310): 121,213 of 405,668.
+  - **Torn tails:** they are counted but never required (L357-L358), and 0 of 50 runs produced one. Decision 015:58 admits this.
+  - Yet the README says, unqualified, that every fill a client received "is the one replay produces" (`README.md:L101`), that every acked command is in the WAL at its seq (L99), and that the crash test validates "torn tails" (L103).
+- **Why it matters:** the acceptance-2 claim reads stronger than the evidence. A bug that corrupts fill content before a snapshot boundary would pass in about 70% of cases.
+- **Suggested fix:**
+  - Have the harness keep pruned WAL and fill-log segments: a test flag that disables deletion, or copy segments aside before each restart. Then check every ack and fill against a replay from seq 1.
+  - Correct `README.md:L99-L103` to say what is actually checked, and that torn tails come from the unit tests, not the kill test.
+
+### F-008 — The acceptance-5 test can't detect a meaningful latency shift
+- **Severity:** Should-fix
+- **Location:** `internal/server/ops_test.go:L437-L497` (tolerance at L482-L486), `internal/metrics/metrics.go:L192`
+- **Category:** Tests
+- **Problem:**
+  - The test compares only p50 and p99 bucket indices, and passes if the slow run's bucket is at most one above baseline.
+  - `MatchingBuckets` are 0.25, 0.5, 1, 2, 5, 10, 20, 50 … µs. A value just above 5 µs moving to 20 µs (about 4×) passes.
+  - Each run is 3,000 commands, so p99 is 30 samples, and p99.9 and max aren't checked at all.
+- **Why it matters:** "the engine's latency histogram does not move" (PRD §8.5) is effectively asserted only to within a factor of 2–4. A regression where a slow consumer blocks the engine for a few microseconds per event would pass.
+- **Suggested fix:**
+  - Compare with the 3.1% `LogHistogram` (`s.fine`) on a larger sample, and assert the shift at p50, p99 and p99.9 within a stated ratio.
+  - Also assert directly that the engine never blocked on `events` during the slow phase, for example with a counter of sends that found the channel full.
+
+### F-009 — README claims answers wait for disk under every fsync policy; under `never` they don't
+- **Severity:** Should-fix
+- **Location:** `README.md:L93`, `internal/sequencer/sequencer.go:L211-L212`, `docs/decisions/012-durability-and-fsync-policies.md:L33`
+- **Category:** Docs
+- **Problem:** `README.md:93` says, in bold, "Under every policy, no answer leaves the process before its command is on disk." Under `never`, the sequencer advances the durable seq to `LastAppended` right after `write()` (`sequencer.go:L211-L212`): page cache, not disk. Decision 012:33 says so correctly, and README:91 says acknowledged work can be lost.
+- **Why it matters:** this is the headline durability sentence, and it is false for one of the three documented policies.
+- **Suggested fix:** "Under `always` and `group`, no answer leaves the process before its command is fsynced; under `never`, before it is written to the OS."
+
+### F-010 — Acceptance 7 (Linux) isn't met, and README line 145 says Linux is CI-tested
+- **Severity:** Should-fix
+- **Location:** `README.md:L145`, `README.md:L333-L334`, `README.md:L372`, `.github/workflows/ci.yml`
+- **Category:** Docs
+- **Problem:**
+  - PRD §8.7 requires Linux and Windows both to pass. The suite has never run on Linux (`README.md:372`), and the workflow has never executed.
+  - `README.md:145` nonetheless states "Linux is cross-compiled and CI-tested for correctness". The Linux code paths (`syncdir_other.go`, `clock_other.go`, SIGKILL in the crash harness, `reset_other.go`) are compiled but have never run.
+- **Why it matters:** an acceptance criterion is unmet, and one README sentence implies otherwise.
+- **Suggested fix:**
+  - Run `go test -race ./...` and `make test-long` on Linux (WSL2 or a VM is enough), or push and let CI run, and record the result.
+  - Until then, change L145 to "cross-compiled; not yet run".
+
+### F-011 — Benchmark tables omit the count, and some quantiles, that PRD 7.1 requires
+- **Severity:** Should-fix
+- **Location:** `README.md:L210-L214`, `README.md:L222-L225`, `README.md:L233-L236`, `bench/report/report.go`
+- **Category:** Benchmark
+- **Problem:** PRD 7.1: "Every reported latency is labelled p50, p99, p99.9, and max, with the count."
+
+  | table | missing |
+  |---|---|
+  | fsync | count per run |
+  | snapshot | count; end-to-end p50 and p99 |
+  | Balanced | count; end-to-end p99 and max |
+
+  Only the mix tables comply.
+- **Why it matters:** this is a stated hard requirement of the benchmark protocol (PRD §7, "requirements, not suggestions"), and it is part of acceptance 6.
+- **Suggested fix:** add the count and the missing quantile columns to those three tables in `bench/report`. The data is already in the result files.
+
+### F-012 — The fsync table mixes segment-roll fsyncs into the "fsync mean" column, and the README cites that column wrongly
+- **Severity:** Should-fix
+- **Location:** `README.md:L158`, `README.md:L214`, `bench/report/report.go:L557-L578` (the label is hard-coded at about L566-L570), `internal/wal/wal.go:L472-L479`
+- **Category:** Benchmark
+- **Problem:**
+  - Under `never` there is no commit-path fsync. The 0.05–0.07 fsyncs/s are segment rolls, each flushing about 64 MiB of dirty pages. The "fsync mean" cell shows 9,467 µs (6,654–20,199) next to the per-commit means for `always` and `group`.
+  - The "segment rolls only" label sits in the *neighbouring* column.
+  - `README.md:158` says "This laptop's SSD takes 1–4 ms per fsync (the fsync table's 'fsync mean' column)". The column shows 2.6–4.0 ms and 6.7–20 ms. The 1.3–1.7 ms values come from mix/snapshot runs whose fsync means no table shows.
+- **Why it matters:** these are misleading benchmark numbers, against PRD 7.6's comparison of the policies.
+- **Suggested fix:**
+  - Render `–` for `never`'s fsync mean, or a separately labelled "roll fsync" column.
+  - Fix L158 to cite figures a table actually shows.
+
+### F-013 — README benchmark prose states things the committed results don't support
+- **Severity:** Should-fix
+- **Location:** `README.md:L159`, `README.md:L184`, `README.md:L192`, `README.md:L227`, `README.md:L231`, `README.md:L245`, `bench/internal/load/mix.go:L79-L81`
+- **Category:** Benchmark
+- **Problem:**
+  - **(a) Fsync stalls (L159):** "A few seconds after a snapshot is written, a WAL fsync can take 30–80 ms, and while it does, intake stops too, because the next WAL append waits for it."
+    - The result files don't record the stall counter, so no committed result shows 30–80 ms stalls. `scrape.go:146-154` doesn't scrape `matchd_wal_fsync_stalls_total`. The only source is an uncommitted 20 s reproduction (`docs/bugs/002:21-23`).
+    - The "append waits" mechanism is marked **Unverified** in observation 002:29, yet the README states it as fact. In the code, `Flush` doesn't take `syncMu` except on a roll.
+  - **(b) Book size (L184):** "holds the book near 10,000 resting orders (8398 (6797–10115))". The figure pools three populations: resting about 10,100, crossing about 8,400, cancel-heavy about 6,800. Cancel-heavy is about 32% below the claim and contradicts `mix.go:79-81`.
+  - **(c) Clock footnote (L192, L227):** "one read costs 13 (11–14) ns as the engine measured it at startup". That figure came from `clock.Init` timed with `time.Now` at 73e6c8d, the bug fixed in 2b3dc3a. The Balanced runs' startup figures span 13–35 ns, against clockprobe's 13.7–16.1 ns.
+    - The footnote also says the span "includes one clock read in between". It also includes `e.step.Observe` (`engine.go:152`), a histogram update.
+  - **(d) Power plan (L231):** "a laptop with default power settings". The recorded mode is Balanced plan plus "best power efficiency", which isn't Windows' default.
+  - **(e) Commands block (L245):** says every row was started by `benchrun.exe -suite full`. That is wrong for the Balanced rows, and it publishes a local absolute path.
+- **Why it matters:** README text is presented as measured fact, but some of it can't be traced to the committed results.
+- **Suggested fix:**
+  - Scrape and record the stall counter and the max fsync in the result JSON, or reword L159 as an unverified observation that links 002.
+  - Report book size per mix, or fix the cancel-heavy book size in the load generator.
+  - Re-run, or drop the startup read-cost from the footnote and cite the clockprobe row.
+  - Correct the plan wording and the commands line.
+
+### F-014 — The Balanced row reports n=3, below PRD 7.5's minimum of 5
+- **Severity:** Should-fix
+- **Location:** `Makefile:L79-L82` (`-min-runs-suite balanced=3`), `README.md:L160`, `README.md:L236-L241`
+- **Category:** Benchmark
+- **Problem:** two of five Balanced runs were disturbed by Defender and excluded. Instead of re-running, the Makefile overrides the minimum. It is disclosed, but PRD 7.5 says every configuration is run ≥ 5 times and reports median and min–max across them. Three clean runs is below that. `bench/CHECKLIST.md:110-111` itself calls re-running the cleanest option.
+  - The clock runs adjacent to the disturbed ones (balanced 07, 09) get no "other CPU" check at all (`bench/internal/result/assess.go:57-60`), so a disturbance there would pass unnoticed.
+- **Why it matters:** this is a protocol deviation in a table on the resume-facing page.
+- **Suggested fix:**
+  - Re-run the Balanced suite with Defender quiesced and drop the override.
+  - Apply the other-CPU check to clock runs too.
+
+### F-015 — The headline tables use snapshots off; the shipped default has snapshots on, with a 7× worse end-to-end tail
+- **Severity:** Should-fix
+- **Location:** `cmd/engine/main.go:L82`, `README.md:L184`, `README.md:L196`, `README.md:L224-L225`, `docs/bugs/002-snapshot-runs-stall-the-wal.md`
+- **Category:** Benchmark
+- **Problem:**
+  - The engine's default is `-snapshot-interval 10s` (`main.go:82`), and the README sells it as the normal mode (L94). Every mix and fsync row runs with `-snapshot-interval 0`.
+  - With the default on, end-to-end p99.9 is 163,578 µs against 22,544 µs off, and about 0.9% of commands wait more than 50 ms (L224-L225; observation 002).
+  - The configuration a user actually runs is therefore represented only by the snapshot table. The cause stays open.
+- **Why it matters:** the headline end-to-end numbers describe a non-default configuration. Each table does state its configuration, but the README doesn't say the default is the slow one.
+- **Suggested fix:** do one of the following:
+  - State in the mix-table caption that the shipped default (snapshots every 10 s) has the end-to-end tail of the snapshot table.
+  - Or investigate and fix observation 002 (for example a separate volume for snapshots, or appending into a fresh segment while the old one syncs) and re-run.
+
+### F-016 — `bench/internal/sysinfo` `TestAffinityAndTimes` is flaky on Windows
+- **Severity:** Should-fix
+- **Location:** `bench/internal/sysinfo/probe_test.go:L104-L107`
+- **Category:** Tests
+- **Problem:** `SelfTimes()` reads 0 at Windows' 15.6 ms CPU-time accounting granularity when the test process has used less than one tick, so `self.Total() <= 0` fails. It failed 2 of 6 runs here and 2 of 4 in the benchmark audit.
+- **Why it matters:**
+  - `make test` and `make ci` fail at random, which undermines acceptance 7.
+  - It is also a candidate source for future "unreproduced" failures like observation 001. 001 was in `internal/server`, so this doesn't explain it, but it shows the suite has a flaky test that `make test-race-loop`'s default package doesn't cover.
+- **Suggested fix:** burn measurable CPU in the test process before calling `SelfTimes`, for example a 50 ms spin, or assert `>= 0` and only check that the call succeeds.
+
+### F-017 — No way to detect a lost final market-data message
+- **Severity:** Nit
+- **Location:** `docs/decisions/016-market-data.md:L134`, `internal/client/feed.go` (`sequenced`), `internal/server/marketdata_test.go:L179-L186`
+- **Category:** MarketData
+- **Problem:** gap detection fires only when a later md_seq arrives. There's no heartbeat carrying the latest md_seq, so a dropped last message is never detected; the acceptance-4 test works around this by sending one more order.
+- **Why it matters:** over TCP, single frames aren't lost; a stalled consumer is disconnected instead. So the gap/resend machinery is reachable only via the test's `Drop` hook, and the limitation is real but marginal. Decision 016 documents it.
+- **Suggested fix:** periodically send a per-instrument md heartbeat (instrument, last md_seq) to subscribers, or list it under known limitations in the README.
+
+### F-018 — The core-latency window is wider than documented
+- **Severity:** Nit
+- **Location:** `bench/internal/load/run.go:L168-L185`, `docs/decisions/021-benchmark-harness.md:L173`
+- **Category:** Benchmark
+- **Problem:**
+  - The comment says the engine's scrape window encloses the load generator's "by the time a scrape takes (about a millisecond)".
+  - In fact `readCPU` (a full process-list query) runs between the first scrape and the phase flip, and the pacer keeps sending until `halt()`, after the second scrape.
+  - Core count minus end-to-end count is about 100–220 commands per open-loop run, which is 5–18 ms of traffic, not about 1 ms.
+- **Why it matters:** the quantile effect is negligible (about 0.02% of samples), but the documentation is wrong, and the core max could come from an edge.
+- **Suggested fix:** flip the phase immediately after the first scrape and halt before the second, or correct the comment and the decision.
+
+### F-019 — Stale statements in `bench/CHECKLIST.md` and `bench/README.md`
+- **Severity:** Nit
+- **Location:** `bench/CHECKLIST.md:L15`, `bench/CHECKLIST.md:L62`, `bench/CHECKLIST.md:L111`, `bench/CHECKLIST.md:L136`, `bench/README.md:L9`
+- **Category:** Docs
+- **Problem:**
+  - **L136:** "bench-report refuses if anything is disturbed", but the Makefile passes `-allow-disturbed`.
+  - **L62:** says the environment line will report a missing Defender exclusion; nothing does that.
+  - **L111:** mentions `-min-runs 4`, but the Makefile uses `-min-runs-suite`.
+  - **bench/README.md L9:** "every run checked for disturbance", but clock runs aren't.
+  - **Durations disagree:** smoke 1m20s / 1.5 min / 2 min; full 75 / 85 min.
+- **Why it matters:** the operator follows a checklist that no longer describes the tool.
+- **Suggested fix:** update the checklist and bench README to match the Makefile and `assess.go`.
+
+### F-020 — The TSC conversion wraps if a core's TSC reads below the calibration base
+- **Severity:** Nit
+- **Location:** `internal/clock/clock.go:L48-L51`
+- **Category:** Other
+- **Problem:** `bits.Mul64(tsc-c.baseTSC, c.mult)` uses unsigned subtraction. If `rdtsc` on another core returns a value even slightly below `baseTSC` (cross-core skew), the result is a timestamp about 2^64 ticks in the future. Invariant TSCs are normally synchronised across cores on one socket, so this is unlikely on the benchmark machine.
+- **Why it matters:** a negative or garbage span in a histogram, or a wildly wrong command timestamp, which is then logged to the WAL forever.
+- **Suggested fix:** compute the delta as signed (`int64(tsc - base)`) and clamp, or take the base slightly in the past.
+
+## Overall assessment
+
+The core is careful work. The publisher's seq-ordered release gate, the group syncer, the copy-on-write snapshot, and the snapshot-before-durable guard all hold up under reading, and I found no path where an event leaves before its command is durable under `always` or `group`. Replay is deterministic, md_seq included, and the regenerated benchmark tables are byte-identical.
+
+It is not yet production-quality for its own scope:
+- **Two real bugs reachable by ordinary clients.** The stale write deadline (F-001) can drop the fills of a client that is reading fine. Unbounded quantities (F-002) make matching diverge from the oracle.
+- **The duplicate client-order-id rule** doesn't match the PRD (F-003).
+- **The README is stronger than the evidence:**
+  - the fsync=never durability sentence (F-009);
+  - what the crash test actually checks (F-007);
+  - "Linux CI-tested" (F-010);
+  - several benchmark statements and PRD 7.1 omissions (F-011–F-015).
+- **Acceptance 7 is not met**, and acceptances 5 and 6 are only partially met.
+
+Before putting this on a resume, I'd want:
+- F-001–F-003 fixed, with tests;
+- the differential test extended to deep books and edge values (F-004);
+- one real Linux run;
+- the README benchmark and crash-test prose brought down to exactly what the committed data shows.

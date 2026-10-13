@@ -38,6 +38,8 @@ A client is a **slow consumer**, and is disconnected, when any of these happens:
 2. its queue reaches the hard limit;
 3. its writer's socket write blocks for longer than `WriteTimeout` (the writer was always bounded by this; it is now counted as a slow consumer too, rather than as a plain write error).
 
+   *(Review F-001: until then the deadline was set only at the writer's explicit flushes. The 32 KiB write buffer also writes to the socket by itself when it fills, and those writes ran under a deadline set at the last flush. A session idle for longer than `WriteTimeout` that then got a burst over 32 KiB failed at once, and a client reading perfectly well was cut off with all its fills. Every socket write now sets its own deadline (`deadlineWriter`). `TestIdleThenBurstIsNotASlowConsumer` reproduces the old failure, with 0 of 599 fills delivered.)*
+
 All three are counted in `matchd_slow_consumer_disconnects_total`, and the session's close reason names which one it was.
 
 **Why the hard limit can't be reached by a burst alone:** the publisher holds at most `MaxPending` events in total. Beyond that it stops taking events from the engine, which back-pressures the engine (decision 012). So a post-stall release can add at most `MaxPending` events to one queue that was under soft. Reaching soft + `MaxPending` means the client also stopped draining.

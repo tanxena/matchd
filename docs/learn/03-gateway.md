@@ -131,18 +131,18 @@ Arrival order on the one shared `cmds` channel *is* the global order of all clie
 ### `internal/gateway`: connections and sessions
 
 - **`Config`** ([gateway.go:36](../../internal/gateway/gateway.go#L36)): listen address, `OutQueue` (the slow-consumer threshold), `IdleTimeout`, `WriteTimeout`, and `SocketWriteBuffer` (used by tests). **`DefaultConfig`** gives 4,096 events, 60 s and 10 s.
-- **`Gateway`** ([gateway.go:71](../../internal/gateway/gateway.go#L71)):
+- **`Gateway`** ([gateway.go:73](../../internal/gateway/gateway.go#L73)):
   - the shared `cmds` channel;
   - the publisher;
   - the listener;
   - `sessions` (guarded by `mu`), so `Close` can disconnect everyone;
   - `wg`, which counts every connection goroutine.
-- **`Serve`** accepts in a loop. **`start`** ([gateway.go:149](../../internal/gateway/gateway.go#L149)):
+- **`Serve`** accepts in a loop. **`start`** ([gateway.go:151](../../internal/gateway/gateway.go#L151)):
   1. sets `TCP_NODELAY` (and `SO_SNDBUF` if configured);
   2. creates the session;
   3. under `mu`, checks the gateway isn't closing and does `wg.Add(2)`, so `Close` can never miss a goroutine;
   4. starts `readLoop` and `writeLoop`.
-- **`Close`** ([gateway.go:188](../../internal/gateway/gateway.go#L188)) is, since milestone 7, the forced end of a graceful shutdown that `StopReading` and `FinishWriters` begin (readers stop first, writers deliver what's queued, then a lingering close; [decision 019](../decisions/019-graceful-shutdown.md)). It marks the gateway closed, closes the listener, closes every session, and waits for `wg`. After it returns, nothing will send on `cmds`, so the server can close that channel safely.
+- **`Close`** ([gateway.go:190](../../internal/gateway/gateway.go#L190)) is, since milestone 7, the forced end of a graceful shutdown that `StopReading` and `FinishWriters` begin (readers stop first, writers deliver what's queued, then a lingering close; [decision 019](../decisions/019-graceful-shutdown.md)). It marks the gateway closed, closes the listener, closes every session, and waits for `wg`. After it returns, nothing will send on `cmds`, so the server can close that channel safely.
 - **`session`** ([session.go:37](../../internal/gateway/session.go#L37)) holds:
   - `out`, the bounded event queue fed by the publisher;
   - `ctrl`, the reader's replies to the writer;
@@ -160,7 +160,7 @@ Arrival order on the one shared `cmds` channel *is* the global order of all clie
 - **`submit`** ([session.go:307](../../internal/gateway/session.go#L307)) sends on `cmds`, or gives up if the session closes. Blocking here is the inbound backpressure.
 - **`readErrorReason`** ([session.go:316](../../internal/gateway/session.go#L316)) turns read errors into log reasons: EOF, idle timeout, protocol error, reset. **`isConnReset`** has a Windows version and an other-platforms version ([decision 010](../decisions/010-windows-gotchas.md)).
 - **`writeLoop`** ([session.go:337](../../internal/gateway/session.go#L337)) selects on `out`, `ctrl` and `done`, encodes into a reused buffer, writes to a 32 KB `bufio.Writer`, and **flushes when both queues are empty**. A `control` with `closeAfter` (a fatal reject) is written and flushed, and then the session is closed.
-- **`appendEvent`** ([session.go:517](../../internal/gateway/session.go#L517)) maps engine events to wire messages, converting enums by casting, which `wire_test.go` makes safe. **`appendControl`** encodes the gateway's own replies.
+- **`appendEvent`** ([session.go:525](../../internal/gateway/session.go#L525)) maps engine events to wire messages, converting enums by casting, which `wire_test.go` makes safe. **`appendControl`** encodes the gateway's own replies.
 
 ### `internal/server/server.go`: the wiring
 
