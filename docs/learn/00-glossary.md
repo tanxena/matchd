@@ -156,6 +156,15 @@ Terms used in this repo's code and docs. Each entry names the milestone where th
 - **Half-close / FIN / RST** (M7): FIN ends one direction of a TCP connection normally; RST aborts it, and makes the receiver discard data it hasn't read. A *half-close* (`CloseWrite`) sends FIN but keeps reading.
 - **Lingering close** (M7): half-close, discard the peer's remaining input, then close, so unread input doesn't turn the close into a RST.
 
+## Time in force (milestone 8)
+
+- **Time in force (TIF)** (M1, M8): how long an order may wait for its unfilled part: GTC, Day, IOC or FOK.
+- **IOC (immediate or cancel)** (M8): a limit order that trades what it can on arrival; the rest is cancelled (`CancelAck` reason `IOCUnfilled`), never rests.
+- **FOK (fill or kill)** (M8): a limit order that trades its whole quantity on arrival or is rejected untouched (`FOKNoLiquidity`), consuming no order id.
+- **Liquidity pre-check** (M8): the read-only walk that decides a FOK: add level totals from the best price until they cover the order or a level is past its limit.
+- **Prefix sum / Fenwick tree** (M8, rejected): a structure answering "how much quantity up to price P?" in O(log L); every book change would have to update it.
+- **Additive enum value** (M8): a new value appended to an enum, never reusing an old number, so existing logs and clients keep their meaning.
+
 ## Later milestones
 - **ITCH / OUCH** (reference): NASDAQ's market-data (ITCH) and order-entry (OUCH) protocols. They are cited for terminology:
   - [TotalView-ITCH 5.0](https://www.nasdaqtrader.com/content/technicalsupport/specifications/dataproducts/NQTVITCHspecification.pdf)

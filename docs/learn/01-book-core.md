@@ -101,14 +101,14 @@ Three things make this trustworthy rather than theatrical:
 
 - **`Price`, `Qty`, `OrderID`, `ClientID`, `ClientOrderID`** ([types.go:18–33](../../internal/book/types.go#L18)). Each is a distinct named integer type, so the compiler refuses to mix them: a `Qty` can't be passed where a `Price` is expected.
 - **`Side`, `OrderType`, `TIF`** ([types.go:38–104](../../internal/book/types.go#L38)). Small enums whose **zero value is invalid** (`Buy = 1`, `Sell = 2`), so an order with a forgotten field is rejected instead of quietly becoming a buy. Each has a `String()` method for readable test output. `Side.Opposite()` gives the side an order trades against.
-- **`RejectReason`** ([types.go:106](../../internal/book/types.go#L106)). `RejectNone` (0) means accepted. The book's reasons are `InvalidSide`, `InvalidType`, `InvalidQty`, `InvalidPrice`, `InvalidTIF`, `DuplicateClientOrderID` and `UnknownOrder`. Since milestone 2 the enum also holds three engine-level reasons that a `Book` never returns (`UnknownInstrument`, `InvalidInstrument`, `DuplicateSymbol`), so the engine, wire protocol and books share one list.
-- **`Order`** ([types.go:154](../../internal/book/types.go#L154)). The new-order command.
-- **`Result`** ([types.go:168](../../internal/book/types.go#L168)). The outcome of `Submit`: `Reject`, `Filled`, `Rested`, `Expired`. For an accepted order, Filled + Rested + Expired = Qty.
-- **`CancelResult`** ([types.go:178](../../internal/book/types.go#L178)). `Reject` and `Cancelled` (the quantity removed). Since milestone 2 it also echoes the removed order's `Side`, `Price` and `ClOrdID`, so the engine can build the cancel acknowledgement and the book delta without a second lookup.
-- **`Fill`** ([types.go:188](../../internal/book/types.go#L188)). One match. It records the price (always the maker's), the quantity, the taker's side, id and client, and the maker's id, client and client order id. **`MakerLeft`** is the maker's quantity after this fill, so 0 means the maker left the book. Milestone 2 uses it to emit the right book delta without asking the book again.
-- **`RestingOrder`** ([types.go:202](../../internal/book/types.go#L202)). A read-only view of an order on the book. The two books are compared using it.
-- **`Instrument` and `Instrument.Validate`** ([types.go:217](../../internal/book/types.go#L217)). Symbol, tick size and lot size. The book checks them once at construction and never uses them in matching.
-- **`Order.Validate`** ([types.go:238](../../internal/book/types.go#L238)). Field checks in a fixed order (side, type, qty, price, tif), so an order with several problems always gets the same reason. Limit orders need price > 0 and TIF GTC or Day; market orders need price == 0.
+- **`RejectReason`** ([types.go:116](../../internal/book/types.go#L116)). `RejectNone` (0) means accepted. The book's reasons are `InvalidSide`, `InvalidType`, `InvalidQty`, `InvalidPrice`, `InvalidTIF`, `DuplicateClientOrderID` and `UnknownOrder`. Since milestone 2 the enum also holds three engine-level reasons that a `Book` never returns (`UnknownInstrument`, `InvalidInstrument`, `DuplicateSymbol`), so the engine, wire protocol and books share one list.
+- **`Order`** ([types.go:171](../../internal/book/types.go#L171)). The new-order command.
+- **`Result`** ([types.go:185](../../internal/book/types.go#L185)). The outcome of `Submit`: `Reject`, `Filled`, `Rested`, `Expired`. For an accepted order, Filled + Rested + Expired = Qty.
+- **`CancelResult`** ([types.go:195](../../internal/book/types.go#L195)). `Reject` and `Cancelled` (the quantity removed). Since milestone 2 it also echoes the removed order's `Side`, `Price` and `ClOrdID`, so the engine can build the cancel acknowledgement and the book delta without a second lookup.
+- **`Fill`** ([types.go:205](../../internal/book/types.go#L205)). One match. It records the price (always the maker's), the quantity, the taker's side, id and client, and the maker's id, client and client order id. **`MakerLeft`** is the maker's quantity after this fill, so 0 means the maker left the book. Milestone 2 uses it to emit the right book delta without asking the book again.
+- **`RestingOrder`** ([types.go:219](../../internal/book/types.go#L219)). A read-only view of an order on the book. The two books are compared using it.
+- **`Instrument` and `Instrument.Validate`** ([types.go:255](../../internal/book/types.go#L255)). Symbol, tick size and lot size. The book checks them once at construction and never uses them in matching.
+- **`Order.Validate`** ([types.go:255](../../internal/book/types.go#L255)). Field checks in a fixed order (side, type, qty, price, tif), so an order with several problems always gets the same reason. Limit orders need price > 0 and TIF GTC or Day; market orders need price == 0.
 
 ### `internal/book/book.go`: the real book
 
@@ -155,14 +155,14 @@ Three things make this trustworthy rather than theatrical:
 
 `m := b.nodeW(mi)` returns a writable pointer to the maker. Since milestone 5 it is always safe to hold across the loop: chunks never move when the slab grows, and `nodeW` copies a shared chunk (during a snapshot) at most once, before handing out the pointer. In milestone 1 the slab was one slice, and this pointer was only safe because nothing in the loop grew it; see "What breaks if" #5.
 
-**`rest(o, qty)`** ([book.go:238](../../internal/book/book.go#L238)):
+**`rest(o, qty)`** ([book.go:272](../../internal/book/book.go#L272)):
 
 - Panics if `o.ID` is already resting. That is a caller bug: the engine guarantees unique ids, and continuing would corrupt `byID`.
 - Finds or creates the level, inserting it into the ladder if it is new.
 - `alloc`s a slot, fills it in, and links it at the **tail**, which is what gives time priority.
 - Updates `count` and `total`, then records the order in `byID` and `byClOrd`.
 
-**`Cancel(client, id)`** ([book.go:284](../../internal/book/book.go#L284)):
+**`Cancel(client, id)`** ([book.go:318](../../internal/book/book.go#L318)):
 
 - Looks up `id` in `byID`. If it is missing **or owned by a different client**, returns `UnknownOrder`.
 - Otherwise copies the node (the slot is about to be cleared) and binary-searches for its level.
@@ -171,14 +171,14 @@ Three things make this trustworthy rather than theatrical:
 
 Cost: O(1) for the order plus O(log L) to find the level (decision 002).
 
-**`unlink(lv, i)`** ([book.go:308](../../internal/book/book.go#L308)) is the standard doubly linked list removal: point the neighbours at each other, fixing up `head`/`tail` when `i` was at an end, then decrement `count`. It deliberately does **not** change `total`; the caller knows how much quantity left.
+**`unlink(lv, i)`** ([book.go:342](../../internal/book/book.go#L342)) is the standard doubly linked list removal: point the neighbours at each other, fixing up `head`/`tail` when `i` was at an end, then decrement `count`. It deliberately does **not** change `total`; the caller knows how much quantity left.
 
-**`alloc`** ([cow.go:78](../../internal/book/cow.go#L78)) and **`release`** ([book.go:325](../../internal/book/book.go#L325)) manage the slab.
+**`alloc`** ([cow.go:78](../../internal/book/cow.go#L78)) and **`release`** ([book.go:359](../../internal/book/book.go#L359)) manage the slab.
 
 - `alloc` pops a slot from the free list, or hands out the next one, adding a chunk when the last is full. It panics at 2³²−1 slots.
 - `release` deletes the order from both indexes, **zeroes** the slot (so a stale index reads as an obviously empty order), and pushes it on the free list through `next`.
 
-**`newLevel` and `freeLevel`** ([book.go:333, 344](../../internal/book/book.go#L333)) do the same for level structs.
+**`newLevel` and `freeLevel`** ([book.go:367, 378](../../internal/book/book.go#L367)) do the same for level structs.
 
 ### `internal/book/inspect.go`: read-only views
 
@@ -201,7 +201,7 @@ Cost: O(1) for the order plus O(log L) to find the level (decision 002).
 
 - **`Book`** ([ref.go:22](../../internal/book/ref/ref.go#L22)) is just `bids` and `asks` as `[]book.RestingOrder`, each **in priority order, best first**.
 - **`validate`** is the oracle's *own* copy of the validation rules. It doesn't call `book.Order.Validate`, so a validation bug in the real book can't hide by also being in the oracle.
-- **`Submit`** ([ref.go:76](../../internal/book/ref/ref.go#L76)):
+- **`Submit`** ([ref.go:94](../../internal/book/ref/ref.go#L94)):
   - scans both slices for a live `(client, clOrdID)`;
   - repeatedly trades with element `[0]` of the opposite slice, stopping when a buy meets an ask above its limit or a sell meets a bid below its limit;
   - deletes makers that reach zero;
@@ -225,7 +225,7 @@ Cost: O(1) for the order plus O(log L) to find the level (decision 002).
     - Limit prices come from `limitPrice` under a **regime** that changes every 2,000 commands: balanced (spread 10, half crossing), deep (spread 40, 85% passive, which builds books hundreds of orders deep), or tight (spread 3, mostly crossing).
     - Cancels target a live order (sometimes from the wrong client), any past order (usually already dead), or an id never issued.
     - `observe` keeps the generator's live set in step with the **oracle's** results.
-  - **`runPair`** ([diff_test.go:340](../../internal/book/diff_test.go#L340)) runs each command through both books. It compares result, fills, resting state (both sides, order by order), best price and quantity, and length. It then runs both invariant checkers and asserts that every maker that just left, and every just-cancelled id, is gone from both books. On the first difference it calls `fail`, which prints the seed, the command number, the command, both sides of the difference, and a replay command line.
+  - **`runPair`** ([diff_test.go:357](../../internal/book/diff_test.go#L357)) runs each command through both books. It compares result, fills, resting state (both sides, order by order), best price and quantity, and length. It then runs both invariant checkers and asserts that every maker that just left, and every just-cancelled id, is gone from both books. On the first difference it calls `fail`, which prints the seed, the command number, the command, both sides of the difference, and a replay command line.
   - **`coverage`** counts fills, multi-fill orders, partial-then-rest, market expiries, successful cancels, successful reuse of a dead client order id, and every reject reason. **`requireCoverage`** fails the test if any count is below 0.1% of commands.
   - **Flags.** `-long` runs 20 seeds × 60k = 1.2M commands. `-seed N` runs one seed, and `-cmds K` limits it to K commands. `-diffstats` prints per-seed coverage.
 

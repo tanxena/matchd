@@ -65,6 +65,8 @@ There is no padding and no alignment. Fields are read with `binary.LittleEndian.
 | Trade | 0x88 | out | 53 (milestone 6) |
 | SnapshotLevel | 0x89 | out | 21 (milestone 6) |
 
+*(Milestone 8, additive, no version bump:* TIF `IOC` = 3 and `FOK` = 4, limit-only; cancel reason `IOCUnfilled` = 3; reject reason `FOKNoLiquidity` = 11. [Decision 020](020-ioc-and-fok.md).)
+
 The field-by-field layouts are in the doc comment on each type in `messages.go`. **`LoginAck` is an addition to PRD 5.5's list**: nothing in that list answers a successful login. Without it, a client couldn't tell "logged in" from "the server hasn't answered yet".
 
 The outbound messages map one-to-one onto engine events ([decision 006](006-event-model.md)): Ack, Reject, Fill, and `CancelAck` for both requested cancels and expired market remainders, with a reason byte. Every outbound message carries the command's `seq` and `time`.

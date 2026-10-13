@@ -111,7 +111,7 @@ The general lesson: **a test of "nothing happened" needs its own test showing it
 - **`CommandKind`, `Command`** ([types.go:34, 58](../../internal/engine/types.go#L58)). One flat struct (104 bytes) for every command kind; fields a kind doesn't use stay zero. `Client` is set by the gateway from the logged-in session (milestone 3), never taken from the frame payload, which is what makes owner-scoped cancel secure.
 - **`EventKind`** ([types.go:81](../../internal/engine/types.go#L81)). Each constant's comment states its contract, for example "`EvAck`: always the first event for an accepted order".
 - **`Role`, `CancelReason`** ([types.go:145, 153](../../internal/engine/types.go#L145)). Taker or maker; requested or expired.
-- **`Event`** ([types.go:167](../../internal/engine/types.go#L167)). One flat, pointer-free struct (96 bytes in milestone 2; 112 since milestone 6 added `MDSeq`). `Qty` means a different thing per kind: order qty for an ack, matched qty for a fill, qty removed for a cancel, the level's new total for a delta. The comment on the field says so. `Leaves` is a party's open quantity after a fill.
+- **`Event`** ([types.go:168](../../internal/engine/types.go#L168)). One flat, pointer-free struct (96 bytes in milestone 2; 112 since milestone 6 added `MDSeq`). `Qty` means a different thing per kind: order qty for an ack, matched qty for a fill, qty removed for a cancel, the level's new total for a delta. The comment on the field says so. `Leaves` is a party's open quantity after a fill.
 
 ### `internal/engine/engine.go`: the engine
 
@@ -142,8 +142,8 @@ The general lesson: **a test of "nothing happened" needs its own test showing it
   4. Otherwise commit `lastOrderID`, then emit the `Ack`.
   5. For each fill: bump `lastMatchID`, reduce the taker's `leaves`, and emit the taker event then the maker event. Fills arrive grouped by price, best first, so after the **last fill at a price** (the next fill has a different price, or there isn't one), emit `BookDelta` with `bk.LevelQty(opp, price)`, the level's final size, because matching has already finished.
   6. Emit `Cancelled(expired)` for a market order's remainder, and a `BookDelta` for the taker's own level if a limit remainder rested.
-- **`cancel`** ([engine.go:275](../../internal/engine/engine.go#L275)) calls `book.Cancel` and emits `Cancelled(requested)`, echoing the client order id, side and price returned in `CancelResult`, then the level's delta. Or it emits a `Reject`.
-- **`addInstrument`** ([engine.go:298](../../internal/engine/engine.go#L298)) validates the spec, rejects duplicate symbols, creates the book, and appends it, so its id is `len(books)`.
+- **`cancel`** ([engine.go:281](../../internal/engine/engine.go#L281)) calls `book.Cancel` and emits `Cancelled(requested)`, echoing the client order id, side and price returned in `CancelResult`, then the level's delta. Or it emits a `Reject`.
+- **`addInstrument`** ([engine.go:304](../../internal/engine/engine.go#L304)) validates the spec, rejects duplicate symbols, creates the book, and appends it, so its id is `len(books)`.
 - **Accessors:** `LastSeq`, `LastOrderID`, `Lookup`, `Book`, `NumInstruments`. They are for tests now, and for snapshots in milestone 5.
 
 ### `internal/book/index.go`: the hash index (new)
@@ -186,8 +186,8 @@ The general lesson: **a test of "nothing happened" needs its own test showing it
   A small `driver` plays the sequencer, assigning `Seq` and a fake clock.
 - **`internal/engine/stream_test.go`**: randomized properties.
   - `streamGen` produces commands for two instruments. The mix is limits, markets, cancels (including the wrong owner and the wrong instrument), invalid orders and unknown instruments.
-  - **`views.apply`** ([stream_test.go:101](../../internal/engine/stream_test.go#L101)) folds each command's events into two pictures built **only from events**: a market-data view, from deltas, and a client view of every order's open quantity, from acks, fills and cancels. Along the way it checks the per-command rules: Ack first, gap-free order ids, fills in taker/maker pairs with consecutive match ids, `Leaves` consistent with the running quantity, and a `Reject` alone.
-  - **`views.check`** ([stream_test.go:212](../../internal/engine/stream_test.go#L212)) compares both views with the real books after every command, level by level and order by order, including counts, so a level that is never removed or an order that leaves without an event is caught.
+  - **`views.apply`** ([stream_test.go:109](../../internal/engine/stream_test.go#L109)) folds each command's events into two pictures built **only from events**: a market-data view, from deltas, and a client view of every order's open quantity, from acks, fills and cancels. Along the way it checks the per-command rules: Ack first, gap-free order ids, fills in taker/maker pairs with consecutive match ids, `Leaves` consistent with the running quantity, and a `Reject` alone.
+  - **`views.check`** ([stream_test.go:234](../../internal/engine/stream_test.go#L234)) compares both views with the real books after every command, level by level and order by order, including counts, so a level that is never removed or an order that leaves without an event is caught.
   - `TestEventStreamRebuildsState` runs 8 seeds × 5,000 commands and requires every event kind to occur at least 1% as often as commands.
   - `TestDeterministic` runs a seed twice and requires identical event logs.
   - `TestRunMatchesStep` sends the same commands through `Run` on its own goroutine and requires an identical event stream.

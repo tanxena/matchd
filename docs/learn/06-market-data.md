@@ -63,11 +63,11 @@ Market data is subject to the same rule as everything else ([decision 012](../de
 
 | message | struct | payload |
 |---|---|---|
-| inbound `Resend` | [messages.go:492](../../internal/proto/messages.go#L492) | instrument, `from_md_seq` |
-| `BookDelta` | [messages.go:522](../../internal/proto/messages.go#L522) | seq, time, instrument, `md_seq`, side, price, new level total |
-| `Trade` | [messages.go:568](../../internal/proto/messages.go#L568) | seq, time, instrument, `md_seq`, match id, aggressor side, price, qty |
-| `Snapshot` | [messages.go:614](../../internal/proto/messages.go#L614) | instrument, `md_seq`, number of levels |
-| `SnapshotLevel` | [messages.go:644](../../internal/proto/messages.go#L644) | instrument, side, price, qty |
+| inbound `Resend` | [messages.go:498](../../internal/proto/messages.go#L498) | instrument, `from_md_seq` |
+| `BookDelta` | [messages.go:528](../../internal/proto/messages.go#L528) | seq, time, instrument, `md_seq`, side, price, new level total |
+| `Trade` | [messages.go:574](../../internal/proto/messages.go#L574) | seq, time, instrument, `md_seq`, match id, aggressor side, price, qty |
+| `Snapshot` | [messages.go:620](../../internal/proto/messages.go#L620) | instrument, `md_seq`, number of levels |
+| `SnapshotLevel` | [messages.go:650](../../internal/proto/messages.go#L650) | instrument, side, price, qty |
 
 There is also a new reject reason, `ResendUnavailable` (105). Each message is still one fixed size.
 
@@ -131,8 +131,8 @@ At startup, for each recovered instrument, `Start` sums the resting orders per p
 
 ### engctl
 
-- **`engctl book --instrument N [--depth 10]`**, `cmdBook` ([main.go:437](../../cmd/engctl/main.go#L437)) subscribes, waits until the Feed is live, prints, and exits. It reports a reject, such as an unknown instrument.
-- **`engctl subscribe --instrument N`**, `cmdSubscribe` ([main.go:462](../../cmd/engctl/main.go#L462)) prints every snapshot frame, delta and trade, the book once live, and any gap recovery it performs.
+- **`engctl book --instrument N [--depth 10]`**, `cmdBook` ([main.go:456](../../cmd/engctl/main.go#L456)) subscribes, waits until the Feed is live, prints, and exits. It reports a reject, such as an unknown instrument.
+- **`engctl subscribe --instrument N`**, `cmdSubscribe` ([main.go:481](../../cmd/engctl/main.go#L481)) prints every snapshot frame, delta and trade, the book once live, and any gap recovery it performs.
 
 ### Tests and results
 

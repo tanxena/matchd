@@ -27,8 +27,8 @@ The **caller** assigns it: the engine from milestone 2 on, and the test harness 
 `Order.Validate` checks fields in a fixed order: **side, type, qty, price, tif**. An order with several problems always gets the first reason in that order.
 
 - Zero values of `Side`, `OrderType` and `TIF` are deliberately invalid, so an uninitialised field is rejected rather than read as "buy" or "limit".
-- Limit orders need `Price > 0` and a TIF of `GTC` or `Day`.
-- Market orders need `Price == 0`. A market order with a price is almost certainly a client mistake, so we reject it instead of guessing. Their TIF is ignored.
+- Limit orders need `Price > 0` and a TIF of `GTC` or `Day` (since milestone 8 also `IOC` or `FOK`, [decision 020](020-ioc-and-fok.md)).
+- Market orders need `Price == 0`. A market order with a price is almost certainly a client mistake, so we reject it instead of guessing. Their TIF is ignored, except that since milestone 8 `IOC` and `FOK` are refused with `InvalidTIF`: they are limit-only, and "market FOK" is a known limitation.
 
 The duplicate-client-order-id check runs only after an order passes validation.
 
@@ -54,6 +54,10 @@ A new order whose `(client_id, client_order_id)` matches a **resting** order is 
 A market order is **accepted, never rejected**, for lack of liquidity. It fills what it can, and its remainder is reported in `Result.Expired`. A market order on an empty book is accepted with `Filled = 0` and `Expired = Qty`.
 
 **Why:** "rejected" would wrongly suggest the order was malformed. Exchange protocols report a "trade what you can now" order as accepted, with its unfilled part cancelled. In [NASDAQ OUCH 4.2](https://www.nasdaqtrader.com/content/technicalsupport/specifications/TradingProducts/OUCH4.2.pdf), for example, an immediate-or-cancel order that doesn't fully execute gets an *Order Accepted* message, then *Order Executed* for any fills, then *Order Canceled* for the remainder. Our market order behaves the same way, with no price limit.
+
+## Fill-or-kill without liquidity (milestone 8)
+
+A FOK the book can't fill in full at acceptable prices is **rejected** (`FOKNoLiquidity`), after validation and the duplicate client-order-id check. Unlike a market order, it is never accepted and then cancelled: it never existed, and consumes no order id ([decision 020](020-ioc-and-fok.md)). An IOC, like a market order, is accepted, and its unfilled part is cancelled with reason `IOCUnfilled`.
 
 ## Day orders
 

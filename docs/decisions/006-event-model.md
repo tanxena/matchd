@@ -44,6 +44,7 @@ for each opposite-side level traded, best price first:
     ...
     BookDelta(level)                  the level's new total; 0 = level removed
 Cancelled(expired)                    if a market order had an unfilled remainder
+Cancelled(ioc-unfilled)               if an IOC limit order had one (milestone 8)
 BookDelta(own level)                  if a limit remainder rested
 ```
 

@@ -95,9 +95,9 @@ A **fuzzer** generates millions of inputs, mutating towards ones that reach new 
 
     A stream that ends cleanly between frames gives `io.EOF`; one that ends inside a frame gives `io.ErrUnexpectedEOF`.
 - **`messages.go`**
-  - The **field enums** (`SideBuy`, `TypeLimit`, `RoleTaker`, `CancelExpired`, ...) and **`Reason`** ([messages.go:31](../../internal/proto/messages.go#L31)): 1–99 are the engine's reasons, 100 and up the gateway's.
+  - The **field enums** (`SideBuy`, `TypeLimit`, `RoleTaker`, `CancelExpired`, ...) and **`Reason`** ([messages.go:34](../../internal/proto/messages.go#L34)): 1–99 are the engine's reasons, 100 and up the gateway's.
   - **`Size*` constants** give each message's one valid payload size.
-  - **`dec`** ([messages.go:117](../../internal/proto/messages.go#L117)) is a tiny cursor (`u8`, `u32`, `u64`, `i64`) used on the stack, so decoding doesn't allocate.
+  - **`dec`** ([messages.go:123](../../internal/proto/messages.go#L123)) is a tiny cursor (`u8`, `u32`, `u64`, `i64`) used on the stack, so decoding doesn't allocate.
   - **`checkSize`** enforces the exact payload size.
   - Then one block per message, each with a layout table in its doc comment:
     - a struct;

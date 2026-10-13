@@ -8,6 +8,8 @@ A single-threaded order matching engine in Go:
 - market data with gap recovery;
 - Prometheus metrics.
 
+Order types: limit (GTC, Day, IOC, FOK) and market. Known limitations so far: no self-trade prevention, Day orders behave as GTC, and no market FOK (IOC and FOK are limit-only).
+
 The full write-up (architecture, benchmark tables, known limitations) arrives with milestone 9. Until then, the [learning docs](docs/learn/README.md) and [decision records](docs/decisions/) are the documentation.
 
 ## Quick start
