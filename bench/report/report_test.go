@@ -113,7 +113,8 @@ func TestRenderStatesHardwareAndFootnote(t *testing.T) {
 		"engine pinned to CPUs 0–3 and load generator to 4–7 (no shared physical core",
 		"Defender exclusion on the bench directory (stated by the operator; the harness can't check it)",
 		"**median (min–max) across runs**, never the best run",
-		"source `tsc`; one read costs 15 ns",
+		"source `tsc`; one read costs 15.5 ns, measured by `clockprobe`",
+		"one histogram update",
 		"| crossing¹ |",
 		"engine-line", "loadgen-line",
 		"Commit `aaaaaaaaaaaa`",
@@ -174,5 +175,16 @@ func TestEveryLatencyHasItsCountAndQuantiles(t *testing.T) {
 	}
 	if !strings.Contains(out, "| `always` | 0 | 1,200,000 |") {
 		t.Errorf("fsync row lacks its count:\n%s", out)
+	}
+}
+
+func TestBenchrunLineIsRelative(t *testing.T) {
+	for in, want := range map[string]string{
+		`D:\x\MATCHD\bin\benchrun.exe`: `bin\benchrun.exe -suite full`,
+		`/home/u/matchd/bin/benchrun`:  `bin/benchrun -suite full`,
+	} {
+		if got := benchrunLine([]string{in, "-suite", "full"}); got != want {
+			t.Errorf("benchrunLine(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

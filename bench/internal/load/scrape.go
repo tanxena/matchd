@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -139,6 +140,33 @@ func sum(m map[string]float64, name string) float64 {
 	return t
 }
 
+// maxBucket is the upper bound, in seconds, of the lowest bucket of a
+// histogram that held every observation made between before and after:
+// the slowest one was at most this. 0 if there were none, +Inf if the
+// slowest was beyond the last finite bound.
+func maxBucket(before, after map[string]float64, name string) float64 {
+	total := after[name+"_count"] - before[name+"_count"]
+	if total <= 0 {
+		return 0
+	}
+	prefix := name + `_bucket{le="`
+	best := math.Inf(1)
+	for k, v := range after {
+		le, ok := strings.CutPrefix(k, prefix)
+		if !ok {
+			continue
+		}
+		bound, err := strconv.ParseFloat(strings.TrimSuffix(le, `"}`), 64)
+		if err != nil {
+			continue
+		}
+		if v-before[k] >= total && bound < best {
+			best = bound
+		}
+	}
+	return best
+}
+
 // counters returns the engine's counters over the window (after - before),
 // and the clock it timed itself with.
 func (after engineState) counters(before engineState) result.EngineCounters {
@@ -151,6 +179,8 @@ func (after engineState) counters(before engineState) result.EngineCounters {
 		Snapshots:       after.metrics[`matchd_snapshots_total{result="written"}`] - before.metrics[`matchd_snapshots_total{result="written"}`],
 		SlowConsumers:   d("matchd_slow_consumer_disconnects_total"),
 		ClockReadCostNS: after.metrics["matchd_clock_read_cost_seconds"] * 1e9,
+		FsyncStalls:     d("matchd_wal_fsync_stalls_total"),
+		FsyncMaxNS:      maxBucket(before.metrics, after.metrics, "matchd_wal_fsync_seconds") * 1e9,
 	}
 	if c.Fsyncs > 0 {
 		c.FsyncMeanNS = d("matchd_wal_fsync_seconds_sum") * 1e9 / c.Fsyncs

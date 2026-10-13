@@ -461,9 +461,16 @@ func (d *doc) coreFootnote(runs []*result.Run) {
 		return
 	}
 	e := runs[0].Load.Engine
-	cost := over(runs, func(r *result.Run) float64 { return r.Load.Engine.ClockReadCostNS })
-	d.p("\n¹ Timed inside the engine with `internal/clock` (source `%s`; one read costs %s ns as the engine measured it at startup, see the clock-overhead table): from taking the command off the engine's input channel to sending its last event, which includes one clock read in between. Quantiles and max come from a log-linear histogram (`GET /debug/latency`) and are at most 3.1%% above the true value, never below.\n\n",
-		e.ClockSource, cost.num("%.0f"))
+	// The read cost comes from clockprobe, pinned to the engine's CPUs in
+	// the same suite. The engine's own startup figure (ClockReadCostNS)
+	// was timed with time.Now until review F-013 / the 2b3dc3a fix, and
+	// can't be trusted in results from before it.
+	cost := "see the clock-overhead table"
+	if ck := d.group(runs[0].Suite, "clock", "clock"); ck != nil && len(ck.Runs) > 0 {
+		cost = over(ck.Runs, func(r *result.Run) float64 { return r.Clock.CostNS }).num("%.1f") + " ns, measured by `clockprobe` on the engine's CPUs (the clock-overhead table)"
+	}
+	d.p("\n¹ Timed inside the engine with `internal/clock` (source `%s`; one read costs %s): from taking the command off the engine's input channel to sending its last event. The span includes one clock read and one histogram update (the matching step's own timing) in between. Quantiles and max come from a log-linear histogram (`GET /debug/latency`) and are at most 3.1%% above the true value, never below.\n\n",
+		e.ClockSource, cost)
 }
 
 func (d *doc) mixTables(main string) {
@@ -473,27 +480,23 @@ func (d *doc) mixTables(main string) {
 	}
 	l := firstLoad(gs)
 	d.p("#### Matching-core latency by order mix\n\n")
-	var all0 []*result.Run
-	for _, g := range gs {
-		all0 = append(all0, g.Runs...)
-	}
-	book := over(all0, func(r *result.Run) float64 { return float64(r.Load.BookOrdersEnd) })
-	d.p("PRD 7.1(a). Open loop at %s commands/s (all connections), fsync `group:1ms`, snapshots off; the load generator holds the book near %s resting orders (%s at the end of the windows, across mixes and runs). Microseconds.\n\n",
-		thousands(float64(l.RatePerSec)), thousands(float64(l.Depth)), book.num("%.0f"))
-	d.p("| mix | count per run | p50 | p99 | p99.9 | max | mean | runs |\n|---|---|---|---|---|---|---|---|\n")
+	d.p("PRD 7.1(a). Open loop at %s commands/s (all connections), fsync `group:1ms`, snapshots off. The load generator aims to hold the book at %s resting orders; how many it actually held at the end of each window is in the \"book orders\" column: cancel-heavy settles lower, because its cancels alone nearly balance what it adds. Microseconds.\n\n",
+		thousands(float64(l.RatePerSec)), thousands(float64(l.Depth)))
+	d.p("| mix | count per run | p50 | p99 | p99.9 | max | mean | book orders | runs |\n|---|---|---|---|---|---|---|---|---|\n")
 	var all []*result.Run
 	for _, g := range gs {
 		all = append(all, g.Runs...)
 		lat := func(f func(result.Latency) float64) stat {
 			return over(g.Runs, func(r *result.Run) float64 { return f(r.Load.Core) })
 		}
-		d.p("| %s¹ | %s | %s | %s | %s | %s | %s | %s |\n", g.Config,
+		d.p("| %s¹ | %s | %s | %s | %s | %s | %s | %s | %s |\n", g.Config,
 			lat(func(x result.Latency) float64 { return float64(x.Count) }).count(),
 			lat(func(x result.Latency) float64 { return float64(x.P50NS) }).us(),
 			lat(func(x result.Latency) float64 { return float64(x.P99NS) }).us(),
 			lat(func(x result.Latency) float64 { return float64(x.P999NS) }).us(),
 			lat(func(x result.Latency) float64 { return float64(x.MaxNS) }).us(),
-			lat(func(x result.Latency) float64 { return x.MeanNS }).us(), runsCell(g))
+			lat(func(x result.Latency) float64 { return x.MeanNS }).us(),
+			over(g.Runs, func(r *result.Run) float64 { return float64(r.Load.BookOrdersEnd) }).big(), runsCell(g))
 	}
 	d.coreFootnote(all)
 
@@ -628,7 +631,13 @@ func (d *doc) balancedTable(main string) {
 		return
 	}
 	d.p("#### The same resting row under the Balanced plan\n\n")
-	d.p("What a reader running this on a laptop with default power settings would see: the mix table's resting row, and the same configuration run under the Balanced plan (on its own, after the main suite: a plan can't be switched mid-suite). Microseconds.\n\n")
+	mode := "its power mode as recorded"
+	if len(bal) > 0 && len(bal[0].Runs) > 0 {
+		if o := bal[0].Runs[0].PowerBefore.Overlay; o != "" {
+			mode = "the power mode at \"" + o + "\""
+		}
+	}
+	d.p("The mix table's resting row, and the same configuration run under the Balanced plan with %s: this laptop's own setting at the time, which is not Windows' default (the default power mode is \"Balanced\"). It ran on its own, after the main suite, since a plan can't be switched mid-suite. Microseconds.\n\n", mode)
 	d.p("| plan | core count per run¹ | core p50 | core p99 | core p99.9 | core max | e2e count per run | e2e p50 | e2e p99 | e2e p99.9 | e2e max | clock read (ns) | runs |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
 	row := func(label string, g *group, clock *group) {
 		ck := "–"
@@ -673,12 +682,16 @@ func (d *doc) excluded() {
 // equivalents of what benchrun started, from the first run of the row.
 func (d *doc) commands(main string) {
 	d.p("<details><summary>Exact commands for every row</summary>\n\n")
-	d.p("Each row's runs were started by `%s`, which pins each process with the same affinity mask `start /affinity` takes. To repeat one run by hand from cmd.exe, start the engine, then the load generator with `-engine-pid` set to the engine's process id (or 0 to skip its CPU time):\n\n",
-		strings.Join(d.first(main).Commands.Benchrun, " "))
+	d.p("Each suite's runs were started by `benchrun`, which pins each process with the same affinity mask `start /affinity` takes. To repeat one run by hand from cmd.exe, start the engine, then the load generator with `-engine-pid` set to the engine's process id (or 0 to skip its CPU time).\n\n")
+	suite := ""
 	for _, g := range sortedGroups(d.gs) {
 		r := firstAny(g)
 		if r == nil {
 			continue
+		}
+		if g.Suite != suite {
+			suite = g.Suite
+			d.p("Suite **%s**, started with `%s`:\n\n", suite, benchrunLine(d.first(suite).Commands.Benchrun))
 		}
 		d.p("**%s / %s / %s**\n\n```\n", g.Suite, g.Table, g.Config)
 		if r.Commands.EngineStart != "" {
@@ -687,6 +700,22 @@ func (d *doc) commands(main string) {
 		d.p("%s\n```\n\n", r.Commands.LoadgenStart)
 	}
 	d.p("</details>\n")
+}
+
+// benchrunLine is the command a suite was started with, the program named
+// relative to the repository (bin\benchrun.exe) rather than by the absolute
+// path of whoever ran it.
+func benchrunLine(argv []string) string {
+	if len(argv) == 0 {
+		return "benchrun"
+	}
+	prog := filepath.Base(argv[0])
+	if strings.Contains(argv[0], `\`) || strings.HasSuffix(prog, ".exe") {
+		prog = `bin\` + prog
+	} else {
+		prog = "bin/" + prog
+	}
+	return strings.Join(append([]string{prog}, argv[1:]...), " ")
 }
 
 func firstAny(g *group) *result.Run {

@@ -172,13 +172,18 @@ type Answers struct {
 // EngineCounters are /metrics deltas over the window, plus the clock the
 // engine timed itself with.
 type EngineCounters struct {
-	Commands        float64 `json:"commands"`
-	Trades          float64 `json:"trades"`
-	Fsyncs          float64 `json:"fsyncs"`
-	FsyncMeanNS     float64 `json:"fsync_mean_ns"`
-	WALBytes        float64 `json:"wal_bytes"`
-	Snapshots       float64 `json:"snapshots"`
-	SlowConsumers   float64 `json:"slow_consumers"`
+	Commands      float64 `json:"commands"`
+	Trades        float64 `json:"trades"`
+	Fsyncs        float64 `json:"fsyncs"`
+	FsyncMeanNS   float64 `json:"fsync_mean_ns"`
+	WALBytes      float64 `json:"wal_bytes"`
+	Snapshots     float64 `json:"snapshots"`
+	SlowConsumers float64 `json:"slow_consumers"`
+	// FsyncStalls: fsyncs over the engine's stall threshold (25 ms), and
+	// FsyncMaxNS the upper bound of the slowest fsync's /metrics bucket.
+	// Recorded since review F-013; zero in older result files.
+	FsyncStalls     float64 `json:"fsync_stalls"`
+	FsyncMaxNS      float64 `json:"fsync_max_ns"`
 	ClockSource     string  `json:"clock_source"`
 	ClockReadCostNS float64 `json:"clock_read_cost_ns"`
 }

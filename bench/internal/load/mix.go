@@ -76,9 +76,13 @@ type Mix struct {
 // Balanced flows alone make the size a random walk, which drifts. So each
 // crossing quantity is also scaled by Depth: below the target number of
 // resting orders, crossing orders are smaller and the book fills; above
-// it, larger and it drains. Every mix then runs against a book of about
-// the same size (the resting-order count at the start and end of each
-// window is recorded, so a book that didn't hold steady would show).
+// it, larger and it drains. Each mix then holds a steady book of thousands
+// of orders, though not the same size: TestMixesHoldTheBookNearTarget
+// measured resting 9,300-10,400, crossing 8,200-8,700 and cancel-heavy
+// 6,200-7,000, since cancel-heavy's cancels alone nearly balance what it
+// adds and even its smallest crossing orders keep it under the target.
+// The resting-order count at the end of each window is recorded and
+// reported per mix (review F-013).
 var Mixes = map[string]Mix{
 	// "Mostly resting": 90% limit orders away from mid.
 	"resting": {Name: "resting", Passive: 0.90, Crossing: 0.10, PassiveQty: [2]int64{1, 10}, CrossQty: [2]int64{1, 100}},

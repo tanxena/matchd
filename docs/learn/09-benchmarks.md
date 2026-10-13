@@ -76,13 +76,13 @@ When a network packet or disk completion arrives, the CPU runs an **interrupt** 
 ### The load generator: `bench/internal/load`
 
 **`mix.go`: what to send.**
-- **`Mixes`** ([mix.go:82](../../bench/internal/load/mix.go#L82)): the three mixes as fractions plus quantity ranges, with the volume arithmetic in the comment above them.
-- **`Next`** ([mix.go:153](../../bench/internal/load/mix.go#L153)) draws one uniform number `r`:
+- **`Mixes`** ([mix.go:86](../../bench/internal/load/mix.go#L86)): the three mixes as fractions plus quantity ranges, with the volume arithmetic in the comment above them.
+- **`Next`** ([mix.go:157](../../bench/internal/load/mix.go#L157)) draws one uniform number `r`:
   - `r < Cancel`: cancel a random own resting order (`TakeRandom` removes it from the live set at once, so it's never cancelled twice). If there's none, send a passive order and say so (`noTarget`).
   - `r < Cancel+Crossing`: an IOC at `Mid±Band`. Its quantity is drawn, then **scaled** by `depth.Scale()`.
   - otherwise passive: 1–10 ticks from mid on its own side, unless this connection already has `liveCap` resting orders, in which case a cap cancel is sent instead.
 - **`Depth.Scale`** ([mix.go:125](../../bench/internal/load/mix.go#L125)) is the feedback: resting orders ÷ target, clamped to [¼, 4]. Below the target, crossing orders shrink and the book fills; above, they grow and it drains.
-- **`Live`** ([mix.go:185](../../bench/internal/load/mix.go#L185)) is a connection's resting order ids. A slice plus a map from id to index gives O(1) random choice and O(1) removal (swap with the last element, shrink). Each `Add` or `Remove` also moves the shared `Depth` counter.
+- **`Live`** ([mix.go:189](../../bench/internal/load/mix.go#L189)) is a connection's resting order ids. A slice plus a map from id to index gives O(1) random choice and O(1) removal (swap with the last element, shrink). Each `Add` or `Remove` also moves the shared `Depth` counter.
 
 **`conn.go`: one connection.**
 - **`pending`** ([conn.go:15](../../bench/internal/load/conn.go#L15)): a command sent and not answered. It holds its kind, its client order id (orders) or order id (cancels), `intended` (open loop's scheduled time), `sent`, and `measured` (sent inside the window).
@@ -128,7 +128,7 @@ When a network packet or disk completion arrives, the CPU runs an **interrupt** 
   Every due command is sent in one write. It **spins** rather than sleeps (a sleep wakes late by the timer's granularity), and calls `runtime.Gosched` every 1,024 spins so the readers aren't starved of a P.
 - **`cpuUse`** ([run.go:357](../../bench/internal/load/run.go#L357)) turns two CPU samples into cores used: engine, load generator, machine busy, interrupts + DPCs, and **every other process**, from the OS's process list, with the top five named.
 
-**`scrape.go`.** **`parseMetrics`** ([scrape.go:110](../../bench/internal/load/scrape.go#L110)) reads `series value` lines into a map. **`counters`** ([scrape.go:144](../../bench/internal/load/scrape.go#L144)) subtracts before from after for commands, trades, fsyncs (count and sum, giving the mean), WAL bytes, snapshots and slow consumers, and reads the clock's source and cost.
+**`scrape.go`.** **`parseMetrics`** ([scrape.go:111](../../bench/internal/load/scrape.go#L111)) reads `series value` lines into a map. **`counters`** ([scrape.go:172](../../bench/internal/load/scrape.go#L172)) subtracts before from after for commands, trades, fsyncs (count and sum, giving the mean), WAL bytes, snapshots and slow consumers, and reads the clock's source and cost.
 
 ### The result format and the verdict: `bench/internal/result`
 
@@ -199,7 +199,7 @@ Thin wrappers over Windows APIs, each loaded with `syscall.NewLazyDLL(...).NewPr
 
   It then gives "nothing else running" as the measured median and maximum other-process CPU, naming the worst run's biggest process. `-min-runs-suite balanced=3` lets one suite's rows report fewer runs; such a row shows **n=3** of 5†, with the left-out runs listed.
 - The table functions each state their conditions in a sentence and give every cell as `median (min–max)`. Every core-latency table carries **`coreFootnote`** ([report.go:459](../../bench/report/report.go#L459)): the clock's source and per-read cost, and the 3.1% bound.
-- **`commands`** ([report.go:678](../../bench/report/report.go#L678)) lists each row's exact `start /affinity` lines.
+- **`commands`** ([report.go:683](../../bench/report/report.go#L683)) lists each row's exact `start /affinity` lines.
 - **`splice`** ([main.go:94](../../bench/report/main.go#L94)) replaces only what lies between the README's `bench:begin` and `bench:end` markers.
 
 ### Tests and what the smoke runs showed
