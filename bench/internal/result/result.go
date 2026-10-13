@@ -109,8 +109,11 @@ type Load struct {
 	// first answers.
 	Sent      Counts `json:"sent"`
 	Completed uint64 `json:"completed"` // first answers received in the window
-	// ThroughputPerSec is Completed over the window: sustained commands
-	// (orders and cancels) answered per second.
+	// ThroughputPerSec: sustained commands (orders and cancels) answered
+	// per second over the window. Closed loop: Completed (answers received
+	// in the window). Open loop: commands sent in the window and answered
+	// (the E2E count), so a backlog from before the window can't make up
+	// for a sender that fell behind.
 	ThroughputPerSec float64 `json:"throughput_per_sec"`
 	Answers          Answers `json:"answers"`
 

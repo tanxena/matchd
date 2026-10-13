@@ -150,9 +150,9 @@ A **crash harness** starts the real program, drives load, kills it, and checks w
 ### `internal/crashtest`: the harness
 
 - **`TestMain`** builds `cmd/engine` once.
-- **`startEngine`** ([crash_test.go:175](../../internal/crashtest/crash_test.go#L175)) runs it on port 0 and reads the port from its log.
+- **`startEngine`** ([crash_test.go:194](../../internal/crashtest/crash_test.go#L194)) runs it on port 0 and reads the port from its log.
 - **`runClient`** ([crash_test.go:82](../../internal/crashtest/crash_test.go#L82)) has a writer (random orders and cancels) and a reader that records every sequenced answer and every fill under a mutex.
-- **`TestCrashRecovery`** ([crash_test.go:222](../../internal/crashtest/crash_test.go#L222)), for each run:
+- **`TestCrashRecovery`** ([crash_test.go:238](../../internal/crashtest/crash_test.go#L238)), for each run:
   1. start the engine, with the policy and segment size rotating;
   2. start three clients, wait 80–400 ms, then `Process.Kill()`;
   3. check: `ReplayCheck`; every answer's seq is ≤ the WAL's end, and, where still present, the WAL record is that command; no `(match, role)` is received twice across runs; every received fill equals the replayed match; `Recover`'s state equals the replay's; no answered seq reuses a number from before;

@@ -57,6 +57,7 @@ All of this ran on the development machine (Windows 11, go1.27.0, MSYS2 gcc for 
 - **Suggested fix:**
   - Give the `bufio.Writer` a wrapper `io.Writer` that sets `SetWriteDeadline(now+WriteTimeout)` before *every* `conn.Write`. Alternatively, refresh the deadline before each `bw.Write` whenever `bw.Available() < len(frame)`, as `write()` (L473ff) already does for snapshots.
   - Add a test that idles longer than `WriteTimeout`, then forces a burst larger than 32 KiB with `GOMAXPROCS=1`, or with the writer held back.
+- **Builder response:** Accepted — fixed in 15cf825: every socket write now sets its own deadline (`deadlineWriter`, the writer's `bufio.Writer` writes through it), including bufio's implicit flushes. `TestIdleThenBurstIsNotASlowConsumer` (GOMAXPROCS 1, idle 700 ms past a 300 ms WriteTimeout, then a 599-fill burst) fails on the old code 3 of 3 times with 0 of 599 fills delivered, and passes now.
 
 ### F-002 — Quantities are unbounded: price-level totals overflow int64 and the book diverges from the reference book
 - **Severity:** Critical
@@ -80,6 +81,7 @@ All of this ran on the development machine (Windows 11, go1.27.0, MSYS2 gcc for 
   - Define a maximum order quantity (and price) in the integer-domain decision (003). Reject above it with `InvalidQty` / `InvalidPrice` in both books.
   - Choose the bound so that a level's total, and a FOK's running sum, can't overflow: for example `MaxQty = 2^40` with a cap on resting orders per level, or 128-bit / saturating sums.
   - Extend the generator with edge quantities.
+- **Builder response:** Accepted — fixed in dc42b11: both books reject quantity above `MaxQty` = 2^30 lots (`InvalidQty`) and a limit price above `MaxPrice` = 2^53 ticks (`InvalidPrice`). With fewer than 2^32 orders per book (uint32 indexes), no level total or FOK sum can exceed 2^62 (decision 003). `TestQuantityAndPriceBounds` fails on both books with the old validation (a level of `MaxInt64` + 1 read as negative) and passes now. Edge values were added to the generator under F-004.
 
 ### F-003 — The duplicate client-order-id rule is enforced per instrument, not per client
 - **Severity:** Should-fix
@@ -95,6 +97,7 @@ All of this ran on the development machine (Windows 11, go1.27.0, MSYS2 gcc for 
   - Or explicitly re-scope the rule to "(client, instrument, client_order_id)" in decision 003 and the learning doc.
 
   Either way, add an engine-level test.
+- **Builder response:** Accepted — fixed in fd338eb: the PRD rule (unique per client among live orders on every instrument) is implemented in both books. The engine shares one `book.ClOrdIDs` across all its books (`Book.Share`, rebuilt on restore), and the reference book implements it independently (`ref.Link`, looking through linked books' orders). `TestDifferentialAcrossInstruments` spreads the stream over two instruments in both implementations and catches either book reverted to per-instrument. `TestClientOrderIDUniqueAcrossInstruments` (engine, including after a restore) fails on the old engine. Decision 003 records that this changes reject behaviour and that the WAL format is unaffected, since no existing log is being replayed.
 
 ### F-004 — The differential test cannot reach the book's multi-chunk, index-growth or extreme-value paths
 - **Severity:** Should-fix
@@ -114,6 +117,7 @@ All of this ran on the development machine (Windows 11, go1.27.0, MSYS2 gcc for 
   - Add a regime, or a `-long` seed group, that builds and holds a deep book (more than 10k resting orders, several chunks, index growth past 1,024) while freezing.
   - Add an edge-value regime (huge quantities, price 1, `MaxInt64` prices).
   - Assert the depth and chunk count in `requireCoverage`.
+- **Builder response:** Accepted — fixed in 5772dbe: every seed now sends `MaxQty` orders, IOCs at price 1 and `MaxPrice`, and just-out-of-bound invalid orders, with coverage floors. `TestDifferentialDeepBook` builds more than 10,000 resting orders and requires at least 3 chunks, an order index grown past 1,024 slots, and multi-chunk copy-on-write. It measured 11,473–11,615 orders, 3 chunks and 32,768 slots, with zero divergence (3 seeds with `-long`, alongside the 1.2M-command run).
 
 ### F-005 — Unauthenticated `Subscribe`/`Resend` frames make the publisher goroutine do unbounded work
 - **Severity:** Should-fix
@@ -131,6 +135,7 @@ All of this ran on the development machine (Windows 11, go1.27.0, MSYS2 gcc for 
 - **Suggested fix:**
   - Serve resends from the session's own goroutine, out of an immutable or locked copy of the ring range. Or bound each Resend (for example to the soft queue limit) and rate-limit requests per session.
   - Snapshot copying could be shared per md_seq across concurrent subscribers.
+- **Builder response:** Accepted — fixed in bf4c722: a Resend more than `publisher.MaxResend` (4,096) events back is answered `ResendUnavailable` (re-snapshot). Each connection's Subscribe/Resend requests are rate-limited in the gateway (burst 32, then 16/s; beyond that `Reject(TooManyRequests)`, reason 106, additive), and `client.Feed` retries a refused request after `RetryDelay`. That bounds one connection's publisher work to about 65,000 events/s. The number of connections is still unlimited, which the README now lists as a known limitation. `TestResendIsBounded` and `TestMarketDataRequestsAreRateLimited` each fail with their bound removed.
 
 ### F-006 — The fill log is "not part of the durability contract", yet it fsyncs on the publisher goroutine and can refuse startup
 - **Severity:** Should-fix
@@ -143,6 +148,7 @@ All of this ran on the development machine (Windows 11, go1.27.0, MSYS2 gcc for 
 - **Suggested fix:**
   - Give the fill log `wal.Options` that skip the roll fsync (a `NoSync` option), or move fill-log writing to its own goroutine.
   - On open, treat fill-log damage as "truncate and warn", not fatal.
+- **Builder response:** Accepted — fixed in b1ad711: the fill log opens with the new `wal.Options.NoSyncOnRoll`, so the publisher never fsyncs it (`TestFillLogNeverFsyncs`: 14 segments, 0 fsyncs; 13 with the option off). A fill log damaged beyond a torn tail is moved aside to `fills.damaged-<ns>` with a warning, and a fresh one is started instead of `server.Start` failing (`TestDamagedFillLogIsMovedAside`). Decision 014 is updated.
 
 ### F-007 — The crash test checks much less than the README says, and never exercises a torn tail
 - **Severity:** Should-fix
@@ -157,6 +163,7 @@ All of this ran on the development machine (Windows 11, go1.27.0, MSYS2 gcc for 
 - **Suggested fix:**
   - Have the harness keep pruned WAL and fill-log segments: a test flag that disables deletion, or copy segments aside before each restart. Then check every ack and fill against a replay from seq 1.
   - Correct `README.md:L99-L103` to say what is actually checked, and that torn tails come from the unit tests, not the kill test.
+- **Builder response:** Accepted — fixed in 3852a5e: with the new `-archive DIR`, pruned WAL and fill-log segments are moved aside rather than deleted. So after the last run, every acknowledged command and every received fill from every run is checked against a replay from seq 1, and pruning still runs. Every fifth run, the harness appends a torn record that the real binary must report and cut off. Measured over 50 runs: 447,645 of 447,645 acks and 401,510 of 401,510 fills checked, and 9 of 9 injected torn tails recovered. The README and decision 015 now say exactly what is checked, and that kills alone don't tear records.
 
 ### F-008 — The acceptance-5 test can't detect a meaningful latency shift
 - **Severity:** Should-fix
@@ -170,6 +177,7 @@ All of this ran on the development machine (Windows 11, go1.27.0, MSYS2 gcc for 
 - **Suggested fix:**
   - Compare with the 3.1% `LogHistogram` (`s.fine`) on a larger sample, and assert the shift at p50, p99 and p99.9 within a stated ratio.
   - Also assert directly that the engine never blocked on `events` during the slow phase, for example with a counter of sends that found the channel full.
+- **Builder response:** Accepted — fixed in 7d161f7: the engine counts event sends that found its output channel full (`Engine.OutputBlocked`, `matchd_engine_output_blocked_total`), and the test requires 0 in both phases. It also compares p50/p99/p99.9 from the 3.1% `LogHistogram` within 1.4×/1.8×/2.5× on 6,000 commands per phase; the measured ratio was 0.90–1.06× under `-race` over 5 runs.
 
 ### F-009 — README claims answers wait for disk under every fsync policy; under `never` they don't
 - **Severity:** Should-fix
@@ -178,6 +186,7 @@ All of this ran on the development machine (Windows 11, go1.27.0, MSYS2 gcc for 
 - **Problem:** `README.md:93` says, in bold, "Under every policy, no answer leaves the process before its command is on disk." Under `never`, the sequencer advances the durable seq to `LastAppended` right after `write()` (`sequencer.go:L211-L212`): page cache, not disk. Decision 012:33 says so correctly, and README:91 says acknowledged work can be lost.
 - **Why it matters:** this is the headline durability sentence, and it is false for one of the three documented policies.
 - **Suggested fix:** "Under `always` and `group`, no answer leaves the process before its command is fsynced; under `never`, before it is written to the OS."
+- **Builder response:** Accepted — fixed in a6e0e30: the README now reads "Under `always` and `group`, no answer leaves the process before its command is fsynced to disk. Under `never`, before it is written to the operating system".
 
 ### F-010 — Acceptance 7 (Linux) isn't met, and README line 145 says Linux is CI-tested
 - **Severity:** Should-fix
@@ -190,6 +199,7 @@ All of this ran on the development machine (Windows 11, go1.27.0, MSYS2 gcc for 
 - **Suggested fix:**
   - Run `go test -race ./...` and `make test-long` on Linux (WSL2 or a VM is enough), or push and let CI run, and record the result.
   - Until then, change L145 to "cross-compiled; not yet run".
+- **Builder response:** Accepted — fixed in 44d7883: the README no longer says "CI-tested". It says the suite has never run on Linux, that acceptance 7 is not met, and which Linux-only code paths are therefore untested, and it lists this under known limitations. Meeting acceptance 7 still needs a Linux run (push for CI, or run in a Linux VM/WSL distribution or a Go container). That wasn't done: the only WSL distribution here is Docker Desktop's internal one, and starting Docker to pull a Go image is the user's call.
 
 ### F-011 — Benchmark tables omit the count, and some quantiles, that PRD 7.1 requires
 - **Severity:** Should-fix
@@ -206,6 +216,7 @@ All of this ran on the development machine (Windows 11, go1.27.0, MSYS2 gcc for 
   Only the mix tables comply.
 - **Why it matters:** this is a stated hard requirement of the benchmark protocol (PRD §7, "requirements, not suggestions"), and it is part of acceptance 6.
 - **Suggested fix:** add the count and the missing quantile columns to those three tables in `bench/report`. The data is already in the result files.
+- **Builder response:** Accepted — fixed in f073625: the fsync, snapshot and Balanced tables now give the count, p50, p99, p99.9 and max for every latency they report (core and end-to-end), from the committed result files. The README was regenerated; no re-run needed.
 
 ### F-012 — The fsync table mixes segment-roll fsyncs into the "fsync mean" column, and the README cites that column wrongly
 - **Severity:** Should-fix
@@ -219,6 +230,7 @@ All of this ran on the development machine (Windows 11, go1.27.0, MSYS2 gcc for 
 - **Suggested fix:**
   - Render `–` for `never`'s fsync mean, or a separately labelled "roll fsync" column.
   - Fix L158 to cite figures a table actually shows.
+- **Builder response:** Accepted — fixed in 1a4d126: the `never` row's fsyncs/s, commands-per-fsync and fsync-mean cells are blank, with a note that its only fsyncs are 64 MiB segment rolls. The end-to-end mix table gained an "fsync mean" column, and the README now points at the two columns that show per-fsync times instead of quoting a range neither showed.
 
 ### F-013 — README benchmark prose states things the committed results don't support
 - **Severity:** Should-fix
@@ -239,6 +251,7 @@ All of this ran on the development machine (Windows 11, go1.27.0, MSYS2 gcc for 
   - Report book size per mix, or fix the cancel-heavy book size in the load generator.
   - Re-run, or drop the startup read-cost from the footnote and cite the clockprobe row.
   - Correct the plan wording and the commands line.
+- **Builder response:** Accepted — fixed in 13875f7: (a) the snapshot-stall mechanism is stated as an unverified observation from a separate reproduction (linking 002), and the load generator now records fsync stalls and the slowest fsync's bucket for future runs; (b) book size is reported per mix, and mix.go's comment no longer claims the same size; (c) the core-latency footnote cites the clock probe's read cost (the startup figure was timed with `time.Now` before 2b3dc3a) and says the span includes a histogram update; (d) the Balanced row names its power mode and says it isn't Windows' default; (e) each suite's own `benchrun` command, with no local absolute path. Committed results showing the stalls would need a re-run of the snapshot pair (not run).
 
 ### F-014 — The Balanced row reports n=3, below PRD 7.5's minimum of 5
 - **Severity:** Should-fix
@@ -250,6 +263,7 @@ All of this ran on the development machine (Windows 11, go1.27.0, MSYS2 gcc for 
 - **Suggested fix:**
   - Re-run the Balanced suite with Defender quiesced and drop the override.
   - Apply the other-CPU check to clock runs too.
+- **Builder response:** Accepted — fixed in 5b08015 (the clock-run check); re-run needed for the rest. Clock-probe runs now record other processes' CPU, and `Assess` applies the same limit. The n=3 Balanced row stays, disclosed, because meeting PRD 7.5 needs `make bench-balanced` re-run (about 10 min, with Defender quiet, into an emptied `bench/results/balanced`), followed by removing `-min-runs-suite balanced=3` from the Makefile. Per instructions, not re-run.
 
 ### F-015 — The headline tables use snapshots off; the shipped default has snapshots on, with a 7× worse end-to-end tail
 - **Severity:** Should-fix
@@ -263,6 +277,7 @@ All of this ran on the development machine (Windows 11, go1.27.0, MSYS2 gcc for 
 - **Suggested fix:** do one of the following:
   - State in the mix-table caption that the shipped default (snapshots every 10 s) has the end-to-end tail of the snapshot table.
   - Or investigate and fix observation 002 (for example a separate volume for snapshots, or appending into a fresh segment while the old one syncs) and re-run.
+- **Builder response:** Accepted — fixed in 3fbec84 (the first suggested fix): the mix-table captions and the README's reading guide now say the headline tables run with snapshots off, that the shipped default snapshots every 10 s, and that the snapshot table's "on" row is the end-to-end tail for the default. The second option (investigate observation 002, change the WAL/snapshot I/O, re-run) is a design change left for the user.
 
 ### F-016 — `bench/internal/sysinfo` `TestAffinityAndTimes` is flaky on Windows
 - **Severity:** Should-fix
@@ -273,6 +288,7 @@ All of this ran on the development machine (Windows 11, go1.27.0, MSYS2 gcc for 
   - `make test` and `make ci` fail at random, which undermines acceptance 7.
   - It is also a candidate source for future "unreproduced" failures like observation 001. 001 was in `internal/server`, so this doesn't explain it, but it shows the suite has a flaky test that `make test-race-loop`'s default package doesn't cover.
 - **Suggested fix:** burn measurable CPU in the test process before calling `SelfTimes`, for example a 50 ms spin, or assert `>= 0` and only check that the call succeeds.
+- **Builder response:** Accepted — fixed in 8675aad: the test spins 50 ms before reading its own CPU time, so it is never below Windows' 15.6 ms accounting tick. 20 consecutive runs pass.
 
 ### F-017 — No way to detect a lost final market-data message
 - **Severity:** Nit
@@ -281,6 +297,7 @@ All of this ran on the development machine (Windows 11, go1.27.0, MSYS2 gcc for 
 - **Problem:** gap detection fires only when a later md_seq arrives. There's no heartbeat carrying the latest md_seq, so a dropped last message is never detected; the acceptance-4 test works around this by sending one more order.
 - **Why it matters:** over TCP, single frames aren't lost; a stalled consumer is disconnected instead. So the gap/resend machinery is reachable only via the test's `Drop` hook, and the limitation is real but marginal. Decision 016 documents it.
 - **Suggested fix:** periodically send a per-instrument md heartbeat (instrument, last md_seq) to subscribers, or list it under known limitations in the README.
+- **Builder response:** Accepted — fixed in 5c9b3ba (the second suggested fix): the README's known limitations list the missing market-data heartbeat, including the related case F-005 introduced (a rate-limited Resend retried only on a later message). Decision 016 is noted. A heartbeat message is a protocol addition left for later.
 
 ### F-018 — The core-latency window is wider than documented
 - **Severity:** Nit
@@ -292,6 +309,7 @@ All of this ran on the development machine (Windows 11, go1.27.0, MSYS2 gcc for 
   - Core count minus end-to-end count is about 100–220 commands per open-loop run, which is 5–18 ms of traffic, not about 1 ms.
 - **Why it matters:** the quantile effect is negligible (about 0.02% of samples), but the documentation is wrong, and the core max could come from an edge.
 - **Suggested fix:** flip the phase immediately after the first scrape and halt before the second, or correct the comment and the decision.
+- **Builder response:** Accepted — fixed in 667678f: CPU times are now read before the first scrape, and sending stops before the second. Decision 021 now states that the committed results' engine window was 100–220 commands (5–18 ms) wider, not about 1 ms.
 
 ### F-019 — Stale statements in `bench/CHECKLIST.md` and `bench/README.md`
 - **Severity:** Nit
@@ -305,6 +323,7 @@ All of this ran on the development machine (Windows 11, go1.27.0, MSYS2 gcc for 
   - **Durations disagree:** smoke 1m20s / 1.5 min / 2 min; full 75 / 85 min.
 - **Why it matters:** the operator follows a checklist that no longer describes the tool.
 - **Suggested fix:** update the checklist and bench README to match the Makefile and `assess.go`.
+- **Builder response:** Accepted — fixed in 1bceb0a: the checklist and bench README now match the Makefile and `assess.go`. `bench-report`'s `-allow-disturbed`/`-min-runs-suite` flags for the committed results are explained, `-min-runs-suite` replaces `-min-runs 4`, the claim that the README reports a missing Defender exclusion is replaced by how `-asserted` works, clock runs are now checked (F-014), and the durations agree everywhere.
 
 ### F-020 — The TSC conversion wraps if a core's TSC reads below the calibration base
 - **Severity:** Nit
@@ -313,6 +332,7 @@ All of this ran on the development machine (Windows 11, go1.27.0, MSYS2 gcc for 
 - **Problem:** `bits.Mul64(tsc-c.baseTSC, c.mult)` uses unsigned subtraction. If `rdtsc` on another core returns a value even slightly below `baseTSC` (cross-core skew), the result is a timestamp about 2^64 ticks in the future. Invariant TSCs are normally synchronised across cores on one socket, so this is unlikely on the benchmark machine.
 - **Why it matters:** a negative or garbage span in a histogram, or a wildly wrong command timestamp, which is then logged to the WAL forever.
 - **Suggested fix:** compute the delta as signed (`int64(tsc - base)`) and clamp, or take the base slightly in the past.
+- **Builder response:** Accepted — fixed in 8e86d91: the tick difference is signed, so a reading a few ticks below the calibration base converts to a time just before it. `TestConversionBelowTheBase` fails on the old code (-9.2e18 ns) and passes now.
 
 ## Overall assessment
 

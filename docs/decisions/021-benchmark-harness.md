@@ -53,7 +53,7 @@ The engine is the shipped `cmd/engine` binary, started with ordinary flags. Noth
 |---|---|
 | matching-core latency (PRD 7.1a) | the engine's `GET /debug/latency`, read at the window's start and end and subtracted |
 | end-to-end latency (PRD 7.1b) | the load generator: send (scheduled, in open loop) → receipt of the command's **first answer** (`Ack`, `Reject` or `CancelAck`), with `internal/clock` |
-| throughput | first answers received in the window ÷ window length |
+| throughput | closed loop: first answers received in the window ÷ window length. Open loop: commands *sent* in the window and answered ÷ window length. Counting answers received in the window would include a backlog sent before it, which could hide a sender that fell behind. That was found when a loaded test machine answered "6,466/s" for a 5,000/s schedule. The committed open-loop results are within 0.1% of the target either way. |
 | engine counters | `/metrics` deltas: commands, trades, fsyncs and their mean, WAL bytes, snapshots, slow consumers |
 | book size | `GET /instruments` order count at the window's start and end |
 | CPU | the OS: engine and load-generator process times, every other process, interrupt/DPC time (Decision 7) |

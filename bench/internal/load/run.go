@@ -228,7 +228,15 @@ func Run(cfg Config) (*result.Load, error) {
 		out.SendLag = &l
 	}
 	if out.MeasuredNS > 0 {
-		out.ThroughputPerSec = float64(out.Completed) / (float64(out.MeasuredNS) / 1e9)
+		answered := float64(out.Completed) // closed loop: answers received in the window
+		if cfg.Rate > 0 {
+			// Open loop: the commands scheduled in the window that were
+			// answered (in it or in the drain). Answers received in the
+			// window would also count a backlog sent before it, which can
+			// hide a sender that fell behind.
+			answered = float64(out.E2E.Count)
+		}
+		out.ThroughputPerSec = answered / (float64(out.MeasuredNS) / 1e9)
 	}
 	for _, err := range []error{errBefore, errAfter, errCPU, errCPU2} {
 		if err != nil {
