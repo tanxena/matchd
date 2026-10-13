@@ -161,6 +161,10 @@ That work runs during measured windows: snapshots in the snapshot row, a fresh d
 
 `bench/CHECKLIST.md` step 1b excludes the data directory for the duration of the runs. That needs an administrator PowerShell, since exclusions can't even be read without one. Whether an exclusion was set must be stated in the README's environment line: the harness can't read it, so the user says so.
 
+## Results (2026-10-13)
+
+`make bench-full`: 45 runs, 0 disturbed, 0 failed. `make bench-balanced`: 10 runs. Two resting runs were disturbed by Defender (`MsMpEng.exe` at 0.87 and 0.77 CPUs, despite the data-directory exclusion), so that row reports **n=3** (`bench-report -min-runs-suite balanced=3`, with both runs listed under the tables). The tables are in the README, generated from `bench/results/`. One finding came out of them: with snapshots on, WAL fsyncs stall and intake stops behind them, which costs the end-to-end tail but not core latency ([open observation 002](../bugs/002-snapshot-runs-stall-the-wal.md)).
+
 ## Costs and limitations
 
 - **Loopback TCP is not a network.** End-to-end latency includes two kernel network stacks on one machine and the L3 the two processes share. It's an upper bound on what the engine adds, not a network figure.

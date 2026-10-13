@@ -189,16 +189,18 @@ Thin wrappers over Windows APIs, each loaded with `syscall.NewLazyDLL(...).NewPr
 ### The report: `bench/report`
 
 - **`groups`** ([report.go:50](../../bench/report/report.go#L50)) sorts runs into rows by (suite, table, config). A failed or disturbed run goes to `Excluded`, never into the numbers. The exception is `-smoke`, where disturbed runs count and the report says "not benchmark results" at the top.
-- **`check`** ([report.go:75](../../bench/report/report.go#L75)) refuses rows with fewer than 5 counted runs, and refuses any exclusion unless `-allow-disturbed`.
-- **`stats`** ([report.go:132](../../bench/report/report.go#L132)): the median (the middle value, or the mean of the middle two) and min–max.
-- **`hardware`** ([report.go:309](../../bench/report/report.go#L309)) writes the statement from the files:
-  - CPU, cores, L3, RAM, OS and Go;
-  - each suite's power;
-  - "nothing else running" as the measured median and maximum other-process CPU, naming the worst run's biggest process;
-  - the pinning claim with physical cores, which says "no physical core is shared" only if the recorded topology says so.
-- The table functions each state their conditions in a sentence and give every cell as `median (min–max)`. Every core-latency table carries **`coreFootnote`** ([report.go:448](../../bench/report/report.go#L448)): the clock's source and per-read cost, and the 3.1% bound.
-- **`commands`** ([report.go:664](../../bench/report/report.go#L664)) lists each row's exact `start /affinity` lines.
-- **`splice`** ([main.go:67](../../bench/report/main.go#L67)) replaces only what lies between the README's `bench:begin` and `bench:end` markers.
+- **`check`** ([report.go:76](../../bench/report/report.go#L76)) refuses rows with fewer than 5 counted runs, and refuses any exclusion unless `-allow-disturbed`.
+- **`stats`** ([report.go:137](../../bench/report/report.go#L137)): the median (the middle value, or the mean of the middle two) and min–max.
+- **`hardware`** ([report.go:310](../../bench/report/report.go#L310)) writes one hardware-and-environment line from the files:
+  - CPU (cores / threads, L3), RAM, OS and Go;
+  - each suite's power plan and source;
+  - the pinning claim, which says "no shared physical core" only if the recorded topology says so;
+  - any `-asserted` statement, for what the harness can't measure, such as the Defender exclusion, labelled "stated by the operator".
+
+  It then gives "nothing else running" as the measured median and maximum other-process CPU, naming the worst run's biggest process. `-min-runs-suite balanced=3` lets one suite's rows report fewer runs; such a row shows **n=3** of 5†, with the left-out runs listed.
+- The table functions each state their conditions in a sentence and give every cell as `median (min–max)`. Every core-latency table carries **`coreFootnote`** ([report.go:459](../../bench/report/report.go#L459)): the clock's source and per-read cost, and the 3.1% bound.
+- **`commands`** ([report.go:678](../../bench/report/report.go#L678)) lists each row's exact `start /affinity` lines.
+- **`splice`** ([main.go:94](../../bench/report/main.go#L94)) replaces only what lies between the README's `bench:begin` and `bench:end` markers.
 
 ### Tests and what the smoke runs showed
 
@@ -215,6 +217,10 @@ Thin wrappers over Windows APIs, each loaded with `syscall.NewLazyDLL(...).NewPr
   - end-to-end p50 3–4 ms, dominated by a 1.4–2.4 ms fsync on this SSD.
 
   That set the open-loop rate at 20,000/s.
+
+### What the committed results showed
+
+The README's tables come from `bench/results/`. The snapshot row is the one surprise. Core latency is the same with snapshots on and off: copy-on-write works. But about 0.9% of commands wait over 50 ms end to end with snapshots on, and none do with them off. A reproduction sampling `/metrics` every few milliseconds showed why: a WAL fsync of 30–80 ms a few seconds after a snapshot, during which `matchd_events_held` stays flat and nothing reaches the engine, because the sequencer's next WAL append waits behind the fsync. That's [open observation 002](../bugs/002-snapshot-runs-stall-the-wal.md). The stall metric added in decision 022 is what made it visible rather than inferred.
 
 ---
 
