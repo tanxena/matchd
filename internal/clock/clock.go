@@ -108,18 +108,22 @@ func describe(c *calibration) Info {
 		in.Resolution = time.Duration(max(1, int64(1e9/c.hz)))
 	}
 	// Best of three passes: the first runs right after the calibration
-	// sleep, while the CPU may still be clocking up. Each pass is averaged
-	// over milliseconds, so time.Now's coarseness doesn't matter.
+	// sleep, while the CPU may still be clocking up. Each pass takes a few
+	// milliseconds, timed with the fallback source (QPC on Windows, 100 ns
+	// resolution), not time.Now: on an otherwise idle Windows machine
+	// time.Now can advance only every 15.6 ms, so a whole pass would
+	// measure as zero.
 	const n = 200_000
 	in.ReadCost = time.Hour
 	var sink int64
 	for range 3 {
-		start := time.Now()
+		start := fallbackNow()
 		for range n {
 			sink += Now()
 		}
-		in.ReadCost = min(in.ReadCost, time.Since(start)/n)
+		in.ReadCost = min(in.ReadCost, time.Duration(fallbackNow()-start)/n)
 	}
+	in.ReadCost = max(in.ReadCost, 1) // a read never costs nothing
 	_ = sink
 	return in
 }

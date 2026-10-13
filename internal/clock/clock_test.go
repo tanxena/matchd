@@ -67,3 +67,27 @@ func BenchmarkNow(b *testing.B) {
 		_ = Now()
 	}
 }
+
+// The read cost Init reports (in the startup log, in /metrics, and in every
+// core-latency table's footnote) agrees with an independent measurement
+// over a long loop, where time.Now's coarse Windows tick doesn't matter.
+// It once read 0 on an idle machine, where time.Now advanced only every
+// 15.6 ms and Init's short passes measured nothing.
+func TestReadCostIsMeasured(t *testing.T) {
+	in := Init()
+	var n int64
+	var sink int64
+	start := time.Now()
+	for time.Since(start) < 300*time.Millisecond {
+		for range 10_000 {
+			sink += Now()
+		}
+		n += 10_000
+	}
+	_ = sink
+	independent := time.Since(start) / time.Duration(n)
+	t.Logf("Init says %v per read; a 300 ms loop says %v", in.ReadCost, independent)
+	if in.ReadCost <= 0 || in.ReadCost < independent/3 || in.ReadCost > 3*independent+5*time.Nanosecond {
+		t.Fatalf("Init's read cost %v disagrees with %v measured over 300 ms", in.ReadCost, independent)
+	}
+}
