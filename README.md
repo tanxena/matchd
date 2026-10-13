@@ -29,7 +29,7 @@ Ctrl-C shuts down gracefully: clients receive every answer, a snapshot is writte
 
 ## Observability
 
-`/metrics` serves Prometheus text format: commands by type and outcome, fills, matching latency, WAL fsync latency, WAL bytes, snapshot age, connections, slow-consumer disconnects and market-data resends ([decision 017](docs/decisions/017-metrics-and-clock.md)). There's also `/healthz`, and `/debug/latency`: the matching latency in a log-linear histogram precise to 3.1%, which the benchmark reads ([decision 021](docs/decisions/021-benchmark-harness.md)).
+`/metrics` serves Prometheus text format: commands by type and outcome, fills, matching latency, WAL fsync latency, WAL bytes, snapshot age, connections, slow-consumer disconnects and market-data resends ([decision 017](docs/decisions/017-metrics-and-clock.md)). A stalled disk shows as `matchd_wal_fsync_stalls_total` (fsyncs over `-fsync-stall`, 25 ms) and `matchd_wal_fsync_in_progress_seconds` ([decision 022](docs/decisions/022-slow-consumers-and-durability-stalls.md)). There's also `/healthz`, and `/debug/latency`: the matching latency in a log-linear histogram precise to 3.1%, which the benchmark reads ([decision 021](docs/decisions/021-benchmark-harness.md)).
 
 - **Units:** latency histograms are named `_seconds` and labelled in seconds, as Prometheus expects. Their bucket bounds are defined in microseconds (0.25, 0.5, 1, 2, 5 … µs), and the benchmark tables report microseconds: `le="2.5e-07"` is 0.25 µs.
 - **Clock:** latencies are timed with `internal/clock`, not `time.Now`, which on Windows only advances every ~515 µs.

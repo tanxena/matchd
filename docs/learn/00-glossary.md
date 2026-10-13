@@ -91,7 +91,8 @@ Terms used in this repo's code and docs. Each entry names the milestone where th
 - **Fuzzing** (M3): automatically generating huge numbers of inputs to find crashes or broken properties.
 - **Session** (M3): a connection after a successful `Login`. It owns the client id used for every command it sends.
 - **Heartbeat** (M3): an empty message that proves a connection is alive. The server echoes it; silence for `IdleTimeout` disconnects.
-- **Slow consumer** (M3): a client that can't read its events as fast as they're produced. It is disconnected when its bounded queue fills, and never allowed to stall the engine.
+- **Slow consumer** (M3, M9): a client that can't read its events as fast as they're produced, and is never allowed to stall the engine. Since milestone 9 it is disconnected when its queue stays above its soft limit (`OutQueue`) for longer than `WriteTimeout`, reaches the hard limit, or a socket write to it blocks past `WriteTimeout`. A burst alone, such as answers released after a durability stall, doesn't count.
+- **Durability stall** (M9): an fsync slower than the stall threshold (25 ms by default). Answers wait for it, so they're released late and in a burst. Counted in `matchd_wal_fsync_stalls_total`.
 - **Flow control (TCP)** (M3): the receiver tells the sender how much buffer it has left, so a sender can't overrun a slow reader. This is how a blocked reader slows its own client down.
 - **Nagle's algorithm / `TCP_NODELAY`** (M3): kernel batching of small writes, which adds latency to small messages; we turn it off on both ends.
 - **Copy-on-write** (M3): updating shared data by building a new copy and swapping a pointer to it, so readers never take a lock. Used for the publisher's client registry.

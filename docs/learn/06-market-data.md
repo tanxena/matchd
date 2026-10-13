@@ -100,15 +100,15 @@ There is also a new reject reason, `ResendUnavailable` (105). Each message is st
 The reader handles `Subscribe` by calling `pub.Subscribe(instrument, session)`, **without requiring login**, and `Resend` by calling `pub.Resend(...)`. `session` implements `Closed()`. **`appendEvent`** encodes `BookDelta`, `Trade` and `ResendUnavailable`, which goes out as a `Reject` with reason 105.
 
 **Snapshots are streamed by the writer, outside the queue.**
-- **`DeliverSnapshot`** ([session.go:91](../../internal/gateway/session.go#L91)) puts the snapshot on a small side channel `snaps` (at most 4 pending), then an `EvSnapshot` marker on `out`. It never blocks.
-- When the writer reaches the marker, **`streamSnapshot`** ([session.go:397](../../internal/gateway/session.go#L397)) takes the snapshot and writes the header and every level frame from it.
-- **`write`** ([session.go:426](../../internal/gateway/session.go#L426)) flushes under the write deadline whenever the buffer is full, so a client that stops reading is disconnected after `WriteTimeout`, while one that reads gets the whole book, however deep. Live events published meanwhile wait in `out`.
+- **`DeliverSnapshot`** ([session.go:95](../../internal/gateway/session.go#L95)) puts the snapshot on a small side channel `snaps` (at most 4 pending), then an `EvSnapshot` marker on `out`. It never blocks.
+- When the writer reaches the marker, **`streamSnapshot`** ([session.go:444](../../internal/gateway/session.go#L444)) takes the snapshot and writes the header and every level frame from it.
+- **`write`** ([session.go:473](../../internal/gateway/session.go#L473)) flushes under the write deadline whenever the buffer is full, so a client that stops reading is disconnected after `WriteTimeout`, while one that reads gets the whole book, however deep. Live events published meanwhile wait in `out`.
 
 The first version queued one event per level, so a book deeper than the queue (4,096 by default) disconnected every subscriber, even fast ones. Streaming fixed that without making the queue grow.
 
 ### Server
 
-At startup, for each recovered instrument, `Start` sums the resting orders per price (**`levelTotals`**, [server.go:472](../../internal/server/server.go#L472)) and calls `InitMarketData` with the instrument's `md_seq`. Config `MDRing` sets the ring size.
+At startup, for each recovered instrument, `Start` sums the resting orders per price (**`levelTotals`**, [server.go:474](../../internal/server/server.go#L474)) and calls `InitMarketData` with the instrument's `md_seq`. Config `MDRing` sets the ring size.
 
 **A real bug was found and fixed here:** when shutdown caught a snapshot in flight, the engine goroutine exited before the writer handed it back, so the books stayed **frozen**, and any later `Engine().State()` panicked. `Close` now thaws a snapshot left on the return channel.
 

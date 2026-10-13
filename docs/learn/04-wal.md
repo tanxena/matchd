@@ -80,28 +80,28 @@ A process crash loses nothing under *any* policy, because the OS keeps the page 
 
 ### `internal/wal/wal.go`: the log
 
-- **Constants** ([wal.go:39](../../internal/wal/wal.go#L39)): the segment magic `MTCHWAL`, the format version, the 8-byte segment header, the 8-byte record header (length + CRC), and `MaxPayload` = 4 KB. **`castagnoli`** is the CRC table. **`ErrCorrupt`** marks anything recovery must not paper over.
-- **`File`** ([wal.go:61](../../internal/wal/wal.go#L61)): `Write`, `Sync`, `Close`. `*os.File` satisfies it; tests substitute wrappers that count, block or fail `Sync`.
-- **`Log`** ([wal.go:111](../../internal/wal/wal.go#L111)):
+- **Constants** ([wal.go:40](../../internal/wal/wal.go#L40)): the segment magic `MTCHWAL`, the format version, the 8-byte segment header, the 8-byte record header (length + CRC), and `MaxPayload` = 4 KB. **`castagnoli`** is the CRC table. **`ErrCorrupt`** marks anything recovery must not paper over.
+- **`File`** ([wal.go:62](../../internal/wal/wal.go#L62)): `Write`, `Sync`, `Close`. `*os.File` satisfies it; tests substitute wrappers that count, block or fail `Sync`.
+- **`Log`** ([wal.go:117](../../internal/wal/wal.go#L117)):
   - `mu` guards the current file handle and size;
   - `syncMu` serialises `Sync` with segment rolls;
   - the atomics `appended` (written to the OS) and `synced` (fsynced);
   - `pending`, the batch being built, touched only by the appender.
-- **`Open`** ([wal.go:148](../../internal/wal/wal.go#L148)):
+- **`Open`** ([wal.go:158](../../internal/wal/wal.go#L158)):
   1. lists the segments in seq order;
   2. scans each one, calling `replay` for every record;
   3. truncates a torn tail in the last segment, or removes a segment that crashed while its header was being written;
   4. reopens the last segment for appending;
   5. sets both `appended` and `synced` to the last surviving seq. Whatever survived on disk counts as durable.
-- **`scanSegment` / `scanBytes`** ([wal.go:276, 286](../../internal/wal/wal.go#L276)): check the header (magic, version), then loop over records. They check that each record's seq is exactly the previous one + 1, and that the segment's first record matches its file name. `scanBytes` works on bytes in memory, so the fuzzer can call it millions of times without touching the disk.
-- **`parseRecord`** ([wal.go:365](../../internal/wal/wal.go#L365)) decodes one record or describes what is wrong with it. It also reports where the damage ends, which **`tailIsTorn`** uses: everything after it must be zero for the damage to count as a torn write. The long comment there is the torn-tail rule.
-- **`Append`** ([wal.go:406](../../internal/wal/wal.go#L406)) adds a record to `pending`: a placeholder CRC, then seq, time and payload, then the CRC is computed over the body and written in. It panics on a seq gap.
-- **`Flush`** ([wal.go:437](../../internal/wal/wal.go#L437)) rolls to a new segment if needed, writes all of `pending` with one `Write` under `mu`, and then publishes `appended`.
-- **`roll`** ([wal.go:462](../../internal/wal/wal.go#L462)), under `syncMu`:
+- **`scanSegment` / `scanBytes`** ([wal.go:286, 296](../../internal/wal/wal.go#L286)): check the header (magic, version), then loop over records. They check that each record's seq is exactly the previous one + 1, and that the segment's first record matches its file name. `scanBytes` works on bytes in memory, so the fuzzer can call it millions of times without touching the disk.
+- **`parseRecord`** ([wal.go:375](../../internal/wal/wal.go#L375)) decodes one record or describes what is wrong with it. It also reports where the damage ends, which **`tailIsTorn`** uses: everything after it must be zero for the damage to count as a torn write. The long comment there is the torn-tail rule.
+- **`Append`** ([wal.go:416](../../internal/wal/wal.go#L416)) adds a record to `pending`: a placeholder CRC, then seq, time and payload, then the CRC is computed over the body and written in. It panics on a seq gap.
+- **`Flush`** ([wal.go:447](../../internal/wal/wal.go#L447)) rolls to a new segment if needed, writes all of `pending` with one `Write` under `mu`, and then publishes `appended`.
+- **`roll`** ([wal.go:472](../../internal/wal/wal.go#L472)), under `syncMu`:
   1. fsyncs and closes the old segment, so a finished segment is always fully durable;
   2. creates the new one and writes its header;
   3. fsyncs the directory.
-- **`Sync`** ([wal.go:496](../../internal/wal/wal.go#L496)), under `syncMu`:
+- **`Sync`** ([wal.go:506](../../internal/wal/wal.go#L506)), under `syncMu`:
   1. takes `mu` only to read the file handle and `appended`;
   2. releases `mu` and fsyncs, so appends carry on meanwhile;
   3. on success, publishes `synced` as the value read before the fsync. Records written during the fsync aren't counted.
@@ -166,7 +166,7 @@ The layout is persistent: changing it means a new WAL format version.
 
 *Superseded in milestone 5:* step 1 now loads the newest snapshot first and replays only the WAL after it (`snapshot.Recover`), so the WAL no longer has to start at seq 1. See [05-recovery.md](05-recovery.md#2-code-walkthrough).
 
-**`Close`** ([server.go:344](../../internal/server/server.go#L344)) runs once: gateway, then `cmds`, then wait for the pipeline (which ends with the sequencer's final fsync), then close the WAL. It returns the durability error, if any. **`Failed`** and **`Err`** expose the failure to `cmd/engine`, which shuts down on it.
+**`Close`** ([server.go:346](../../internal/server/server.go#L346)) runs once: gateway, then `cmds`, then wait for the pipeline (which ends with the sequencer's final fsync), then close the WAL. It returns the durability error, if any. **`Failed`** and **`Err`** expose the failure to `cmd/engine`, which shuts down on it.
 
 ### Tests
 

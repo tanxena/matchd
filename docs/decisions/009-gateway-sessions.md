@@ -67,6 +67,8 @@ The publisher **never blocks**. `Deliver` is a non-blocking send into the sessio
 3. logs `slow consumer disconnected`;
 4. calls `SlowConsumer()`, and the session closes with reason `slow consumer: outbound queue full (N events)`.
 
+*(Amended in milestone 9, [decision 022](022-slow-consumers-and-durability-stalls.md): a full queue no longer disconnects at once. A burst released after a durability stall filled healthy clients' queues and disconnected them. Now `OutQueue` is a soft limit: a client is a slow consumer if it stays above it for longer than `WriteTimeout`, reaches a hard limit (`OutQueue` + `publisher.MaxPending`), or has a socket write block past `WriteTimeout`. The publisher still never blocks.)*
+
 Why disconnect instead of dropping events or waiting:
 - **Waiting** would stall the engine for everyone. This was planted as a bug and tested: with a blocking `Deliver`, a healthy client got **zero** responses for 5 s, and even server shutdown hung.
 - **Dropping some events** would leave the client with a silently wrong view of its own orders. Disconnecting is honest: the client knows its stream broke, and must reconnect.
@@ -105,5 +107,5 @@ Milestone 3 needs sequence numbers before milestone 4's WAL exists. `sequencer.S
 
 - **Two goroutines and a 4,096-event queue (about 390 KB; about 460 KB since milestone 6 enlarged `Event` to 112 bytes) per connection.** Fine for hundreds of clients; at tens of thousands, the queue size would need revisiting.
 - **A disconnected client loses events** (above).
-- **Slow-consumer detection is by queue depth, not by time.** A client that reads slowly but steadily is fine until its queue fills during a burst, and then it is disconnected at once.
+- **Slow-consumer detection is by queue depth, not by time.** A client that reads slowly but steadily is fine until its queue fills during a burst, and then it is disconnected at once. *(Superseded by [decision 022](022-slow-consumers-and-durability-stalls.md): detection is now by time, so a burst alone never disconnects.)*
 - **Closing on any protocol error is strict**: one malformed frame ends the session. A buggy client is told immediately, rather than limping on with a desynchronised stream.

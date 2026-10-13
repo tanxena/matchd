@@ -61,6 +61,7 @@ The boundaries are decided once. *(Amended in milestone 9, below: the benchmark 
 | `matchd_matching_latency_seconds` | engine goroutine | per command, dequeue → last event sent: PRD 7.1's matching-core latency. It includes handing the events to the publisher, so an engine blocked by a downstream would show up here (acceptance 5) |
 | `matchd_matching_step_seconds` | engine goroutine | `Step` alone: the matching work. Added beside the PRD's metric because the two differ by the cost of the handoff |
 | `matchd_wal_fsync_seconds` | WAL | every fsync, whoever calls it (sequencer, group syncer, startup) |
+| `matchd_wal_fsync_stalls_total`, `matchd_wal_fsync_in_progress_seconds` | WAL | *(milestone 9, [decision 022](022-slow-consumers-and-durability-stalls.md))* fsyncs slower than `-fsync-stall` (25 ms), and the age of the fsync running now, so a stalled disk is visible rather than inferred |
 | `matchd_wal_written_bytes_total`, `matchd_durable_seq` | WAL, durable seq | read at scrape time |
 | `matchd_snapshot_age_seconds`, `matchd_snapshots_total{result}` | snapshot writer | age at scrape time; **+Inf when no snapshot exists**, so an age alert fires instead of staying silent |
 | `matchd_connections`, `matchd_connections_accepted_total`, `matchd_slow_consumer_disconnects_total`, `matchd_events_held`, `matchd_md_*` | gateway, publisher | read at scrape time from the counters they already kept |

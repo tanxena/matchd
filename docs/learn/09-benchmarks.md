@@ -248,6 +248,8 @@ Thin wrappers over Windows APIs, each loaded with `syscall.NewLazyDLL(...).NewPr
 
 6. **The book is left to find its own size.** Tuned to stay bounded by draining, it held 80–870 orders. Every level is short, cancels find their order in a tiny index, and the numbers flatter the engine compared with a book of thousands. The depth control fixes the size at about 10,000, whatever the mix (planted: disabling it fails `TestMixesHoldTheBookNearTarget`).
 
+7. **The disk stalls for a few seconds under load.** It happened in a smoke run: one fsync in a 5-second window. The durability gate holds every answer, and the load generator keeps sending, so up to 65,536 answers pile up in the publisher. When the disk comes back they're released at once. Under the original slow-consumer rule (a full 4,096-event queue disconnects at once), a client that was reading perfectly well was disconnected, and so would every busy client have been. The fix ([decision 022](../decisions/022-slow-consumers-and-durability-stalls.md)) judges slowness by time: over the soft limit for longer than `WriteTimeout`. `matchd_wal_fsync_stalls_total` now makes the stall itself visible. `TestDurabilityStallBurstDoesNotDisconnect` injects a 50 ms stall under load and requires zero disconnects.
+
 ---
 
 ## 5. Go idioms introduced

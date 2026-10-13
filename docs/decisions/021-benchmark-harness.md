@@ -150,6 +150,17 @@ The count at each window's start and end is recorded.
 
 All tables are Windows 11 on this laptop. Linux is cross-compiled (`make ci`) and runs the suite in CI for correctness only; there are no Linux benchmark numbers, and the README doesn't promise any. `bench/internal/sysinfo` implements its OS calls for Windows only. Elsewhere they return `ErrUnsupported`, so the bench programs still build.
 
+## Environment caveat: Microsoft Defender
+
+This is an environment caveat, not a code change. Defender's real-time protection is on, and **it scans files in the benchmark's data directory when they're created, closed or renamed**, but not appends to an open file. Measured over 10 s each (`MsMpEng.exe` CPU):
+- idle: 0.02 CPUs;
+- appending and fsyncing one open file, as the WAL does: 0.02 CPUs;
+- creating, closing and renaming 256 KB files, as snapshots and segment rolls do: 0.60 CPUs, with 0.14 still in the 10 s after.
+
+That work runs during measured windows: snapshots in the snapshot row, a fresh data directory per run, and its deletion during the cooldown. It counts against "nothing else running", and may slow the disk the WAL fsyncs to. It wasn't established as the cause of the one 5 s fsync stall seen in a smoke run ([decision 022](022-slow-consumers-and-durability-stalls.md)).
+
+`bench/CHECKLIST.md` step 1b excludes the data directory for the duration of the runs. That needs an administrator PowerShell, since exclusions can't even be read without one. Whether an exclusion was set must be stated in the README's environment line: the harness can't read it, so the user says so.
+
 ## Costs and limitations
 
 - **Loopback TCP is not a network.** End-to-end latency includes two kernel network stacks on one machine and the L3 the two processes share. It's an upper bound on what the engine adds, not a network figure.

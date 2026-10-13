@@ -33,6 +33,34 @@ If any run **failed**, stop: its file in `bin\bench-smoke\` has a `failed` field
    `benchrun` checks the plan's *personality* (what kind of plan it is), not its GUID, so the copy's new GUID is fine. The hidden original reads as "high performance" on this machine, and a copy should keep that setting. `benchrun` refuses to start `full` unless the active plan's personality is "high performance". If it refuses with the copy active, tell me rather than using `-force`.
 3. **Power mode.** The probe found Settings > System > Power > *Power mode* set to **"Best power efficiency"** on this machine. Under High performance the slider may be unavailable, but the overlay is still recorded in every result file. Before switching plans, set Power mode to **"Best performance"** so the recorded overlay doesn't contradict the plan.
 
+## 1b. Microsoft Defender and the data directory
+
+**Defender scans the benchmark's data directory.** Measured on this machine (2026-10-13), Defender's own CPU (`MsMpEng.exe`) over 10 s:
+
+| what was written in `%TEMP%\matchd-bench` | Defender CPU |
+|---|---|
+| nothing (idle) | 0.02 CPUs |
+| appending + fsyncing one open file, as the WAL does | 0.02 CPUs: appends aren't scanned |
+| creating, writing, closing and renaming 256 KB files, as snapshots and new segments do | **0.60 CPUs**, and still 0.14 for 10 s afterwards |
+
+So every snapshot, segment roll and per-run data directory costs Defender CPU, on the same machine, during the measured window. That shows up as "other processes" (it can disturb a run), and it may slow the disk the WAL fsyncs to. Whether it caused the one 5-second fsync stall seen in a smoke run isn't established.
+
+Real-time protection is on. The exclusion list can only be read or changed from an **administrator** PowerShell. For the duration of the runs, exclude the data directory:
+
+```powershell
+# administrator PowerShell, before make bench-full
+Add-MpPreference -ExclusionPath "$env:TEMP\matchd-bench"
+Get-MpPreference | Select-Object -ExpandProperty ExclusionPath   # check it's listed
+```
+
+and remove the exclusion afterwards (step 6):
+
+```powershell
+Remove-MpPreference -ExclusionPath "$env:TEMP\matchd-bench"
+```
+
+Only that directory is excluded: the engine's data for the runs, deleted after each run. If you'd rather not exclude anything, run without it. The "other processes" check will then flag any run Defender disturbs, and the README's environment line will say no exclusion was set.
+
 ## 2. Nothing else running
 
 `benchrun` measures this and marks a run disturbed if other processes average over **0.35 logical CPUs** during its 60 s window. Things that tripped it in the smoke runs:
@@ -107,7 +135,7 @@ git add bench/results README.md
 
 `bench-report` regenerates the README's benchmark section from every file in `bench\results` (`bench/report`), and refuses if anything is disturbed (step 4). Commit the results and the README together; I'll write the rest of the README around them.
 
-To restore your usual plan: `powercfg /setactive <guid>` (`powercfg /list` shows them).
+To restore your usual plan: `powercfg /setactive <guid>` (`powercfg /list` shows them). If you added the Defender exclusion in step 1b, remove it now.
 
 ## Reproducing one run by hand
 

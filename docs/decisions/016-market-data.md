@@ -74,7 +74,7 @@ It ignores duplicates, and on `ResendUnavailable` it subscribes again. `engctl b
 ### Delivery reuses everything that exists
 
 - **Durability:** market-data events go through the same gate as everything else (decision 012). `TestMarketDataWaitsForFsync` holds fsync and sees no delta reach a subscriber.
-- **Slow consumers:** fan-out is a non-blocking offer into each subscriber's session queue, exactly like client routing, and a full queue disconnects (decision 009). `TestSlowMarketDataSubscriber` shows it while a trader keeps trading.
+- **Slow consumers:** fan-out is a non-blocking offer into each subscriber's session queue, exactly like client routing, and a full queue disconnects (decision 009; since milestone 9, a queue that stays over its soft limit for longer than `WriteTimeout`, [decision 022](022-slow-consumers-and-durability-stalls.md)). `TestSlowMarketDataSubscriber` shows it while a trader keeps trading.
 - **Order within a session:** snapshot and resend answers keep their place among the session's events. The publisher creates two event kinds the engine never does: `EvResendUnavailable`, and `EvSnapshot`, a **marker** for where a snapshot goes. The snapshot's levels don't travel through the queue at all (next section).
 
 ### Snapshots are streamed outside the event queue (revised after review)
