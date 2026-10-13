@@ -101,6 +101,11 @@ func TestAffinityAndTimes(t *testing.T) {
 	if ct.Total() < 50*time.Millisecond {
 		t.Errorf("spinning child used only %v CPU", ct.Total())
 	}
+	// Use measurable CPU first: Windows accounts process CPU time in ticks
+	// of about 15.6 ms, so a test process that has used less than one
+	// reads 0 (review F-016, which saw it fail 2 runs in 6).
+	for end := time.Now().Add(50 * time.Millisecond); time.Now().Before(end); {
+	}
 	self, err := SelfTimes()
 	if err != nil || self.Total() <= 0 {
 		t.Errorf("self times %v, %v", self, err)
