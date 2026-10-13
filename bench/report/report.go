@@ -480,7 +480,7 @@ func (d *doc) mixTables(main string) {
 	}
 	l := firstLoad(gs)
 	d.p("#### Matching-core latency by order mix\n\n")
-	d.p("PRD 7.1(a). Open loop at %s commands/s (all connections), fsync `group:1ms`, snapshots off. The load generator aims to hold the book at %s resting orders; how many it actually held at the end of each window is in the \"book orders\" column: cancel-heavy settles lower, because its cancels alone nearly balance what it adds. Microseconds.\n\n",
+	d.p("PRD 7.1(a). Open loop at %s commands/s (all connections), fsync `group:1ms`, **snapshots off**: the engine's default takes one every 10 s, and its end-to-end tail is then the snapshot table's \"on\" row (observation 002). The load generator aims to hold the book at %s resting orders; how many it actually held at the end of each window is in the \"book orders\" column: cancel-heavy settles lower, because its cancels alone nearly balance what it adds. Microseconds.\n\n",
 		thousands(float64(l.RatePerSec)), thousands(float64(l.Depth)))
 	d.p("| mix | count per run | p50 | p99 | p99.9 | max | mean | book orders | runs |\n|---|---|---|---|---|---|---|---|---|\n")
 	var all []*result.Run
@@ -501,7 +501,7 @@ func (d *doc) mixTables(main string) {
 	d.coreFootnote(all)
 
 	d.p("#### End-to-end latency by order mix\n\n")
-	d.p("PRD 7.1(b), the same runs: client send to client receipt of the command's first answer (Ack, Reject or CancelAck) over loopback TCP, measured from each command's *scheduled* send time, so the load generator falling behind counts against it. Microseconds. Every answer waits for its WAL fsync (`group:1ms`).\n\n")
+	d.p("PRD 7.1(b), the same runs: client send to client receipt of the command's first answer (Ack, Reject or CancelAck) over loopback TCP, measured from each command's *scheduled* send time, so the load generator falling behind counts against it. Microseconds. Every answer waits for its WAL fsync (`group:1ms`). **Snapshots are off here. With the engine's default (one every 10 s) the tail is far worse: see the snapshot table.**\n\n")
 	d.p("| mix | count per run | p50 | p99 | p99.9 | max | send lag p99 | fsync mean (µs) | engine CPU | loadgen CPU | runs |\n|---|---|---|---|---|---|---|---|---|---|---|\n")
 	for _, g := range gs {
 		d.e2eRow(g, true)
