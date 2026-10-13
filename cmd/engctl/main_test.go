@@ -77,3 +77,40 @@ func TestBookAgainstServer(t *testing.T) {
 		t.Fatalf("book of an unknown instrument: %v", err)
 	}
 }
+
+// Symbols (PRD 5.7's "book <symbol>") resolve through GET /instruments;
+// add-instrument and instruments use the HTTP endpoint directly.
+func TestSymbolsThroughHTTP(t *testing.T) {
+	gw := gateway.DefaultConfig()
+	gw.Addr = "127.0.0.1:0"
+	srv, err := server.Start(server.Config{DataDir: t.TempDir(), Gateway: gw, HTTPAddr: "127.0.0.1:0",
+		Instruments: []book.Instrument{{Symbol: "XYZ", TickSize: 1, LotSize: 1}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	addr, h := srv.Addr(), srv.HTTPAddr()
+
+	if err := cmdAddInstrument([]string{"--http", h, "--symbol", "ABC", "--tick", "5", "--lot", "10"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdAddInstrument([]string{"--http", h, "--symbol", "ABC"}); err == nil || !strings.Contains(err.Error(), "409") {
+		t.Fatalf("duplicate add: %v", err)
+	}
+	if id, err := resolveInstrument("ABC", h); err != nil || id != 2 {
+		t.Fatalf("resolve ABC = %d, %v", id, err)
+	}
+	if _, err := resolveInstrument("NOPE", h); err == nil || !strings.Contains(err.Error(), "no instrument") {
+		t.Fatalf("resolve NOPE: %v", err)
+	}
+	if err := cmdOrder([]string{"--addr", addr, "--http", h, "--client", "7", "--instrument", "ABC",
+		"--side", "sell", "--px", "105", "--qty", "10"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdBook([]string{"ABC", "--addr", addr, "--http", h, "--depth", "3"}); err != nil { // positional, as in PRD 5.7
+		t.Fatal(err)
+	}
+	if err := cmdInstruments([]string{"--http", h}); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -1,11 +1,20 @@
 // Command engine runs the matching engine server.
 //
-//	engine -data ./data -fsync always -listen 127.0.0.1:9000 -instrument XYZ:1:1 -instrument ABC:5:100
+//	engine -data ./data -fsync always -listen 127.0.0.1:9000 -http 127.0.0.1:9100 -instrument XYZ:1:1
 //
 // Each -instrument is SYMBOL:TICK:LOT. On first start they are registered in
 // the order given, so the first gets instrument id 1; on later starts they
-// must match what the write-ahead log already holds. (A JSON config and the
-// HTTP admin endpoint arrive in milestone 7.)
+// must match what the write-ahead log already holds. More can be added while
+// running with POST /instruments (or engctl add-instrument).
+//
+// The HTTP listener (-http, "" to disable) serves /metrics, /healthz and
+// /instruments (decision 018). It has no authentication: keep it on a
+// local address.
+//
+// SIGINT/SIGTERM shut down gracefully (decision 019): stop accepting, drain
+// and fsync, let clients receive their answers for up to -shutdown-timeout,
+// snapshot, exit. A second signal exits at once; nothing acknowledged is
+// lost, the next start just replays more of the WAL.
 //
 // -fsync is always (default), group:<duration> (e.g. group:1ms) or never
 // (tests only: acknowledged work can be lost on power failure).
@@ -72,7 +81,9 @@ func main() {
 	snapEvery := flag.Uint64("snapshot-every", 1_000_000, "snapshot after this many commands (0 = no command trigger)")
 	snapInterval := flag.Duration("snapshot-interval", 10*time.Second, "snapshot at least this often while commands arrive (0 = no time trigger)")
 	segBytes := flag.Int64("wal-segment-bytes", 64<<20, "start a new WAL segment after this many bytes")
-	debug := flag.Bool("debug", false, "debug logging")
+	httpAddr := flag.String("http", "127.0.0.1:9100", `HTTP address for /metrics, /healthz and /instruments ("" = off)`)
+	shutdownTimeout := flag.Duration("shutdown-timeout", 5*time.Second, "on shutdown, how long clients get to receive what is queued for them")
+	debug := flag.Bool("debug", false, "debug logging (one line per command)")
 	flag.Parse()
 	policy, err := sequencer.ParsePolicy(*fsync)
 	if err != nil {
@@ -95,7 +106,8 @@ func main() {
 	srv, err := server.Start(server.Config{
 		DataDir: *dataDir, Fsync: policy, Gateway: gw, Instruments: instruments, Log: log,
 		SnapshotEvery: *snapEvery, SnapshotInterval: *snapInterval,
-		WAL: wal.Options{SegmentSize: *segBytes},
+		WAL:      wal.Options{SegmentSize: *segBytes},
+		HTTPAddr: *httpAddr, ShutdownTimeout: *shutdownTimeout,
 	})
 	if err != nil {
 		log.Error("start failed", "err", err)
@@ -103,14 +115,19 @@ func main() {
 	}
 
 	// Run until Ctrl-C (SIGINT), SIGTERM, or a durability failure.
-	sig := make(chan os.Signal, 1) // signal.Notify needs a buffered channel
+	sig := make(chan os.Signal, 2) // signal.Notify needs a buffered channel
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	select {
 	case s := <-sig:
-		log.Info("shutting down", "signal", s.String())
+		log.Info("shutting down", "signal", s.String(), "timeout", *shutdownTimeout)
 	case <-srv.Failed():
 		log.Error("durability failure; shutting down without acknowledging further work", "err", srv.Err())
 	}
+	go func() {
+		s := <-sig
+		log.Warn("second signal: exiting now; the next start replays the WAL", "signal", s.String())
+		os.Exit(1)
+	}()
 	if err := srv.Close(); err != nil {
 		log.Error("shutdown", "err", err)
 		os.Exit(1)

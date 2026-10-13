@@ -169,10 +169,11 @@ var listenRe = regexp.MustCompile(`msg="gateway listening" addr=(\S+)`)
 // connections, with its address and a buffer collecting its log.
 func startEngine(t *testing.T, dir, policy string, segBytes int) (*exec.Cmd, string, *strings.Builder) {
 	t.Helper()
-	cmd := exec.Command(engineBin, "-data", dir, "-listen", "127.0.0.1:0", "-fsync", policy,
+	cmd := exec.Command(engineBin, "-data", dir, "-listen", "127.0.0.1:0", "-http", "", "-fsync", policy,
 		"-snapshot-every", "200", "-snapshot-interval", "20ms", "-idle-timeout", "0",
 		"-wal-segment-bytes", fmt.Sprint(segBytes),
 		"-instrument", "XYZ:1:1", "-instrument", "ABC:1:1")
+	prepareInterrupt(cmd)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		t.Fatal(err)

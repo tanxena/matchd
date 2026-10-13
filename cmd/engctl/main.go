@@ -4,21 +4,29 @@
 //	engctl cancel  --client 7 --id 12
 //	engctl connect --client 7      (interactive; type "help")
 //
-//	engctl book      --instrument 1 [--depth 10]
-//	engctl subscribe --instrument 1
+//	engctl book XYZ  [--depth 10]
+//	engctl subscribe XYZ
+//	engctl instruments
+//	engctl add-instrument --symbol XYZ --tick 1 --lot 1
 //	engctl replay-check --data ./data   (engine stopped)
 //
-// Every command except replay-check takes --addr (default 127.0.0.1:9000).
-// Instruments are named by numeric id; PRD 5.7's symbol form arrives with
-// milestone 7's instrument endpoint (decision 016).
+// Order, cancel, connect, book and subscribe take --addr (the TCP gateway,
+// default 127.0.0.1:9000). An instrument is given by symbol or numeric id
+// (--instrument, or the argument to book and subscribe); symbols are looked
+// up through the HTTP endpoint at --http (default 127.0.0.1:9100), which
+// instruments and add-instrument also use (decision 018).
 package main
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -26,6 +34,7 @@ import (
 
 	"github.com/tanxena/matchd/internal/client"
 	"github.com/tanxena/matchd/internal/proto"
+	"github.com/tanxena/matchd/internal/publisher"
 	"github.com/tanxena/matchd/internal/snapshot"
 )
 
@@ -47,6 +56,10 @@ func main() {
 		err = cmdBook(os.Args[2:])
 	case "subscribe":
 		err = cmdSubscribe(os.Args[2:])
+	case "instruments":
+		err = cmdInstruments(os.Args[2:])
+	case "add-instrument":
+		err = cmdAddInstrument(os.Args[2:])
 	default:
 		usage()
 	}
@@ -61,25 +74,91 @@ func usage() {
   engctl order   [--addr A] --client N [--instrument I] --side buy|sell --type limit|market [--px P] --qty Q [--tif gtc|day] [--clordid C]
   engctl cancel  [--addr A] --client N [--instrument I] --id ORDER_ID
   engctl connect [--addr A] --client N [--instrument I]
-  engctl book      [--addr A] [--instrument I] [--depth N]
-  engctl subscribe [--addr A] [--instrument I]
-  engctl replay-check --data DIR`)
+  engctl book      SYMBOL|ID [--addr A] [--http H] [--depth N]
+  engctl subscribe SYMBOL|ID [--addr A] [--http H]
+  engctl instruments [--http H]
+  engctl add-instrument [--http H] --symbol S --tick T --lot L
+  engctl replay-check --data DIR
+
+An instrument (I) is a symbol or a numeric id; symbols are resolved via --http.`)
 	os.Exit(2)
 }
 
 // common holds the flags every subcommand shares.
 type common struct {
 	addr       string
+	httpAddr   string
 	clientID   uint
-	instrument uint
+	instrument string
 	wait       time.Duration
 }
 
 func (c *common) register(fs *flag.FlagSet) {
 	fs.StringVar(&c.addr, "addr", "127.0.0.1:9000", "engine address")
+	fs.StringVar(&c.httpAddr, "http", defaultHTTP, "engine HTTP address, for looking up symbols")
 	fs.UintVar(&c.clientID, "client", 0, "client id to log in as (required, nonzero)")
-	fs.UintVar(&c.instrument, "instrument", 1, "instrument id")
+	fs.StringVar(&c.instrument, "instrument", "1", "instrument symbol or id")
 	fs.DurationVar(&c.wait, "wait", 300*time.Millisecond, "after sending, print messages until none arrives for this long")
+}
+
+const defaultHTTP = "127.0.0.1:9100"
+
+// inst resolves --instrument to an id.
+func (c *common) inst() (uint32, error) { return resolveInstrument(c.instrument, c.httpAddr) }
+
+// resolveInstrument turns an instrument argument into an id: a number is an
+// id; anything else is a symbol, looked up with GET /instruments.
+func resolveInstrument(arg, httpAddr string) (uint32, error) {
+	if id, err := strconv.ParseUint(arg, 10, 32); err == nil {
+		return uint32(id), nil
+	}
+	list, err := fetchInstruments(httpAddr)
+	if err != nil {
+		return 0, fmt.Errorf("looking up %q: %w", arg, err)
+	}
+	for _, in := range list {
+		if in.Symbol == arg {
+			return uint32(in.ID), nil
+		}
+	}
+	return 0, fmt.Errorf("no instrument %q (engctl instruments lists them)", arg)
+}
+
+var httpClient = &http.Client{Timeout: 10 * time.Second}
+
+func fetchInstruments(httpAddr string) ([]publisher.InstrumentInfo, error) {
+	resp, err := httpClient.Get("http://" + httpAddr + "/instruments")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, httpError(resp)
+	}
+	var list []publisher.InstrumentInfo
+	return list, json.NewDecoder(resp.Body).Decode(&list)
+}
+
+// httpError turns a non-2xx response into an error with the server's
+// message.
+func httpError(resp *http.Response) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+	var e struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(body, &e) == nil && e.Error != "" {
+		return fmt.Errorf("%s: %s", resp.Status, e.Error)
+	}
+	return fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(body)))
+}
+
+// splitTarget takes a leading non-flag argument (book XYZ --depth 5) off
+// args, so both the PRD's positional form and --instrument work.
+func splitTarget(args []string) (target string, rest []string) {
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		return args[0], args[1:]
+	}
+	return "", args
 }
 
 func (c *common) dial() (*client.Conn, error) {
@@ -111,7 +190,7 @@ func cmdOrder(args []string) error {
 	clOrd := fs.Uint64("clordid", 0, "client order id (default: derived from the current time)")
 	_ = fs.Parse(args)
 
-	m := proto.NewOrder{Instrument: uint32(c.instrument), Price: *px, Qty: *qty, ClOrdID: *clOrd}
+	m := proto.NewOrder{Price: *px, Qty: *qty, ClOrdID: *clOrd}
 	var err error
 	if m.Side, err = parseSide(*side); err != nil {
 		return err
@@ -137,6 +216,9 @@ func cmdOrder(args []string) error {
 		// in the same nanosecond. Convenience only; a real client keeps a
 		// counter.
 		m.ClOrdID = uint64(time.Now().UnixNano())
+	}
+	if m.Instrument, err = c.inst(); err != nil {
+		return err
 	}
 
 	conn, err := c.dial()
@@ -164,7 +246,11 @@ func cmdCancel(args []string) error {
 		return err
 	}
 	defer func() { _ = conn.Close() }()
-	if err := conn.Cancel(proto.Cancel{Instrument: uint32(c.instrument), OrderID: *id}); err != nil {
+	inst, err := c.inst()
+	if err != nil {
+		return err
+	}
+	if err := conn.Cancel(proto.Cancel{Instrument: inst, OrderID: *id}); err != nil {
 		return err
 	}
 	return printUntilQuiet(conn, c.wait)
@@ -195,12 +281,16 @@ func cmdConnect(args []string) error {
 	var c common
 	c.register(fs)
 	_ = fs.Parse(args)
+	inst, err := c.inst()
+	if err != nil {
+		return err
+	}
 	conn, err := c.dial()
 	if err != nil {
 		return err
 	}
 	defer func() { _ = conn.Close() }()
-	fmt.Printf("connected to %s as client %d, instrument %d. Type \"help\".\n", c.addr, c.clientID, c.instrument)
+	fmt.Printf("connected to %s as client %d, instrument %d. Type \"help\".\n", c.addr, c.clientID, inst)
 
 	// Printer goroutine: the only reader of conn. Ends when conn closes.
 	readErr := make(chan error, 1)    // carries the reason the printer stopped
@@ -233,7 +323,6 @@ func cmdConnect(args []string) error {
 		}
 	}
 
-	inst := uint32(c.instrument)
 	var clOrd uint64
 	in := bufio.NewScanner(os.Stdin)
 	for in.Scan() {
@@ -315,18 +404,28 @@ func cmdReplayCheck(args []string) error {
 	return nil
 }
 
-// marketData connects without logging in and subscribes to an instrument.
+// marketData connects without logging in and subscribes to an instrument,
+// given as "book XYZ" or "book --instrument XYZ" (a symbol or an id).
 func marketData(args []string, name string) (*client.Conn, *client.Feed, int, error) {
+	target, args := splitTarget(args)
 	fs := flag.NewFlagSet(name, flag.ExitOnError)
 	addr := fs.String("addr", "127.0.0.1:9000", "engine address")
-	inst := fs.Uint("instrument", 1, "instrument id")
+	httpAddr := fs.String("http", defaultHTTP, "engine HTTP address, for looking up symbols")
+	instArg := fs.String("instrument", "1", "instrument symbol or id (or give it as the first argument)")
 	depth := fs.Int("depth", 10, "levels per side to print")
 	_ = fs.Parse(args)
+	if target == "" {
+		target = *instArg
+	}
+	inst, err := resolveInstrument(target, *httpAddr)
+	if err != nil {
+		return nil, nil, 0, err
+	}
 	conn, err := client.Dial(*addr, 0, 5*time.Second) // market data needs no login
 	if err != nil {
 		return nil, nil, 0, err
 	}
-	feed, err := client.NewFeed(conn, uint32(*inst))
+	feed, err := client.NewFeed(conn, inst)
 	if err != nil {
 		_ = conn.Close()
 		return nil, nil, 0, err
@@ -393,4 +492,49 @@ func cmdSubscribe(args []string) error {
 			printed = true
 		}
 	}
+}
+
+// cmdInstruments lists the instruments (GET /instruments).
+func cmdInstruments(args []string) error {
+	fs := flag.NewFlagSet("instruments", flag.ExitOnError)
+	httpAddr := fs.String("http", defaultHTTP, "engine HTTP address")
+	_ = fs.Parse(args)
+	list, err := fetchInstruments(*httpAddr)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%4s  %-12s %8s %8s %10s %8s\n", "id", "symbol", "tick", "lot", "md_seq", "orders")
+	for _, in := range list {
+		fmt.Printf("%4d  %-12s %8d %8d %10d %8d\n", in.ID, in.Symbol, in.TickSize, in.LotSize, in.MDSeq, in.Orders)
+	}
+	return nil
+}
+
+// cmdAddInstrument registers an instrument (POST /instruments). The engine
+// logs it like any command, so it survives restarts with the same id.
+func cmdAddInstrument(args []string) error {
+	fs := flag.NewFlagSet("add-instrument", flag.ExitOnError)
+	httpAddr := fs.String("http", defaultHTTP, "engine HTTP address")
+	symbol := fs.String("symbol", "", "symbol (required)")
+	tick := fs.Int64("tick", 1, "tick size")
+	lot := fs.Int64("lot", 1, "lot size")
+	_ = fs.Parse(args)
+	if *symbol == "" {
+		return errors.New("--symbol is required")
+	}
+	body, _ := json.Marshal(map[string]any{"symbol": *symbol, "tick_size": *tick, "lot_size": *lot})
+	resp, err := httpClient.Post("http://"+*httpAddr+"/instruments", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusCreated {
+		return httpError(resp)
+	}
+	var in publisher.InstrumentInfo
+	if err := json.NewDecoder(resp.Body).Decode(&in); err != nil {
+		return err
+	}
+	fmt.Printf("added %s as instrument %d (tick %d, lot %d)\n", in.Symbol, in.ID, in.TickSize, in.LotSize)
+	return nil
 }
