@@ -1,6 +1,6 @@
 # 010 — Windows-specific gotchas
 
-- **Status:** living record. Started in milestone 3; extended in milestones 4 (fsync) and 5 (rename, process kill); milestone 7 (Linux pass) adds to it.
+- **Status:** living record. Started in milestone 3; extended in milestones 4 (fsync) and 5 (rename, process kill); and 7 (timer resolution, make, signalling a child, the TCP reset; the Linux pass is still pending, below).
 - **Why:** PRD 6.1: developed on Windows 11, must also build and pass on Linux; "record Windows-specific gotchas in a decision record".
 
 Each entry gives what happens, how we found out, and what the code does about it.
@@ -43,7 +43,7 @@ There is no portable way to send Ctrl-C (SIGINT) to another console process from
 
 The manual runs in this milestone stopped the engine with `taskkill //F //IM engine.exe`, which is a hard kill with no graceful shutdown. `cmd/engine` does handle `os.Interrupt` (Ctrl-C in its own console) and `SIGTERM`.
 
-The milestone 5 crash harness needs a hard kill anyway (`TerminateProcess` on Windows, `SIGKILL` on Linux). Graceful shutdown (milestone 7) will be tested in-process through `server.Close` rather than by signalling a child process.
+The milestone 5 crash harness needs a hard kill anyway (`TerminateProcess` on Windows, `SIGKILL` on Linux). Graceful shutdown (milestone 7) is tested in-process through `server.Close`, and also by signalling the real binary. That turned out to be possible after all: start the child with `CREATE_NEW_PROCESS_GROUP`, then send it Ctrl-Break with `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)`, which Go delivers as `os.Interrupt` (`TestSignalShutsDownGracefully`; on Linux it sends SIGTERM). It needs a console shared with the test process, and skips if there isn't one.
 
 ## 6. Loopback socket buffers (milestone 3)
 
@@ -85,6 +85,18 @@ The fallback itself **introduced a bug**: the writer also used `ReadManifest`, s
 
 After a `TerminateProcess` kill, Windows closes the dead process's file handles. Restarting on the same directory immediately was never blocked by a lingering handle in 150 kill-and-restart runs. That is consistent with handles being released at process exit, though not a guarantee about antivirus or indexer software holding files open.
 
+## 12. `time.Now` resolution (milestone 7)
+
+Go's `time.Now` on Windows advances once per system timer tick: about **515 µs** on this machine (999,980 of a million back-to-back readings were identical). Fine for timeouts; useless for timing a ~1 µs matching step. `internal/clock` reads the invariant TSC, calibrated against QueryPerformanceCounter, instead ([decision 017](017-metrics-and-clock.md)). QPC itself costs 80–180 ns per call from Go because of the syscall boundary.
+
+## 13. MSYS2 `make` from Git Bash (milestone 7)
+
+MSYS2's `make.exe`, run from Git Bash, starts its recipes with an **empty environment**: no `TMP`, so `go` fails with "creating work dir: mkdir C:\WINDOWS\go-build…: Access is denied". Git Bash's MSYS runtime and MSYS2's are different builds, and the environment doesn't survive the handoff. Run `make` from PowerShell, cmd or an MSYS2 shell, where it works; the Makefile's header says so.
+
+## 14. Closing a socket with unread input sends a reset (milestone 7; both systems)
+
+Not Windows-specific, but found on Windows: closing a TCP socket while received data is still unread sends RST (RFC 1122 §4.2.2.13), and the peer then discards data it had received but not read. During graceful shutdown that destroyed clients' acks (3 runs in 8 at first). The fix is a lingering close ([decision 019](019-graceful-shutdown.md)).
+
 ## Pending (later milestones)
 
-- **Linux pass (milestone 7):** run the crash test and the fsync benchmark on Linux, and record the differences.
+- **Linux pass:** milestone 7 cross-compiles everything for Linux (`make ci`) but has **not run** the suite on Linux locally (no Linux machine; the only WSL distribution here is Docker's, which the PRD rules out). `.github/workflows/ci.yml` runs the race suite and the short crash test on `ubuntu-latest` once the repository is pushed. Still to record from that run: the loopback buffer behaviour (§6), and fsync timings for the benchmark.

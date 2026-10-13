@@ -19,6 +19,7 @@ Milestone 3 will encode events onto the wire, milestone 4 will hold them until t
 - `EvAck`, `EvReject`, `EvFill`, `EvCancelled`, `EvBookDelta`, `EvInstrumentAdded`.
 - Unused fields are zero.
 - Every event carries the `Seq` and `Time` of its command.
+- *(Since milestone 7)* every event carries `Cmd`, its command's kind, so a rejected cancel can be told from a rejected order (metrics, admin), and every `BookDelta` carries `Orders`, the instrument's resting order count after the command (for `GET /instruments`, never sent on the wire). Both sit in what was padding: `Event` stays 112 bytes. `InstrumentAdded` echoes the command's `ClOrdID` ([decision 018](018-http-admin-and-instruments.md)).
 
 The alternative was a Go interface with one concrete type per event (`type Ack struct{...}`, `type Fill struct{...}`). It was rejected because:
 

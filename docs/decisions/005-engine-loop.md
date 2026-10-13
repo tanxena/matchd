@@ -69,7 +69,7 @@ Every fill pair gets `lastMatchID + 1`, shared by the taker's event and the make
 
 ### Instruments are created by commands
 
-`AddInstrument` goes through the same command stream as orders. It is sequenced, logged and replayed, so instruments get the same ids on replay. The HTTP admin endpoint (milestone 7) will turn `POST /instruments` into a command, never call the registry directly.
+`AddInstrument` goes through the same command stream as orders. It is sequenced, logged and replayed, so instruments get the same ids on replay. The HTTP admin endpoint (milestone 7) turns `POST /instruments` into a command under a reserved client id, never calling the registry directly ([decision 018](018-http-admin-and-instruments.md)). Since milestone 7, `Run` also records each command's latency, read from `internal/clock`; the engine never calls `time.Now` ([decision 017](017-metrics-and-clock.md)).
 
 Ids start at 1, in registration order. Id 0 means "none", as with slab slots. Duplicate symbols and invalid tick or lot sizes are rejected.
 

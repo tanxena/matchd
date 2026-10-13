@@ -13,7 +13,7 @@ PRD 6 asks for "Go 1.22+, use what's installed". The code currently needs nothin
 - `for i := range n` over an integer;
 - the `slices` package and the `min`/`max` builtins (both 1.21).
 
-If the Linux pass (milestone 7) has to run on an older toolchain, `go.mod` can be lowered to `go 1.22` with no code changes. We keep the installed version until something forces that.
+*(Milestone 7: the Linux pass cross-compiles every binary and test binary with this toolchain in `make ci`; running the suite on Linux is left to the CI workflow, decision 010.)* If the Linux pass has to run on an older toolchain, `go.mod` can be lowered to `go 1.22` with no code changes. We keep the installed version until something forces that.
 
 ## Dependencies
 
@@ -49,6 +49,6 @@ CGO_ENABLED=1 go test -race ./...
 The choice was between this and running `-race` only in the Linux pass. We chose to run it locally because race bugs should be caught where the code is written, not one milestone later.
 
 **Costs.**
-- `CGO_ENABLED=1` is set per command, not globally with `go env -w`, so other projects on the machine are unaffected. The milestone 7 Makefile will set it in its `test` target.
+- `CGO_ENABLED=1` is set per command, not globally with `go env -w`, so other projects on the machine are unaffected. The Makefile (milestone 7) exports it for every target.
 - Race-enabled runs are slower: the book package's suite takes about 13–16 s under `-race`, against about 2.5 s without it.
 - The race detector needs cgo, but the shipped binaries don't. `go build` with the default `CGO_ENABLED=0` still produces a pure-Go binary.

@@ -92,9 +92,9 @@ The writer can't read the publisher's own level maps in place: the publisher gor
 - **A client that can't consume the snapshot is still disconnected.** If it stops reading, a socket write blocks past `WriteTimeout` and the session closes. If the market moves faster than it reads while the snapshot streams, the queue (which holds the events after the snapshot) fills, and it is a slow consumer as before.
 - **A client that can consume it isn't, however deep the book.** A 4,000-level book goes through a 64-event queue (`TestDeepSnapshotBeyondQueue`).
 
-### engctl names instruments by id (a deviation, chosen with the user)
+### engctl names instruments by id (a deviation, chosen with the user; closed in milestone 7)
 
-PRD 5.7 writes `engctl book <symbol>`, but the wire protocol identifies instruments by numeric id and has no symbol lookup. Milestone 6 uses `--instrument N`; milestone 7's instrument endpoint will let `engctl` resolve symbols.
+PRD 5.7 writes `engctl book <symbol>`, but the wire protocol identifies instruments by numeric id and has no symbol lookup. Milestone 6 uses `--instrument N`; milestone 7's instrument endpoint will let `engctl` resolve symbols. *(Done: `engctl book XYZ` resolves the symbol through `GET /instruments`, [decision 018](018-http-admin-and-instruments.md).)*
 
 ## Costs
 

@@ -115,15 +115,15 @@ The general lesson: **a test of "nothing happened" needs its own test showing it
 
 ### `internal/engine/engine.go`: the engine
 
-- **`Engine`** ([engine.go:15](../../internal/engine/engine.go#L15)) holds:
+- **`Engine`** ([engine.go:17](../../internal/engine/engine.go#L17)) holds:
   - `books []*book.Book`, indexed by `InstrumentID`, with slot 0 unused;
   - `symbols map[string]InstrumentID`, which is only touched by `AddInstrument`, so its rare allocations don't matter;
   - the three counters `lastSeq`, `lastOrderID`, `lastMatchID`;
   - `fills`, a scratch buffer reused across commands.
 
   The doc comment states the ownership rule: one goroutine, no locks.
-- **`Step`** ([engine.go:43](../../internal/engine/engine.go#L43)) checks `c.Seq == lastSeq+1` (panicking otherwise), records it, and dispatches on `Kind`. It panics on an unknown kind.
-- **`Run`** ([engine.go:78](../../internal/engine/engine.go#L78)) is the goroutine body:
+- **`Step`** ([engine.go:61](../../internal/engine/engine.go#L61)) checks `c.Seq == lastSeq+1` (panicking otherwise), records it, and dispatches on `Kind`. It panics on an unknown kind.
+- **`Run`** ([engine.go:102](../../internal/engine/engine.go#L102)) is the goroutine body:
 
   ```
   defer close(out)
@@ -132,18 +132,18 @@ The general lesson: **a test of "nothing happened" needs its own test showing it
       send every event in buf on out
   ```
 
-  When `in` is closed, the loop ends, the deferred `close(out)` runs, and the consumer's `range` loop ends. That is how shutdown propagates (draining is PRD 6's graceful shutdown, milestone 7).
+  When `in` is closed, the loop ends, the deferred `close(out)` runs, and the consumer's `range` loop ends. That is how shutdown propagates (draining is PRD 6's graceful shutdown, built in milestone 7: [decision 019](../decisions/019-graceful-shutdown.md)). Since milestone 7, `Run` also times each command with `internal/clock`, never `time.Now` ([07-operations.md](07-operations.md#13-timing-sub-microsecond-work-on-windows)).
 
   *Since milestone 5,* `Run` also takes snapshot hooks and selects on two more channels (a snapshot-trigger tick, and snapshots coming back to be thawed). It freezes the engine between commands when a trigger fires ([05-recovery.md](05-recovery.md#2-code-walkthrough)).
-- **`newOrder`** ([engine.go:172](../../internal/engine/engine.go#L172)):
+- **`newOrder`** ([engine.go:203](../../internal/engine/engine.go#L203)):
   1. Look up the book. If it doesn't exist, reject with `UnknownInstrument`.
   2. Build a `book.Order` with id `lastOrderID+1` and call `Submit` with the scratch fills buffer.
   3. If the book rejects it, emit a `Reject`. The id was never committed.
   4. Otherwise commit `lastOrderID`, then emit the `Ack`.
   5. For each fill: bump `lastMatchID`, reduce the taker's `leaves`, and emit the taker event then the maker event. Fills arrive grouped by price, best first, so after the **last fill at a price** (the next fill has a different price, or there isn't one), emit `BookDelta` with `bk.LevelQty(opp, price)`, the level's final size, because matching has already finished.
   6. Emit `Cancelled(expired)` for a market order's remainder, and a `BookDelta` for the taker's own level if a limit remainder rested.
-- **`cancel`** ([engine.go:244](../../internal/engine/engine.go#L244)) calls `book.Cancel` and emits `Cancelled(requested)`, echoing the client order id, side and price returned in `CancelResult`, then the level's delta. Or it emits a `Reject`.
-- **`addInstrument`** ([engine.go:267](../../internal/engine/engine.go#L267)) validates the spec, rejects duplicate symbols, creates the book, and appends it, so its id is `len(books)`.
+- **`cancel`** ([engine.go:275](../../internal/engine/engine.go#L275)) calls `book.Cancel` and emits `Cancelled(requested)`, echoing the client order id, side and price returned in `CancelResult`, then the level's delta. Or it emits a `Reject`.
+- **`addInstrument`** ([engine.go:298](../../internal/engine/engine.go#L298)) validates the spec, rejects duplicate symbols, creates the book, and appends it, so its id is `len(books)`.
 - **Accessors:** `LastSeq`, `LastOrderID`, `Lookup`, `Book`, `NumInstruments`. They are for tests now, and for snapshots in milestone 5.
 
 ### `internal/book/index.go`: the hash index (new)
@@ -187,7 +187,7 @@ The general lesson: **a test of "nothing happened" needs its own test showing it
 - **`internal/engine/stream_test.go`**: randomized properties.
   - `streamGen` produces commands for two instruments. The mix is limits, markets, cancels (including the wrong owner and the wrong instrument), invalid orders and unknown instruments.
   - **`views.apply`** ([stream_test.go:101](../../internal/engine/stream_test.go#L101)) folds each command's events into two pictures built **only from events**: a market-data view, from deltas, and a client view of every order's open quantity, from acks, fills and cancels. Along the way it checks the per-command rules: Ack first, gap-free order ids, fills in taker/maker pairs with consecutive match ids, `Leaves` consistent with the running quantity, and a `Reject` alone.
-  - **`views.check`** ([stream_test.go:190](../../internal/engine/stream_test.go#L190)) compares both views with the real books after every command, level by level and order by order, including counts, so a level that is never removed or an order that leaves without an event is caught.
+  - **`views.check`** ([stream_test.go:212](../../internal/engine/stream_test.go#L212)) compares both views with the real books after every command, level by level and order by order, including counts, so a level that is never removed or an order that leaves without an event is caught.
   - `TestEventStreamRebuildsState` runs 8 seeds × 5,000 commands and requires every event kind to occur at least 1% as often as commands.
   - `TestDeterministic` runs a seed twice and requires identical event logs.
   - `TestRunMatchesStep` sends the same commands through `Run` on its own goroutine and requires an identical event stream.

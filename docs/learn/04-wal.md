@@ -80,28 +80,28 @@ A process crash loses nothing under *any* policy, because the OS keeps the page 
 
 ### `internal/wal/wal.go`: the log
 
-- **Constants** ([wal.go:37](../../internal/wal/wal.go#L37)): the segment magic `MTCHWAL`, the format version, the 8-byte segment header, the 8-byte record header (length + CRC), and `MaxPayload` = 4 KB. **`castagnoli`** is the CRC table. **`ErrCorrupt`** marks anything recovery must not paper over.
-- **`File`** ([wal.go:59](../../internal/wal/wal.go#L59)): `Write`, `Sync`, `Close`. `*os.File` satisfies it; tests substitute wrappers that count, block or fail `Sync`.
-- **`Log`** ([wal.go:107](../../internal/wal/wal.go#L107)):
+- **Constants** ([wal.go:39](../../internal/wal/wal.go#L39)): the segment magic `MTCHWAL`, the format version, the 8-byte segment header, the 8-byte record header (length + CRC), and `MaxPayload` = 4 KB. **`castagnoli`** is the CRC table. **`ErrCorrupt`** marks anything recovery must not paper over.
+- **`File`** ([wal.go:61](../../internal/wal/wal.go#L61)): `Write`, `Sync`, `Close`. `*os.File` satisfies it; tests substitute wrappers that count, block or fail `Sync`.
+- **`Log`** ([wal.go:111](../../internal/wal/wal.go#L111)):
   - `mu` guards the current file handle and size;
   - `syncMu` serialises `Sync` with segment rolls;
   - the atomics `appended` (written to the OS) and `synced` (fsynced);
   - `pending`, the batch being built, touched only by the appender.
-- **`Open`** ([wal.go:143](../../internal/wal/wal.go#L143)):
+- **`Open`** ([wal.go:148](../../internal/wal/wal.go#L148)):
   1. lists the segments in seq order;
   2. scans each one, calling `replay` for every record;
   3. truncates a torn tail in the last segment, or removes a segment that crashed while its header was being written;
   4. reopens the last segment for appending;
   5. sets both `appended` and `synced` to the last surviving seq. Whatever survived on disk counts as durable.
-- **`scanSegment` / `scanBytes`** ([wal.go:271, 281](../../internal/wal/wal.go#L281)): check the header (magic, version), then loop over records. They check that each record's seq is exactly the previous one + 1, and that the segment's first record matches its file name. `scanBytes` works on bytes in memory, so the fuzzer can call it millions of times without touching the disk.
-- **`parseRecord`** ([wal.go:360](../../internal/wal/wal.go#L360)) decodes one record or describes what is wrong with it. It also reports where the damage ends, which **`tailIsTorn`** uses: everything after it must be zero for the damage to count as a torn write. The long comment there is the torn-tail rule.
-- **`Append`** ([wal.go:401](../../internal/wal/wal.go#L401)) adds a record to `pending`: a placeholder CRC, then seq, time and payload, then the CRC is computed over the body and written in. It panics on a seq gap.
-- **`Flush`** ([wal.go:432](../../internal/wal/wal.go#L432)) rolls to a new segment if needed, writes all of `pending` with one `Write` under `mu`, and then publishes `appended`.
-- **`roll`** ([wal.go:456](../../internal/wal/wal.go#L456)), under `syncMu`:
+- **`scanSegment` / `scanBytes`** ([wal.go:276, 286](../../internal/wal/wal.go#L276)): check the header (magic, version), then loop over records. They check that each record's seq is exactly the previous one + 1, and that the segment's first record matches its file name. `scanBytes` works on bytes in memory, so the fuzzer can call it millions of times without touching the disk.
+- **`parseRecord`** ([wal.go:365](../../internal/wal/wal.go#L365)) decodes one record or describes what is wrong with it. It also reports where the damage ends, which **`tailIsTorn`** uses: everything after it must be zero for the damage to count as a torn write. The long comment there is the torn-tail rule.
+- **`Append`** ([wal.go:406](../../internal/wal/wal.go#L406)) adds a record to `pending`: a placeholder CRC, then seq, time and payload, then the CRC is computed over the body and written in. It panics on a seq gap.
+- **`Flush`** ([wal.go:437](../../internal/wal/wal.go#L437)) rolls to a new segment if needed, writes all of `pending` with one `Write` under `mu`, and then publishes `appended`.
+- **`roll`** ([wal.go:462](../../internal/wal/wal.go#L462)), under `syncMu`:
   1. fsyncs and closes the old segment, so a finished segment is always fully durable;
   2. creates the new one and writes its header;
   3. fsyncs the directory.
-- **`Sync`** ([wal.go:490](../../internal/wal/wal.go#L490)), under `syncMu`:
+- **`Sync`** ([wal.go:496](../../internal/wal/wal.go#L496)), under `syncMu`:
   1. takes `mu` only to read the file handle and `appended`;
   2. releases `mu` and fsyncs, so appends carry on meanwhile;
   3. on success, publishes `synced` as the value read before the fsync. Records written during the fsync aren't counted.
@@ -125,10 +125,10 @@ The layout is persistent: changing it means a new WAL format version.
 
 ### `internal/sequencer/sequencer.go`: policies
 
-- **`Policy`** ([sequencer.go:44](../../internal/sequencer/sequencer.go#L44)) holds the mode, the window and the batch size. **`ParsePolicy`** reads `always`, `never`, `group` or `group:<duration>`.
-- **`New`** ([sequencer.go:110](../../internal/sequencer/sequencer.go#L110)) continues from the log's last seq.
-- **`LogNow`** ([sequencer.go:135](../../internal/sequencer/sequencer.go#L135)) stamps a command, writes it, fsyncs and advances durability, whatever the policy. Startup uses it for instruments.
-- **`Run`** ([sequencer.go:154](../../internal/sequencer/sequencer.go#L154)) loops:
+- **`Policy`** ([sequencer.go:47](../../internal/sequencer/sequencer.go#L47)) holds the mode, the window and the batch size. **`ParsePolicy`** reads `always`, `never`, `group` or `group:<duration>`.
+- **`New`** ([sequencer.go:113](../../internal/sequencer/sequencer.go#L113)) continues from the log's last seq.
+- **`LogNow`** ([sequencer.go:138](../../internal/sequencer/sequencer.go#L138)) stamps a command, writes it, fsyncs and advances durability, whatever the policy. Startup uses it for instruments.
+- **`Run`** ([sequencer.go:157](../../internal/sequencer/sequencer.go#L157)) loops:
   1. take one command (or notice durability has already failed);
   2. drain up to `MaxBatch` more without blocking;
   3. stamp and encode each, `Flush` once;
@@ -139,7 +139,7 @@ The layout is persistent: changing it means a new WAL format version.
   5. forward the batch to the engine.
 
   When its input closes, **`finish`** stops the syncer and does a final fsync.
-- **`groupSyncer`** ([sequencer.go:257](../../internal/sequencer/sequencer.go#L257)) runs a loop ([sequencer.go:308](../../internal/sequencer/sequencer.go#L308)):
+- **`groupSyncer`** ([sequencer.go:260](../../internal/sequencer/sequencer.go#L260)) runs a loop ([sequencer.go:311](../../internal/sequencer/sequencer.go#L311)):
   1. wait for "dirty" or a kick;
   2. wait out the window, using one reused timer, unless kicked or stopped;
   3. `Sync`, then `Advance` (or `Fail`).
@@ -147,18 +147,18 @@ The layout is persistent: changing it means a new WAL format version.
 ### `internal/publisher/publisher.go`: the gate
 
 - **`MaxPending`** = 65,536 held events.
-- **`Run`** ([publisher.go:179](../../internal/publisher/publisher.go#L179)) selects on three channels:
+- **`Run`** ([publisher.go:235](../../internal/publisher/publisher.go#L235)) selects on three channels:
   - the event channel. It is set to `nil` while 65,536 events are held, so the engine waits; that is the backpressure.
   - `durable.Notify`;
   - `durable.Failed`.
 
   It returns only when its input has closed **and** nothing is still held, or when durability fails.
-- **`release`** ([publisher.go:215](../../internal/publisher/publisher.go#L215)) routes the prefix of held events whose seq is ≤ durable. Seqs never decrease, so the releasable events are always a prefix. It then reuses or compacts the slice so it doesn't grow forever.
-- **`withhold`** ([publisher.go:249](../../internal/publisher/publisher.go#L249)) drops everything held, drains the rest of the engine's output so the engine is never left blocked, counts it in `Withheld`, and logs an error.
+- **`release`** ([publisher.go:271](../../internal/publisher/publisher.go#L271)) routes the prefix of held events whose seq is ≤ durable. Seqs never decrease, so the releasable events are always a prefix. It then reuses or compacts the slice so it doesn't grow forever.
+- **`withhold`** ([publisher.go:306](../../internal/publisher/publisher.go#L306)) drops everything held, drains the rest of the engine's output so the engine is never left blocked, counts it in `Withheld`, and logs an error.
 
 ### `internal/server/server.go`: recovery and failure
 
-**`Start`** ([server.go:79](../../internal/server/server.go#L79)):
+**`Start`** ([server.go:125](../../internal/server/server.go#L125)):
 1. opens `DataDir/wal` with a `replay` callback that decodes each command, restores its seq and time, and calls `engine.Step`, discarding the events. It refuses a log that doesn't start at seq 1, because there are no snapshots yet.
 2. logs the recovery summary;
 3. checks configured instruments against the log, or adds them via `LogNow`;
@@ -166,7 +166,7 @@ The layout is persistent: changing it means a new WAL format version.
 
 *Superseded in milestone 5:* step 1 now loads the newest snapshot first and replays only the WAL after it (`snapshot.Recover`), so the WAL no longer has to start at seq 1. See [05-recovery.md](05-recovery.md#2-code-walkthrough).
 
-**`Close`** ([server.go:248](../../internal/server/server.go#L248)) runs once: gateway, then `cmds`, then wait for the pipeline (which ends with the sequencer's final fsync), then close the WAL. It returns the durability error, if any. **`Failed`** and **`Err`** expose the failure to `cmd/engine`, which shuts down on it.
+**`Close`** ([server.go:343](../../internal/server/server.go#L343)) runs once: gateway, then `cmds`, then wait for the pipeline (which ends with the sequencer's final fsync), then close the WAL. It returns the durability error, if any. **`Failed`** and **`Err`** expose the failure to `cmd/engine`, which shuts down on it.
 
 ### Tests
 

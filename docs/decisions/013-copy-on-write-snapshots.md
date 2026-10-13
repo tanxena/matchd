@@ -51,6 +51,8 @@ Chunks are separate heap objects whose addresses never change. That is what lets
 
 ### Triggers (chosen with the user)
 
+*(Milestone 7)* A clean shutdown also writes a snapshot, after the final fsync, unless nothing changed since the last one or durability failed ([decision 019](019-graceful-shutdown.md)). The next start then replays no WAL.
+
 A snapshot is taken after **1,000,000 commands** (`-snapshot-every`) or **every 10 s** (`-snapshot-interval`), whichever comes first, and only if at least one command arrived since the last one. `Engine.Run` checks the count after each command and selects on a ticker. If a trigger fires while a snapshot is still in flight, another is taken as soon as it comes back.
 
 ### Writing: durability first, then atomically

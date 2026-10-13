@@ -108,7 +108,7 @@ Three things make this trustworthy rather than theatrical:
 - **`Fill`** ([types.go:188](../../internal/book/types.go#L188)). One match. It records the price (always the maker's), the quantity, the taker's side, id and client, and the maker's id, client and client order id. **`MakerLeft`** is the maker's quantity after this fill, so 0 means the maker left the book. Milestone 2 uses it to emit the right book delta without asking the book again.
 - **`RestingOrder`** ([types.go:202](../../internal/book/types.go#L202)). A read-only view of an order on the book. The two books are compared using it.
 - **`Instrument` and `Instrument.Validate`** ([types.go:217](../../internal/book/types.go#L217)). Symbol, tick size and lot size. The book checks them once at construction and never uses them in matching.
-- **`Order.Validate`** ([types.go:241](../../internal/book/types.go#L241)). Field checks in a fixed order (side, type, qty, price, tif), so an order with several problems always gets the same reason. Limit orders need price > 0 and TIF GTC or Day; market orders need price == 0.
+- **`Order.Validate`** ([types.go:238](../../internal/book/types.go#L238)). Field checks in a fixed order (side, type, qty, price, tif), so an order with several problems always gets the same reason. Limit orders need price > 0 and TIF GTC or Day; market orders need price == 0.
 
 ### `internal/book/book.go`: the real book
 

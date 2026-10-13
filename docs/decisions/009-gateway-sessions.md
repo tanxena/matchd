@@ -46,6 +46,8 @@ A session is closed exactly once (`sync.Once`), from any goroutine: the reader o
 
 ### Sessions and login
 
+*(Milestone 7)* Client id 2³²−1 is reserved for the admin endpoint (`gateway.ReservedClientID`), and a `Login` with it is refused with `InvalidClientID` ([decision 018](018-http-admin-and-instruments.md)). Shutdown is now graceful in two phases: readers stop, then writers deliver what's queued and close with a lingering close ([decision 019](019-graceful-shutdown.md)).
+
 - **The first useful frame must be `Login`.** An order or cancel before login gets `Reject(NotLoggedIn)` and the connection is closed. The reject is written and flushed before closing (the `closeAfter` control), so the client learns why.
 - **There is no authentication**; PRD section 3 excludes it. A client id is a claim, not a credential.
 - **One connection per client id at a time.** A second login with a live id gets `Reject(ClientInUse)`. Otherwise two connections would each receive half of the client's events, depending on which one the publisher's registry held. The id becomes free again when the first session closes, a little after the socket closes.

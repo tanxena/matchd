@@ -138,6 +138,24 @@ Terms used in this repo's code and docs. Each entry names the milestone where th
 - **Re-snapshot** (M6): starting over with a fresh snapshot when a gap is older than the ring holds.
 - **Feed** (M6): the client-side book builder (`client.Feed`) that applies snapshots and deltas and recovers from gaps.
 
+## Operations (milestone 7)
+
+- **Metric** (M7): a number the program keeps about itself, read periodically by monitoring. **Counter**: only goes up. **Gauge**: up and down. **Histogram**: counts observations into buckets by upper bound.
+- **Prometheus / scrape** (M7): the monitoring system that pulls `GET /metrics` every few seconds (a *scrape*) and stores the series.
+- **Bucket / `le`** (M7): one histogram bin, labelled by its inclusive upper bound ("less than or equal"); counts are cumulative. Ours are defined in microseconds and shown in seconds.
+- **Percentile (p50, p99, p99.9)** (M7): the value below which that fraction of observations fall; read from a histogram as the bucket holding it.
+- **Matching-core latency** (M7): from the engine dequeuing a command to having sent all its events to the publisher (PRD 7.1); `matchd_matching_latency_seconds`. `Step` alone is `matchd_matching_step_seconds`.
+- **Timer tick / timer resolution** (M7): the interval at which Windows updates its ordinary clock (0.5–15.6 ms); `time.Now` can't resolve anything shorter.
+- **QPC (QueryPerformanceCounter)** (M7): Windows' high-resolution counter (10 MHz here); about 80–180 ns per read from Go because of the syscall boundary.
+- **TSC / RDTSC** (M7): the CPU's time-stamp counter and the instruction that reads it (~12 ns). **Invariant TSC**: ticks at a constant rate regardless of frequency scaling and sleep, synchronised across cores.
+- **Calibration** (M7): measuring the TSC's rate against QPC at startup, so ticks convert to nanoseconds; **ppm** (parts per million) measures its error.
+- **Syscall boundary** (M7): the cost of Go calling into the operating system: a stack switch and scheduler bookkeeping, around a hundred nanoseconds.
+- **Health check** (M7): `GET /healthz`: 200 while serving, 503 while shutting down or after a durability failure.
+- **Reserved client id** (M7): 2³²−1, under which the admin endpoint submits commands; a TCP login with it is refused.
+- **Graceful shutdown** (M7): stop accepting, drain and fsync, deliver queued answers, snapshot, close (decision 019).
+- **Half-close / FIN / RST** (M7): FIN ends one direction of a TCP connection normally; RST aborts it, and makes the receiver discard data it hasn't read. A *half-close* (`CloseWrite`) sends FIN but keeps reading.
+- **Lingering close** (M7): half-close, discard the peer's remaining input, then close, so unread input doesn't turn the close into a RST.
+
 ## Later milestones
 - **ITCH / OUCH** (reference): NASDAQ's market-data (ITCH) and order-entry (OUCH) protocols. They are cited for terminology:
   - [TotalView-ITCH 5.0](https://www.nasdaqtrader.com/content/technicalsupport/specifications/dataproducts/NQTVITCHspecification.pdf)

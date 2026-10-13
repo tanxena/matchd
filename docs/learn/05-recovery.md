@@ -95,7 +95,7 @@ A **crash harness** starts the real program, drives load, kills it, and checks w
 
 - **`Engine.Freeze`/`Thaw`** ([snapshot.go:25, 36](../../internal/engine/snapshot.go#L25)) freeze or thaw every book, plus `Seq`, `LastOrderID` and `LastMatchID`.
 - **`State`** ([snapshot.go:63](../../internal/engine/snapshot.go#L63)) is the engine as plain data: instruments, and their orders in priority order. **`Snapshot.State()`** materialises a frozen view, safe from any goroutine. **`Restore`** ([snapshot.go:84](../../internal/engine/snapshot.go#L84)) rebuilds an engine from a `State`.
-- **`SnapshotHooks`** ([snapshot.go:113](../../internal/engine/snapshot.go#L113)) has `Every`, `Tick`, `Out` and `Done`. **`Run`** ([engine.go:78](../../internal/engine/engine.go#L78)) now selects on three channels: commands, ticks, and returned snapshots. After each command it checks the count. `trigger` freezes and sends the snapshot, unless one is in flight (it then remembers to take another as soon as the current one returns) or nothing changed since the last.
+- **`SnapshotHooks`** ([snapshot.go:113](../../internal/engine/snapshot.go#L113)) has `Every`, `Tick`, `Out` and `Done`. **`Run`** ([engine.go:102](../../internal/engine/engine.go#L102)) now selects on three channels: commands, ticks, and returned snapshots. After each command it checks the count. `trigger` freezes and sends the snapshot, unless one is in flight (it then remembers to take another as soon as the current one returns) or nothing changed since the last.
 
 ### `internal/snapshot`: files, manifest, writer, fill log, recovery, check
 
@@ -108,16 +108,16 @@ A **crash harness** starts the real program, drives load, kills it, and checks w
   - **`WriteManifest`** writes atomically.
   - **`ReadSnapshot`** also checks that the file agrees with its manifest entry.
 - **`writer.go`:**
-  - **`Writer.Run`** ([writer.go:43](../../internal/snapshot/writer.go#L43)) writes each snapshot and always returns it on `done`.
-  - **`write`** ([writer.go:63](../../internal/snapshot/writer.go#L63)) polls until `durable ≥ seq`, encodes, writes atomically, appends to the manifest (keeping 2), writes the manifest, then calls `prune`.
-  - **`prune`** ([writer.go:107](../../internal/snapshot/writer.go#L107)) removes unlisted snapshot files, and, only when 2 are listed, WAL segments below the older snapshot and fill-log segments before its last match.
+  - **`Writer.Run`** ([writer.go:44](../../internal/snapshot/writer.go#L44)) writes each snapshot and always returns it on `done`.
+  - **`write`** ([writer.go:73](../../internal/snapshot/writer.go#L73)) polls until `durable ≥ seq`, encodes, writes atomically, appends to the manifest (keeping 2), writes the manifest, then calls `prune`.
+  - **`prune`** ([writer.go:117](../../internal/snapshot/writer.go#L117)) removes unlisted snapshot files, and, only when 2 are listed, WAL segments below the older snapshot and fill-log segments before its last match.
 - **`filllog.go`:**
   - **`Match`** ([filllog.go:19](../../internal/snapshot/filllog.go#L19)) holds both sides of one trade.
   - **`FillLog.Released`** ([filllog.go:121](../../internal/snapshot/filllog.go#L121)) keeps the taker half, and on the maker half appends one record with the match id as its seq.
   - The log is a `wal.Log` with `AllowGaps`, and isn't fsynced.
 - **`recover.go`:**
-  - **`LoadLatest`** ([recover.go:28](../../internal/snapshot/recover.go#L28)) picks the newest listed snapshot that decodes, falling back to an older one, and finally to none.
-  - **`Recover`** ([recover.go:50](../../internal/snapshot/recover.go#L50)) restores it and opens the WAL, replaying records after the snapshot's seq, each required to be exactly the next. It refuses a WAL that ends before the snapshot.
+  - **`LoadLatest`** ([recover.go:31](../../internal/snapshot/recover.go#L31)) picks the newest listed snapshot that decodes, falling back to an older one, and finally to none.
+  - **`Recover`** ([recover.go:53](../../internal/snapshot/recover.go#L53)) restores it and opens the WAL, replaying records after the snapshot's seq, each required to be exactly the next. It refuses a WAL that ends before the snapshot.
 - **`check.go`:** **`ReplayCheck`** ([check.go:51](../../internal/snapshot/check.go#L51)):
   1. opens everything read-only;
   2. picks the base (an empty engine if the WAL still starts at 1, otherwise the older snapshot);
@@ -152,7 +152,7 @@ A **crash harness** starts the real program, drives load, kills it, and checks w
 - **`TestMain`** builds `cmd/engine` once.
 - **`startEngine`** ([crash_test.go:170](../../internal/crashtest/crash_test.go#L170)) runs it on port 0 and reads the port from its log.
 - **`runClient`** ([crash_test.go:82](../../internal/crashtest/crash_test.go#L82)) has a writer (random orders and cancels) and a reader that records every sequenced answer and every fill under a mutex.
-- **`TestCrashRecovery`** ([crash_test.go:216](../../internal/crashtest/crash_test.go#L216)), for each run:
+- **`TestCrashRecovery`** ([crash_test.go:217](../../internal/crashtest/crash_test.go#L217)), for each run:
   1. start the engine, with the policy and segment size rotating;
   2. start three clients, wait 80–400 ms, then `Process.Kill()`;
   3. check: `ReplayCheck`; every answer's seq is ≤ the WAL's end, and, where still present, the WAL record is that command; no `(match, role)` is received twice across runs; every received fill equals the replayed match; `Recover`'s state equals the replay's; no answered seq reuses a number from before.

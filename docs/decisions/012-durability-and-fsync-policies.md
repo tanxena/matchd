@@ -18,6 +18,8 @@ That covers acks, rejects, fills, cancel-acks and (from milestone 6) market data
 - an event leaving the publisher;
 - any other client learning the command's effect.
 
+*(Milestone 7)* Metrics and the per-command debug log follow the same rule: commands are counted and logged by the publisher on release, never when the engine executes them ([decision 017](017-metrics-and-clock.md)).
+
 **Not covered:** replies the gateway makes on its own (`LoginAck`, `Heartbeat`, and gateway rejects with seq 0). They don't depend on any sequenced command.
 
 **How the rule is enforced: one gate, the same for all policies.** The publisher holds every event in a FIFO queue and releases it only when `durable.Seq` ≥ the event's `Seq`. Under `always` the sequencer advances `durable.Seq` before the engine even sees the command, so events pass straight through. Under `group` they wait for the syncer. Having a single gate means there is one place to get this right, and one place to test.
