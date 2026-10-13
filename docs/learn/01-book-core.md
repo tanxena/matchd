@@ -108,7 +108,7 @@ Three things make this trustworthy rather than theatrical:
 - **`Fill`** ([types.go:205](../../internal/book/types.go#L205)). One match. It records the price (always the maker's), the quantity, the taker's side, id and client, and the maker's id, client and client order id. **`MakerLeft`** is the maker's quantity after this fill, so 0 means the maker left the book. Milestone 2 uses it to emit the right book delta without asking the book again.
 - **`RestingOrder`** ([types.go:219](../../internal/book/types.go#L219)). A read-only view of an order on the book. The two books are compared using it.
 - **`Instrument` and `Instrument.Validate`** ([types.go:255](../../internal/book/types.go#L255)). Symbol, tick size and lot size. The book checks them once at construction and never uses them in matching.
-- **`Order.Validate`** ([types.go:255](../../internal/book/types.go#L255)). Field checks in a fixed order (side, type, qty, price, tif), so an order with several problems always gets the same reason. Limit orders need price > 0 and TIF GTC or Day; market orders need price == 0.
+- **`Order.Validate`** ([types.go:255](../../internal/book/types.go#L255)). Field checks in a fixed order (side, type, qty, price, tif), so an order with several problems always gets the same reason. Limit orders need price > 0 and TIF GTC or Day; market orders need price == 0. *(Since review F-002, quantity is also bounded by `MaxQty` = 2^30 and a limit price by `MaxPrice` = 2^53, so no level total can overflow; decision 003.)*
 
 ### `internal/book/book.go`: the real book
 

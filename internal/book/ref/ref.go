@@ -56,11 +56,11 @@ func validate(o book.Order) book.RejectReason {
 	if o.Type != book.Limit && o.Type != book.Market {
 		return book.RejectInvalidType
 	}
-	if o.Qty <= 0 {
+	if o.Qty <= 0 || o.Qty > book.MaxQty { // the bounds are spec values (decision 003)
 		return book.RejectInvalidQty
 	}
 	if o.Type == book.Limit {
-		if o.Price <= 0 {
+		if o.Price <= 0 || o.Price > book.MaxPrice {
 			return book.RejectInvalidPrice
 		}
 		if o.TIF != book.GTC && o.TIF != book.Day && o.TIF != book.IOC && o.TIF != book.FOK {

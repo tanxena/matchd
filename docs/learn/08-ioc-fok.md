@@ -60,7 +60,7 @@ The new TIFs are 3 and 4, not 2 and 3. **2 is `Day`**, and has been in every log
 ### Types: `internal/book/types.go`
 
 - **`TIF`** ([types.go:85](../../internal/book/types.go#L85)) gains `IOC` (3) and `FOK` (4). `RejectFOKNoLiquidity` is appended after `RejectDuplicateSymbol`.
-- **`Order.Validate`** ([types.go:280](../../internal/book/types.go#L280)): a limit order's TIF may be GTC, Day, IOC or FOK. A market order with IOC or FOK is `InvalidTIF`, checked after its price, keeping the fixed order side, type, qty, price, tif. Any other TIF on a market order is still ignored.
+- **`Order.Validate`** ([types.go:255](../../internal/book/types.go#L255)): a limit order's TIF may be GTC, Day, IOC or FOK. A market order with IOC or FOK is `InvalidTIF`, checked after its price, keeping the fixed order side, type, qty, price, tif. Any other TIF on a market order is still ignored.
 - **`Result`** ([types.go:185](../../internal/book/types.go#L185)): `Expired` now means "cancelled on arrival", for a market order's remainder or an IOC's.
 
 ### The book: `internal/book/book.go`

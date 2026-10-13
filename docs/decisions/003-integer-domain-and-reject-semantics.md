@@ -16,6 +16,19 @@ These are the book's externally visible rules that the PRD leaves open. The refe
 
 **Cost:** clients must convert at the edge. A price that isn't a whole number of ticks can't be expressed at all, which is what we want.
 
+### Upper bounds (review F-002)
+
+| bound | value | rejected with |
+|---|---|---|
+| `MaxQty` | 2^30 lots (1,073,741,824) | `InvalidQty` |
+| `MaxPrice` | 2^53 ticks (a limit price) | `InvalidPrice` |
+
+**Why:**
+- **No sum can overflow.** Until the review, any positive `int64` quantity was accepted. Two resting orders at one price, `MaxInt64` and 1, wrapped the level's total to a negative number. A fill-or-kill check then rejected an order the reference book filled, and market data published a negative quantity. A book indexes its orders with `uint32`, so it holds fewer than 2^32 orders. Below 2^30 each, a level's total and a FOK check's running sum over a whole side stay below 2^62.
+- **Prices fit a `float64` exactly.** Every price below 2^53 is exactly representable as a `float64`, for any client or tool that decodes one.
+
+**Cost:** an order above either bound is refused. 2^30 lots is a billion lots: an instrument needing more would use a bigger lot. Both books apply the same bounds (`book.MaxQty`, `book.MaxPrice`, values from the spec, not shared logic). `TestQuantityAndPriceBounds` checks the bounds and an exact, positive total for a level of several `MaxQty` orders.
+
 ## Who assigns `order_id`
 
 The **caller** assigns it: the engine from milestone 2 on, and the test harness in milestone 1. The book never invents ids. It panics if asked to rest an id that is already resting, because that is a caller bug that would corrupt `byID`.
@@ -27,7 +40,8 @@ The **caller** assigns it: the engine from milestone 2 on, and the test harness 
 `Order.Validate` checks fields in a fixed order: **side, type, qty, price, tif**. An order with several problems always gets the first reason in that order.
 
 - Zero values of `Side`, `OrderType` and `TIF` are deliberately invalid, so an uninitialised field is rejected rather than read as "buy" or "limit".
-- Limit orders need `Price > 0` and a TIF of `GTC` or `Day` (since milestone 8 also `IOC` or `FOK`, [decision 020](020-ioc-and-fok.md)).
+- Quantity must be in 1..`MaxQty`.
+- Limit orders need `Price` in 1..`MaxPrice` and a TIF of `GTC` or `Day` (since milestone 8 also `IOC` or `FOK`, [decision 020](020-ioc-and-fok.md)).
 - Market orders need `Price == 0`. A market order with a price is almost certainly a client mistake, so we reject it instead of guessing. Their TIF is ignored, except that since milestone 8 `IOC` and `FOK` are refused with `InvalidTIF`: they are limit-only, and "market FOK" is a known limitation.
 
 The duplicate-client-order-id check runs only after an order passes validation.

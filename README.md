@@ -62,7 +62,7 @@ Every frame is a 4-byte little-endian length, then a version byte (1) and a type
 | Trade | 0x88 | out | 53 |
 | SnapshotLevel | 0x89 | out | 21 |
 
-Prices are integer ticks and quantities integer lots. Every outbound message carries its command's sequence number and timestamp.
+Prices are integer ticks (a limit price at most 2^53) and quantities integer lots (at most 2^30), so no sum in the book can overflow ([decision 003](docs/decisions/003-integer-domain-and-reject-semantics.md)). Every outbound message carries its command's sequence number and timestamp.
 
 Sessions:
 - A connection logs in as one client id. The gateway attaches that id to every command, so clients can't act for each other.

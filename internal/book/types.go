@@ -273,6 +273,18 @@ func (in Instrument) Validate() error {
 	return nil
 }
 
+// Upper bounds on an order's quantity (lots) and a limit order's price
+// (ticks), decision 003 (review F-002). A book's orders are indexed by
+// uint32, so it holds fewer than 2^32 of them; with no order above MaxQty
+// = 2^30, a price level's total, and a fill-or-kill check's running sum
+// over a whole side, stay below 2^62: no int64 sum can overflow. MaxPrice
+// = 2^53 keeps every price exactly representable as a float64, for any
+// client that decodes into one.
+const (
+	MaxQty   Qty   = 1 << 30
+	MaxPrice Price = 1 << 53
+)
+
 // Validate checks the fields of a new order that do not depend on book state.
 // Checks run in a fixed order (side, type, qty, price, tif) so that an order
 // with several problems always gets the same reason; the reference book
@@ -284,12 +296,12 @@ func (o *Order) Validate() RejectReason {
 	if o.Type != Limit && o.Type != Market {
 		return RejectInvalidType
 	}
-	if o.Qty <= 0 {
+	if o.Qty <= 0 || o.Qty > MaxQty {
 		return RejectInvalidQty
 	}
 	switch o.Type {
 	case Limit:
-		if o.Price <= 0 {
+		if o.Price <= 0 || o.Price > MaxPrice {
 			return RejectInvalidPrice
 		}
 		if o.TIF != GTC && o.TIF != Day && o.TIF != IOC && o.TIF != FOK {
