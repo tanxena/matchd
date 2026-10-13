@@ -46,6 +46,16 @@ func TestAssess(t *testing.T) {
 			t.Errorf("%s: %v, want one reason containing %q", name, why, tc.want)
 		}
 	}
+	// Clock runs get the other-processes check too (review F-014).
+	ck := &Run{PowerBefore: cleanRun().PowerBefore, PowerAfter: cleanRun().PowerAfter,
+		Clock: &Clock{Other: 0.9, TopOther: []ProcUse{{Name: "MsMpEng.exe", CPUs: 0.87}}}}
+	if why := Assess(ck); len(why) != 1 || !strings.Contains(why[0], "MsMpEng.exe 0.87") {
+		t.Errorf("busy clock run: %v", why)
+	}
+	ck.Clock.Other = 0.05
+	if why := Assess(ck); len(why) != 0 {
+		t.Errorf("quiet clock run judged disturbed: %v", why)
+	}
 	// A closed-loop run has no schedule to keep.
 	r := cleanRun()
 	r.Load.Mode, r.Load.SendLag, r.Load.ThroughputPerSec = "closed", nil, 1

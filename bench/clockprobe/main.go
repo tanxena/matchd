@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/tanxena/matchd/bench/internal/result"
+	"github.com/tanxena/matchd/bench/internal/sysinfo"
 	"github.com/tanxena/matchd/internal/clock"
 	"github.com/tanxena/matchd/internal/metrics"
 )
@@ -46,6 +47,24 @@ func main() {
 func probe(n int) *result.Clock {
 	info := clock.Init()
 	res := &result.Clock{Source: info.Source, TSCHz: info.TSCHz, Reads: n, InitCostNS: int64(info.ReadCost)}
+	// Other processes' CPU while the probe runs: the same disturbance
+	// check as a load run's (review F-014). Unavailable off Windows.
+	before, snapErr := sysinfo.ReadSnapshot()
+	began := time.Now()
+	defer func() {
+		after, err := sysinfo.ReadSnapshot()
+		if snapErr != nil || err != nil {
+			return
+		}
+		window := float64(time.Since(began))
+		for i, p := range sysinfo.Others(before, after, os.Getpid()) {
+			use := float64(p.CPU) / window
+			res.Other += use
+			if i < 5 {
+				res.TopOther = append(res.TopOther, result.ProcUse{PID: p.PID, Name: p.Name, CPUs: use})
+			}
+		}
+	}()
 
 	// Pass 1: cost. Timed with time.Now over the whole loop (hundreds of
 	// milliseconds), so its coarse Windows tick is under 0.5% of it.

@@ -117,6 +117,8 @@ The count at each window's start and end is recorded.
 
 `result.Assess` judges every finished run, and `benchrun` writes the reasons into the file (`disturbed`). A disturbed run's numbers are **never** in the README: `report` refuses to run until there are none (`-allow-disturbed` leaves them out, with "4 of 5†" in the row and the list underneath). A failed run has no numbers at all.
 
+Since review F-014, clock-probe runs get the other-processes check too, measured over the probe's own run. Before, they were checked only for power and pinning.
+
 | check | limit | why |
 |---|---|---|
 | other processes' CPU, averaged over the window | 0.35 logical CPUs (~4% of the machine) | "nothing else running", measured. A quiet desktop still has the window manager, the kernel's System process and services. A browser playing media used 1–2 CPUs in the smoke runs, and the check named it |
@@ -163,7 +165,7 @@ That work runs during measured windows: snapshots in the snapshot row, a fresh d
 
 ## Results (2026-10-13)
 
-`make bench-full`: 45 runs, 0 disturbed, 0 failed. `make bench-balanced`: 10 runs. Two resting runs were disturbed by Defender (`MsMpEng.exe` at 0.87 and 0.77 CPUs, despite the data-directory exclusion), so that row reports **n=3** (`bench-report -min-runs-suite balanced=3`, with both runs listed under the tables). The tables are in the README, generated from `bench/results/`. One finding came out of them: with snapshots on, WAL fsyncs stall and intake stops behind them, which costs the end-to-end tail but not core latency ([open observation 002](../bugs/002-snapshot-runs-stall-the-wal.md)).
+`make bench-full`: 45 runs, 0 disturbed, 0 failed. `make bench-balanced`: 10 runs. Two resting runs were disturbed by Defender (`MsMpEng.exe` at 0.87 and 0.77 CPUs, despite the data-directory exclusion), so that row reports **n=3** (`bench-report -min-runs-suite balanced=3`, with both runs listed under the tables). *(Review F-014: n=3 is below PRD 7.5's minimum of 5. Meeting it needs `make bench-balanced` re-run, about 10 minutes, with Defender quiet, into an emptied `bench/results/balanced`. Then drop `-min-runs-suite balanced=3` from the Makefile's `bench-report` target. Not re-run at the time of the review response. The balanced clock runs at the time weren't checked for other processes, since the check didn't exist yet.)* The tables are in the README, generated from `bench/results/`. One finding came out of them: with snapshots on, WAL fsyncs stall and intake stops behind them, which costs the end-to-end tail but not core latency ([open observation 002](../bugs/002-snapshot-runs-stall-the-wal.md)).
 
 ## Costs and limitations
 

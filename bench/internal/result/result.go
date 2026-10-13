@@ -228,6 +228,11 @@ type Clock struct {
 	// InitCostNS: the cost clock.Init measured at startup, as the engine
 	// logs it and exports it in /metrics.
 	InitCostNS int64 `json:"init_cost_ns"`
+	// Other: other processes' CPU use (in logical CPUs) while the probe
+	// ran, the same "nothing else running" check as load runs (review
+	// F-014); TopOther names the largest. Missing (0, nil) in older files.
+	Other    float64   `json:"other_cpus"`
+	TopOther []ProcUse `json:"top_other"`
 }
 
 // Write writes v as indented JSON.

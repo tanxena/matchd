@@ -146,7 +146,7 @@ Thin wrappers over Windows APIs, each loaded with `syscall.NewLazyDLL(...).NewPr
 
 ### The clock row: `bench/clockprobe`
 
-**`probe`** ([main.go:46](../../bench/clockprobe/main.go#L46)):
+**`probe`** ([main.go:47](../../bench/clockprobe/main.go#L47)):
 - **Pass 1**, cost: 20 million `clock.Now()` calls timed as a whole with `time.Now`. Hundreds of milliseconds, so `time.Now`'s 0.5 ms tick is under 0.5% of it.
 - **Pass 2**, steps: pairs `a := clock.Now(); b := clock.Now()`, with `b - a` recorded in a `LogHistogram`. That is what timing *nothing* measures. Its smallest non-zero value is the resolution the clock shows in practice. For the TSC that's about one read's cost, far above the counter's 0.47 ns tick.
 

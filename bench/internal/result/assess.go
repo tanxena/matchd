@@ -54,17 +54,24 @@ func Assess(r *Run) []string {
 		add("engine and loadgen masks share physical cores %v", p.SharedCores)
 	}
 
+	others := func(cpus float64, top []ProcUse) {
+		if cpus <= MaxOtherCPU {
+			return
+		}
+		var names []string
+		for _, p := range top {
+			names = append(names, fmt.Sprintf("%s %.2f", p.Name, p.CPUs))
+		}
+		add("other processes used %.2f CPUs on average (limit %.2f): %s", cpus, MaxOtherCPU, strings.Join(names, ", "))
+	}
+	if c := r.Clock; c != nil { // clock runs too (review F-014)
+		others(c.Other, c.TopOther)
+	}
 	l := r.Load
 	if l == nil {
 		return why
 	}
-	if l.CPU.Other > MaxOtherCPU {
-		var top []string
-		for _, p := range l.CPU.TopOther {
-			top = append(top, fmt.Sprintf("%s %.2f", p.Name, p.CPUs))
-		}
-		add("other processes used %.2f CPUs on average (limit %.2f): %s", l.CPU.Other, MaxOtherCPU, strings.Join(top, ", "))
-	}
+	others(l.CPU.Other, l.CPU.TopOther)
 	if req := float64(l.RequestedNS); req > 0 {
 		if skew := float64(l.MeasuredNS)/req - 1; skew > MaxWindowSkew || skew < -MaxWindowSkew {
 			add("measured window lasted %v, requested %v", time.Duration(l.MeasuredNS), time.Duration(l.RequestedNS))
