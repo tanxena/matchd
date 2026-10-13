@@ -259,14 +259,22 @@ func run(o *options, plan []spec) error {
 	t := o.suite.Timing
 	fmt.Printf("suite %s: %d runs, about %v; results in %s\n", o.suite.Name, len(plan), estimate(plan, t).Round(time.Minute), o.results)
 
-	interrupted := make(chan os.Signal, 1)
-	signal.Notify(interrupted, os.Interrupt)
+	// Ctrl-C ends the suite: the run in progress is abandoned (its
+	// processes killed, no result file), finished runs keep theirs.
+	// interrupted is closed rather than sent on, so every select sees it.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt)
+	interrupted := make(chan struct{})
+	go func() { <-sig; close(interrupted) }()
+	stopped := func(done int) error {
+		return fmt.Errorf("interrupted after %d of %d runs; their results are in %s", done, len(plan), o.results)
+	}
 	began := time.Now()
 	var disturbed, failed int
 	for i, sp := range plan {
 		select {
 		case <-interrupted:
-			return fmt.Errorf("interrupted after %d of %d runs; their results are in %s", i, len(plan), o.results)
+			return stopped(i)
 		default:
 		}
 		id := runID(i+1, sp)
@@ -283,6 +291,12 @@ func run(o *options, plan []spec) error {
 			err = loadRun(o, sp, id, r, interrupted)
 		}
 		r.PowerAfter, _ = sysinfo.ReadPower()
+		select {
+		case <-interrupted:
+			fmt.Println("interrupted")
+			return stopped(i)
+		default:
+		}
 		if err != nil {
 			r.Failed = err.Error()
 			failed++
@@ -344,7 +358,7 @@ func us(ns int64) string {
 }
 
 // clockRun runs clockprobe pinned to the engine's CPUs.
-func clockRun(o *options, sp spec, id string, r *result.Run, interrupted <-chan os.Signal) error {
+func clockRun(o *options, sp spec, id string, r *result.Run, interrupted <-chan struct{}) error {
 	dir := filepath.Join(o.dataRoot, id)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -372,7 +386,7 @@ func clockRun(o *options, sp spec, id string, r *result.Run, interrupted <-chan 
 
 // loadRun starts an engine on a fresh data directory, runs loadgen against
 // it, and stops the engine.
-func loadRun(o *options, sp spec, id string, r *result.Run, interrupted <-chan os.Signal) error {
+func loadRun(o *options, sp spec, id string, r *result.Run, interrupted <-chan struct{}) error {
 	dir := filepath.Join(o.dataRoot, id)
 	_ = os.RemoveAll(dir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -463,7 +477,7 @@ var errTimeout = errors.New("timed out")
 
 // wait waits for cmd to exit, at most d, or until interrupted (benchrun's
 // own Ctrl-C), killing it then.
-func wait(cmd *exec.Cmd, d time.Duration, interrupted <-chan os.Signal) error {
+func wait(cmd *exec.Cmd, d time.Duration, interrupted <-chan struct{}) error {
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	t := time.NewTimer(d)
