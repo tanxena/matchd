@@ -1,0 +1,39 @@
+# Linux checks (PRD acceptance 7). Development happens on Windows, where
+# `make ci` runs everything natively and cross-compiles for Linux; this
+# workflow is where the suite actually runs on Linux. It has not run yet:
+# the repository hasn't been pushed.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt
+        run: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then echo "gofmt needed:"; echo "$out"; exit 1; fi
+
+      - name: vet
+        run: go vet ./...
+
+      - name: lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.13.2
+
+      - name: race suite
+        run: go test -race -count=1 ./...
+
+      - name: crash test (5 kill-and-recover runs) and signal shutdown
+        run: go test -count=1 -v -run 'TestCrashRecovery|TestSignalShutsDownGracefully' ./internal/crashtest/
