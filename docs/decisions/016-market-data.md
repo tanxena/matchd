@@ -59,6 +59,12 @@ A consumer that sees `md_seq` jump from N to N + k (k > 1) sends **`Resend(instr
 
 **A resend older than the ring** gets **`Reject(ResendUnavailable)`**, and the client subscribes again for a fresh snapshot (chosen with the user, matching the PRD's "the client must re-snapshot"). The alternative, the server pushing a snapshot unasked, would mean a client could receive a snapshot at any moment.
 
+**Bounded work per request (review F-005).** Subscribe and Resend need no login and are answered on the publisher goroutine, which every client's answers wait behind. Unbounded, one 18-byte Resend made it push up to 65,536 events, and a few connections repeating it could keep the publisher busy, fill its queues and stall the engine. Two bounds:
+- **A Resend more than `publisher.MaxResend` (4,096) events back** gets `ResendUnavailable`, as if it were older than the ring. The client subscribes again, which costs the book's levels rather than the whole gap.
+- **Each connection has a token bucket for market-data requests:** a burst of 32, then 16 per second, refilled continuously. A request beyond it is refused in the gateway, before the publisher sees it, with `Reject(TooManyRequests)` (reason 106, additive). `client.Feed` retries a refused request on the first message after `RetryDelay` (200 ms).
+
+Together they bound what one connection can make the publisher do to about 65,000 events a second. The number of connections is not limited: the gateway is for a trusted network (README, known limitations). `TestResendIsBounded` and `TestMarketDataRequestsAreRateLimited` fail with either bound removed.
+
 The ring only holds events since this process started. After a restart, a resend for anything before the restart is refused, and the client re-snapshots.
 
 ### The client side: `client.Feed`

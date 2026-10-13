@@ -175,6 +175,11 @@ func (p *Publisher) request(r request) {
 	}
 }
 
+// MaxResend bounds the events one Resend is answered with. A client further
+// behind gets ResendUnavailable and subscribes again: a snapshot costs the
+// publisher the book's levels, not the whole gap.
+const MaxResend = 4096
+
 func (p *Publisher) handle(r request) {
 	if r.kind == reqInstruments {
 		r.reply <- p.instruments()
@@ -199,7 +204,11 @@ func (p *Publisher) handle(r request) {
 		if r.from > mb.mdSeq {
 			return // nothing newer than what the client asked from exists yet
 		}
-		if r.from < mb.oldestAvailable(p.ringSize) {
+		// Too old for the ring, or more than MaxResend events behind: the
+		// client re-snapshots instead. A resend is pushed event by event on
+		// this goroutine, which every client's answers wait behind, so its
+		// size is bounded (review F-005).
+		if r.from < mb.oldestAvailable(p.ringSize) || mb.mdSeq-r.from >= MaxResend {
 			p.resendMisses.Add(1)
 			p.offer(r.sub, engine.Event{Kind: engine.EvResendUnavailable, Instrument: r.instrument, MDSeq: r.from})
 			return

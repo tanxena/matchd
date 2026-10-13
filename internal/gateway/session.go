@@ -48,6 +48,10 @@ type session struct {
 	// over its soft limit longer than WriteTimeout, or reaches its hard
 	// limit, is a slow consumer (decision 022).
 	out *outQueue
+	// mdTokens and mdRefill: the token bucket limiting this connection's
+	// market-data requests (reader goroutine only; review F-005).
+	mdTokens float64
+	mdRefill time.Time
 	// slowWhy is why Deliver last refused an event, for SlowConsumer's log
 	// line. Both run on the publisher goroutine, one right after the other.
 	slowWhy string
@@ -241,10 +245,22 @@ func (s *session) readLoop() {
 			}
 			// Market data is public: no login needed. The publisher answers
 			// with a snapshot, then streams deltas and trades.
+			if !s.mdAllowed() {
+				if !s.reply(control{typ: proto.TypeReject, reject: proto.Reject{Instrument: sub.Instrument, Reason: proto.ReasonTooManyRequests}}) {
+					return
+				}
+				break
+			}
 			s.g.pub.Subscribe(engine.InstrumentID(sub.Instrument), s)
 
 		case proto.TypeResend:
 			if decodeErr = resend.Decode(payload); decodeErr != nil {
+				break
+			}
+			if !s.mdAllowed() {
+				if !s.reply(control{typ: proto.TypeReject, reject: proto.Reject{Instrument: resend.Instrument, Reason: proto.ReasonTooManyRequests}}) {
+					return
+				}
 				break
 			}
 			s.g.pub.Resend(engine.InstrumentID(resend.Instrument), resend.FromMDSeq, s)
@@ -299,6 +315,33 @@ func (s *session) handleLogin(id uint32) bool {
 	s.closeMu.Unlock()
 	s.g.log.Info("login", "remote", s.remote, "client", id)
 	return s.reply(control{typ: proto.TypeLoginAck, client: id})
+}
+
+// Market-data request rate per connection (review F-005). Subscribe and
+// Resend are answered on the publisher goroutine, which every client's
+// answers wait behind, and need no login; a connection may make a burst of
+// mdBurst requests, then mdRate per second. With Resends bounded to
+// publisher.MaxResend events, one connection can make the publisher push
+// at most about 65,000 events a second.
+const (
+	mdBurst = 32
+	mdRate  = 16.0
+)
+
+// mdAllowed takes one token from the connection's bucket, refilled at
+// mdRate up to mdBurst. Reader goroutine only.
+func (s *session) mdAllowed() bool {
+	now := time.Now()
+	if s.mdRefill.IsZero() {
+		s.mdTokens, s.mdRefill = mdBurst, now
+	}
+	s.mdTokens = min(mdBurst, s.mdTokens+now.Sub(s.mdRefill).Seconds()*mdRate)
+	s.mdRefill = now
+	if s.mdTokens < 1 {
+		return false
+	}
+	s.mdTokens--
+	return true
 }
 
 // submit puts a command on the shared command channel. If the channel is

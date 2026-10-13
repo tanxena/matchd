@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/tanxena/matchd/internal/proto"
 )
@@ -20,6 +21,9 @@ import (
 //   - Messages at or below the current md_seq are duplicates and ignored.
 //   - Reject(ResendUnavailable) means the gap is older than the server's
 //     ring: the Feed subscribes again and starts over from a new snapshot.
+//   - Reject(TooManyRequests) means the server's per-connection rate limit
+//     refused the request (review F-005): the Feed asks again on the first
+//     message after RetryDelay.
 //
 // A Feed is driven by its owner calling Apply with every message read from
 // the connection; it is not safe for concurrent use.
@@ -40,8 +44,17 @@ type Feed struct {
 	// handles.
 	Drop func(m Msg) bool
 
+	// After a TooManyRequests reject: don't ask again before retryAt; and
+	// resubscribe is set if the refused request was a Subscribe.
+	retryAt     time.Time
+	resubscribe bool
+
 	Stats FeedStats
 }
+
+// RetryDelay is how long a Feed waits after a TooManyRequests reject before
+// asking again: a little over the server's refill time for one request.
+const RetryDelay = 200 * time.Millisecond
 
 // FeedStats counts what the Feed has done.
 type FeedStats struct {
@@ -49,6 +62,7 @@ type FeedStats struct {
 	Gaps        int // gaps detected
 	Resends     int // Resend requests sent
 	Resnapshots int // re-subscriptions after ResendUnavailable
+	Throttled   int // requests refused with TooManyRequests (and retried)
 	Duplicates  int // messages ignored as already applied
 	Applied     int // deltas and trades applied
 	Trades      int
@@ -114,9 +128,22 @@ func (f *Feed) Apply(m Msg) error {
 			return f.sequenced(m, m.Trade.MDSeq)
 		}
 	case proto.TypeReject:
-		if m.Reject.Reason == proto.ReasonResendUnavailable && m.Reject.Instrument == f.instrument {
+		if m.Reject.Instrument != f.instrument {
+			return nil
+		}
+		switch m.Reject.Reason {
+		case proto.ReasonResendUnavailable:
 			f.Stats.Resnapshots++
 			return f.subscribe()
+		case proto.ReasonTooManyRequests:
+			f.Stats.Throttled++
+			f.retryAt = time.Now().Add(RetryDelay)
+			switch f.state {
+			case recovering: // the Resend was refused: ask again, later
+				f.state = live
+			case awaitingSnapshot: // the Subscribe was refused
+				f.resubscribe = true
+			}
 		}
 	}
 	return nil
@@ -124,6 +151,10 @@ func (f *Feed) Apply(m Msg) error {
 
 // sequenced handles a delta or trade carrying md_seq.
 func (f *Feed) sequenced(m Msg, md uint64) error {
+	if f.resubscribe && !time.Now().Before(f.retryAt) {
+		f.resubscribe = false
+		return f.subscribe()
+	}
 	if f.state == awaitingSnapshot || f.state == loadingLevels {
 		return nil // the snapshot will already include it, or isn't here yet
 	}
@@ -135,7 +166,7 @@ func (f *Feed) sequenced(m Msg, md uint64) error {
 		f.Stats.Duplicates++
 		return nil
 	case md > f.mdSeq+1:
-		if f.state == live { // first sign of this gap: ask once
+		if f.state == live && !time.Now().Before(f.retryAt) { // first sign of this gap: ask once
 			f.Stats.Gaps++
 			f.Stats.Resends++
 			f.state = recovering

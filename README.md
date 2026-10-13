@@ -68,6 +68,7 @@ Sessions:
 - A connection logs in as one client id. The gateway attaches that id to every command, so clients can't act for each other.
 - A client that sends nothing for 60 s is disconnected.
 - A client that can't keep up with its own events is disconnected as a slow consumer. It is never allowed to stall the engine or other clients. "Can't keep up" is judged by time, not by a momentary burst ([decision 022](docs/decisions/022-slow-consumers-and-durability-stalls.md)).
+- Market-data requests need no login, so each connection's are rate-limited (a burst of 32, then 16 per second), and a Resend is answered with at most 4,096 events ([decision 016](docs/decisions/016-market-data.md)). The number of connections isn't limited (see known limitations).
 
 ## Durability and recovery
 
@@ -344,7 +345,7 @@ set "GOMAXPROCS=4" && start "loadgen" /affinity F0 bin\loadgen.exe -addr 127.0.0
 - **Day orders behave as GTC.** There are no trading sessions, so nothing expires them.
 - **IOC and FOK are limit-only.** There is no market FOK.
 - **No order-status query.** A client that disconnects loses the events sent while it was away; its orders stay on the book.
-- **No risk checks, accounts, auctions, stop, iceberg or pegged orders** (PRD non-goals). There is no TLS or authentication: the gateway and the HTTP side are for a trusted local network, and `/instruments` lets anyone with access add instruments.
+- **No risk checks, accounts, auctions, stop, iceberg or pegged orders** (PRD non-goals). There is no TLS or authentication: the gateway and the HTTP side are for a trusted local network, and `/instruments` lets anyone with access add instruments. There's no limit on connections either: many connections each making their full allowance of market-data requests could still keep the publisher busy.
 - **One engine goroutine for all instruments:** see [Why the engine is single-threaded](#why-the-engine-is-single-threaded).
 - **Benchmark numbers exist for Windows on one laptop only.**
 - **With snapshots on, the end-to-end tail suffers from WAL fsync stalls** ([observation 002](docs/bugs/002-snapshot-runs-stall-the-wal.md)).

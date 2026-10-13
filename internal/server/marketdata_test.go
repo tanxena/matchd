@@ -63,6 +63,16 @@ func (s *subscriber) snapshot() (md uint64, live bool, bids, asks []client.Level
 }
 
 // waitFor waits until the subscriber is live at md_seq >= md.
+// caughtUp waits briefly for s to be live at md_seq md or later.
+func caughtUp(s *subscriber, md uint64) bool {
+	for deadline := time.Now().Add(500 * time.Millisecond); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		if got, live, _, _, _ := s.snapshot(); live && got >= md {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *subscriber) waitFor(t *testing.T, md uint64) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -178,24 +188,36 @@ func TestMarketDataConvergence(t *testing.T) {
 	})
 
 	// A lost frame is only noticed when a later one arrives, so if the very
-	// last delta was dropped, nothing would ever reveal it. (A real feed
-	// sends heartbeats carrying the latest md_seq for this.) Stop dropping,
-	// and send one more order that rests at a new price: one more delta.
+	// last delta was dropped, nothing would ever reveal it; and a Resend
+	// refused by the rate limit (review F-005) is only asked again on a
+	// message that arrives after client.RetryDelay. (A real feed sends
+	// heartbeats carrying the latest md_seq for both; README, known
+	// limitations.) Stop dropping, and send closing orders, each resting at
+	// a new price (one more delta), until both subscribers have caught up.
 	dropping.Store(false)
 	closer := dial(t, s, 200)
-	if err := closer.NewOrder(limit(1, 1, proto.SideBuy, 1, 1)); err != nil {
-		t.Fatal(err)
+	var probe *subscriber
+	var final uint64
+	for i := 1; ; i++ {
+		if err := closer.NewOrder(limit(1, uint64(i), proto.SideBuy, int64(i), 1)); err != nil {
+			t.Fatal(err)
+		}
+		if m := recv(t, closer, 1)[0]; m.Type != proto.TypeAck {
+			t.Fatalf("closing order: %v", m)
+		}
+		// A subscriber joining now gets a snapshot at the final md_seq.
+		probe = subscribe(t, s, uint32(300+i), 1, nil)
+		probe.waitFor(t, 1)
+		final, _, _, _, _ = probe.snapshot()
+		if caughtUp(fromStart, final) && caughtUp(lateJoiner, final) {
+			break
+		}
+		if i == 20 {
+			fromStart.waitFor(t, final) // fails with the subscriber's state
+			lateJoiner.waitFor(t, final)
+		}
+		time.Sleep(client.RetryDelay + 50*time.Millisecond)
 	}
-	if m := recv(t, closer, 1)[0]; m.Type != proto.TypeAck {
-		t.Fatalf("closing order: %v", m)
-	}
-
-	// A third subscriber joining now gets a snapshot at the final md_seq.
-	probe := subscribe(t, s, 3, 1, nil)
-	probe.waitFor(t, 1)
-	final, _, _, _, _ := probe.snapshot()
-	fromStart.waitFor(t, final)
-	lateJoiner.waitFor(t, final)
 
 	mdA, _, bidsA, asksA, stA := fromStart.snapshot()
 	mdB, _, bidsB, asksB, stB := lateJoiner.snapshot()

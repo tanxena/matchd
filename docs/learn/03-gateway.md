@@ -97,7 +97,7 @@ A **fuzzer** generates millions of inputs, mutating towards ones that reach new 
 - **`messages.go`**
   - The **field enums** (`SideBuy`, `TypeLimit`, `RoleTaker`, `CancelExpired`, ...) and **`Reason`** ([messages.go:34](../../internal/proto/messages.go#L34)): 1–99 are the engine's reasons, 100 and up the gateway's.
   - **`Size*` constants** give each message's one valid payload size.
-  - **`dec`** ([messages.go:123](../../internal/proto/messages.go#L123)) is a tiny cursor (`u8`, `u32`, `u64`, `i64`) used on the stack, so decoding doesn't allocate.
+  - **`dec`** ([messages.go:128](../../internal/proto/messages.go#L128)) is a tiny cursor (`u8`, `u32`, `u64`, `i64`) used on the stack, so decoding doesn't allocate.
   - **`checkSize`** enforces the exact payload size.
   - Then one block per message, each with a layout table in its doc comment:
     - a struct;
@@ -148,19 +148,19 @@ Arrival order on the one shared `cmds` channel *is* the global order of all clie
   - `ctrl`, the reader's replies to the writer;
   - `done`, closed once to release both goroutines;
   - `client`, which is 0 until login.
-- **`Deliver`** ([session.go:82](../../internal/gateway/session.go#L82)) is a `select` with a `default` case: a send that gives up instead of waiting.
-- **`close`** ([session.go:124](../../internal/gateway/session.go#L124)) runs once, through `sync.Once`. It records `closed`, closes `done` and the socket, unregisters the client, and logs the reason.
-- **`readLoop`** ([session.go:160](../../internal/gateway/session.go#L160)) sets the idle deadline, calls `Next`, then switches on the type:
+- **`Deliver`** ([session.go:86](../../internal/gateway/session.go#L86)) is a `select` with a `default` case: a send that gives up instead of waiting.
+- **`close`** ([session.go:128](../../internal/gateway/session.go#L128)) runs once, through `sync.Once`. It records `closed`, closes `done` and the socket, unregisters the client, and logs the reason.
+- **`readLoop`** ([session.go:164](../../internal/gateway/session.go#L164)) sets the idle deadline, calls `Next`, then switches on the type:
   - `Login` → `handleLogin`;
   - `NewOrder` and `Cancel` → refuse if not logged in, otherwise build an `engine.Command` with **`Client: s.client`** and `submit` it;
   - `Subscribe` → `Reject(Unsupported)` in milestone 3; since milestone 6 it subscribes to market data, with no login needed ([06-market-data.md](06-market-data.md));
   - `Heartbeat` → echo it;
   - anything else → close with a protocol error.
-- **`handleLogin`** ([session.go:273](../../internal/gateway/session.go#L273)) refuses a second login, client 0, and a client id already in use. It sets `client` and registers with the publisher under `closeMu`, so a concurrent `close` either sees the id and unregisters it, or the login notices the session is closed.
-- **`submit`** ([session.go:307](../../internal/gateway/session.go#L307)) sends on `cmds`, or gives up if the session closes. Blocking here is the inbound backpressure.
-- **`readErrorReason`** ([session.go:316](../../internal/gateway/session.go#L316)) turns read errors into log reasons: EOF, idle timeout, protocol error, reset. **`isConnReset`** has a Windows version and an other-platforms version ([decision 010](../decisions/010-windows-gotchas.md)).
-- **`writeLoop`** ([session.go:337](../../internal/gateway/session.go#L337)) selects on `out`, `ctrl` and `done`, encodes into a reused buffer, writes to a 32 KB `bufio.Writer`, and **flushes when both queues are empty**. A `control` with `closeAfter` (a fatal reject) is written and flushed, and then the session is closed.
-- **`appendEvent`** ([session.go:525](../../internal/gateway/session.go#L525)) maps engine events to wire messages, converting enums by casting, which `wire_test.go` makes safe. **`appendControl`** encodes the gateway's own replies.
+- **`handleLogin`** ([session.go:289](../../internal/gateway/session.go#L289)) refuses a second login, client 0, and a client id already in use. It sets `client` and registers with the publisher under `closeMu`, so a concurrent `close` either sees the id and unregisters it, or the login notices the session is closed.
+- **`submit`** ([session.go:350](../../internal/gateway/session.go#L350)) sends on `cmds`, or gives up if the session closes. Blocking here is the inbound backpressure.
+- **`readErrorReason`** ([session.go:359](../../internal/gateway/session.go#L359)) turns read errors into log reasons: EOF, idle timeout, protocol error, reset. **`isConnReset`** has a Windows version and an other-platforms version ([decision 010](../decisions/010-windows-gotchas.md)).
+- **`writeLoop`** ([session.go:380](../../internal/gateway/session.go#L380)) selects on `out`, `ctrl` and `done`, encodes into a reused buffer, writes to a 32 KB `bufio.Writer`, and **flushes when both queues are empty**. A `control` with `closeAfter` (a fatal reject) is written and flushed, and then the session is closed.
+- **`appendEvent`** ([session.go:568](../../internal/gateway/session.go#L568)) maps engine events to wire messages, converting enums by casting, which `wire_test.go` makes safe. **`appendControl`** encodes the gateway's own replies.
 
 ### `internal/server/server.go`: the wiring
 

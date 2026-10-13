@@ -54,6 +54,9 @@ const (
 	// ReasonResendUnavailable: a Resend asked for md_seq values the server's
 	// ring buffer no longer holds; Subscribe again for a fresh snapshot.
 	ReasonResendUnavailable Reason = 105
+	// ReasonTooManyRequests: market-data requests (Subscribe, Resend) beyond
+	// the per-connection rate (review F-005); retry later.
+	ReasonTooManyRequests Reason = 106
 )
 
 func (r Reason) String() string {
@@ -92,6 +95,8 @@ func (r Reason) String() string {
 		return "Unsupported"
 	case ReasonResendUnavailable:
 		return "ResendUnavailable"
+	case ReasonTooManyRequests:
+		return "TooManyRequests"
 	}
 	return fmt.Sprintf("reason(%d)", uint8(r))
 }

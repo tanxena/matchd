@@ -63,11 +63,11 @@ Market data is subject to the same rule as everything else ([decision 012](../de
 
 | message | struct | payload |
 |---|---|---|
-| inbound `Resend` | [messages.go:498](../../internal/proto/messages.go#L498) | instrument, `from_md_seq` |
-| `BookDelta` | [messages.go:528](../../internal/proto/messages.go#L528) | seq, time, instrument, `md_seq`, side, price, new level total |
-| `Trade` | [messages.go:574](../../internal/proto/messages.go#L574) | seq, time, instrument, `md_seq`, match id, aggressor side, price, qty |
-| `Snapshot` | [messages.go:620](../../internal/proto/messages.go#L620) | instrument, `md_seq`, number of levels |
-| `SnapshotLevel` | [messages.go:650](../../internal/proto/messages.go#L650) | instrument, side, price, qty |
+| inbound `Resend` | [messages.go:503](../../internal/proto/messages.go#L503) | instrument, `from_md_seq` |
+| `BookDelta` | [messages.go:533](../../internal/proto/messages.go#L533) | seq, time, instrument, `md_seq`, side, price, new level total |
+| `Trade` | [messages.go:579](../../internal/proto/messages.go#L579) | seq, time, instrument, `md_seq`, match id, aggressor side, price, qty |
+| `Snapshot` | [messages.go:625](../../internal/proto/messages.go#L625) | instrument, `md_seq`, number of levels |
+| `SnapshotLevel` | [messages.go:655](../../internal/proto/messages.go#L655) | instrument, side, price, qty |
 
 There is also a new reject reason, `ResendUnavailable` (105). Each message is still one fixed size.
 
@@ -82,17 +82,17 @@ There is also a new reject reason, `ResendUnavailable` (105). Each message is st
 
   **`oldestAvailable`** ([marketdata.go:47](../../internal/publisher/marketdata.go#L47)) is the oldest `md_seq` still resendable: the larger of `ringFirst` and `mdSeq − size + 1`.
 - **`InitMarketData`** ([marketdata.go:61](../../internal/publisher/marketdata.go#L61)) seeds an instrument's view at startup from the recovered engine.
-- **`Subscribe`/`Resend`** ([marketdata.go:161, 167](../../internal/publisher/marketdata.go#L161)) are called by gateway goroutines. They put a `request` on `p.requests`, or give up if the publisher has stopped. **`Run`** gained a `case r := <-p.requests` that calls **`handle`** ([marketdata.go:178](../../internal/publisher/marketdata.go#L178)):
+- **`Subscribe`/`Resend`** ([marketdata.go:161, 167](../../internal/publisher/marketdata.go#L161)) are called by gateway goroutines. They put a `request` on `p.requests`, or give up if the publisher has stopped. **`Run`** gained a `case r := <-p.requests` that calls **`handle`** ([marketdata.go:183](../../internal/publisher/marketdata.go#L183)):
   - unknown instrument: an `EvReject` with `UnknownInstrument`;
   - subscribe: `sendSnapshot`, then add to `subs`;
-  - resend: nothing if the request is beyond the latest; `EvResendUnavailable` if it's older than the ring; otherwise every ring event from `from` to the latest.
-- **`Snapshot`** ([marketdata.go:219](../../internal/publisher/marketdata.go#L219)) is an immutable copy of one instrument's levels at an `md_seq`. **`sendSnapshot`** ([marketdata.go:234](../../internal/publisher/marketdata.go#L234)) builds it, sorted (bids high to low, asks low to high), and hands it over with `Subscriber.DeliverSnapshot`. The levels never go through the event queue, so a deep book doesn't need a deep queue.
-- **`marketData`** ([marketdata.go:256](../../internal/publisher/marketdata.go#L256)) is called from `route` for each released delta or trade:
+  - resend: nothing if the request is beyond the latest; `EvResendUnavailable` if it's older than the ring, or more than `MaxResend` (4,096) events back (review F-005); otherwise every ring event from `from` to the latest. The gateway also rate-limits each connection's Subscribe and Resend requests (a burst of 32, then 16 per second; beyond that `Reject(TooManyRequests)`), and `Feed` retries a refused one after `RetryDelay`.
+- **`Snapshot`** ([marketdata.go:228](../../internal/publisher/marketdata.go#L228)) is an immutable copy of one instrument's levels at an `md_seq`. **`sendSnapshot`** ([marketdata.go:243](../../internal/publisher/marketdata.go#L243)) builds it, sorted (bids high to low, asks low to high), and hands it over with `Subscriber.DeliverSnapshot`. The levels never go through the event queue, so a deep book doesn't need a deep queue.
+- **`marketData`** ([marketdata.go:265](../../internal/publisher/marketdata.go#L265)) is called from `route` for each released delta or trade:
   1. check the `md_seq` follows the last (logging loudly if not);
   2. apply a delta to the level map;
   3. store the event in the ring;
   4. offer it to every subscriber, dropping closed ones and slow ones.
-- **`offer`** ([marketdata.go:304](../../internal/publisher/marketdata.go#L304)) is a non-blocking deliver; on failure it counts a slow consumer and calls `SlowConsumer()`.
+- **`offer`** ([marketdata.go:313](../../internal/publisher/marketdata.go#L313)) is a non-blocking deliver; on failure it counts a slow consumer and calls `SlowConsumer()`.
 - `route` (in `publisher.go`) now sends deltas and trades to `marketData`, and creates a view on `InstrumentAdded`. `Subscriber` gained **`Closed()`**, and `SlowConsumer` must now be idempotent, because it can be called from both client routing and market-data fan-out.
 
 ### Gateway
@@ -100,9 +100,9 @@ There is also a new reject reason, `ResendUnavailable` (105). Each message is st
 The reader handles `Subscribe` by calling `pub.Subscribe(instrument, session)`, **without requiring login**, and `Resend` by calling `pub.Resend(...)`. `session` implements `Closed()`. **`appendEvent`** encodes `BookDelta`, `Trade` and `ResendUnavailable`, which goes out as a `Reject` with reason 105.
 
 **Snapshots are streamed by the writer, outside the queue.**
-- **`DeliverSnapshot`** ([session.go:95](../../internal/gateway/session.go#L95)) puts the snapshot on a small side channel `snaps` (at most 4 pending), then an `EvSnapshot` marker on `out`. It never blocks.
-- When the writer reaches the marker, **`streamSnapshot`** ([session.go:446](../../internal/gateway/session.go#L446)) takes the snapshot and writes the header and every level frame from it.
-- **`write`** ([session.go:474](../../internal/gateway/session.go#L474)) flushes under the write deadline whenever the buffer is full, so a client that stops reading is disconnected after `WriteTimeout`, while one that reads gets the whole book, however deep. Live events published meanwhile wait in `out`.
+- **`DeliverSnapshot`** ([session.go:99](../../internal/gateway/session.go#L99)) puts the snapshot on a small side channel `snaps` (at most 4 pending), then an `EvSnapshot` marker on `out`. It never blocks.
+- When the writer reaches the marker, **`streamSnapshot`** ([session.go:489](../../internal/gateway/session.go#L489)) takes the snapshot and writes the header and every level frame from it.
+- **`write`** ([session.go:517](../../internal/gateway/session.go#L517)) flushes under the write deadline whenever the buffer is full, so a client that stops reading is disconnected after `WriteTimeout`, while one that reads gets the whole book, however deep. Live events published meanwhile wait in `out`.
 
 The first version queued one event per level, so a book deeper than the queue (4,096 by default) disconnected every subscriber, even fast ones. Streaming fixed that without making the queue grow.
 
@@ -114,14 +114,14 @@ At startup, for each recovered instrument, `Start` sums the resting orders per p
 
 ### Client: `internal/client/feed.go`
 
-- **`Feed`** ([feed.go:26](../../internal/client/feed.go#L26)) holds the state (`awaitingSnapshot`, `loadingLevels`, `live`, `recovering`), the levels still to load, `mdSeq`, the `bids`/`asks` maps, the test hook `Drop`, and `Stats`.
-- **`NewFeed`** ([feed.go:67](../../internal/client/feed.go#L67)) subscribes.
-- **`Apply`** ([feed.go:85](../../internal/client/feed.go#L85)):
+- **`Feed`** ([feed.go:30](../../internal/client/feed.go#L30)) holds the state (`awaitingSnapshot`, `loadingLevels`, `live`, `recovering`), the levels still to load, `mdSeq`, the `bids`/`asks` maps, the test hook `Drop`, and `Stats`.
+- **`NewFeed`** ([feed.go:81](../../internal/client/feed.go#L81)) subscribes.
+- **`Apply`** ([feed.go:99](../../internal/client/feed.go#L99)):
   - `Snapshot` resets the book (only while awaiting one);
   - `SnapshotLevel` fills it, and the Feed goes live after the last one;
   - `BookDelta`/`Trade` go to `sequenced`;
   - `Reject(ResendUnavailable)` re-subscribes.
-- **`sequenced`** ([feed.go:126](../../internal/client/feed.go#L126)):
+- **`sequenced`** ([feed.go:153](../../internal/client/feed.go#L153)):
   - ignored before the snapshot is complete;
   - `md ≤ mdSeq`: a duplicate, ignored;
   - `md > mdSeq+1`: if live, a gap, so send `Resend(mdSeq+1)` and switch to recovering; if already recovering, ignore it (the resend will bring it);
@@ -136,7 +136,7 @@ At startup, for each recovered instrument, `Start` sums the resting orders per p
 
 ### Tests and results
 
-- **`TestMarketDataConvergence`** ([marketdata_test.go:161](../../internal/server/marketdata_test.go#L161)) is **acceptance 4**:
+- **`TestMarketDataConvergence`** ([marketdata_test.go:171](../../internal/server/marketdata_test.go#L171)) is **acceptance 4**:
   - two traders send 1,500 orders each, waiting for each answer;
   - subscriber A joins before trading starts;
   - halfway through, subscriber B joins, with a Feed that **drops every 37th** delta or trade, once;

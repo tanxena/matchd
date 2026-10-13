@@ -172,3 +172,22 @@ func TestFeedIgnoresOtherInstruments(t *testing.T) {
 		t.Fatal("applied another instrument's delta")
 	}
 }
+
+// Review F-005: a Resend refused by the server's rate limit is asked again
+// on the first message after RetryDelay, not abandoned.
+func TestFeedRetriesAThrottledResend(t *testing.T) {
+	p := newPipeFeed(t)
+	p.apply(t, snap(10, 0))
+	p.applyExpect(t, dlt(12, proto.SideBuy, 100, 5), proto.TypeResend) // 11 is missing
+	p.apply(t, Msg{Type: proto.TypeReject, Reject: proto.Reject{Instrument: 7, Reason: proto.ReasonTooManyRequests}})
+	p.apply(t, dlt(13, proto.SideBuy, 100, 6)) // too soon: no request (net.Pipe would block the Feed if it sent one)
+	time.Sleep(RetryDelay + 20*time.Millisecond)
+	payload := p.applyExpect(t, dlt(14, proto.SideBuy, 100, 7), proto.TypeResend) // asks again, from 11
+	var r proto.Resend
+	if r.Decode(payload) != nil || r.FromMDSeq != 11 {
+		t.Fatalf("retried resend %+v", r)
+	}
+	if p.f.Stats.Throttled != 1 || p.f.Stats.Resends != 2 {
+		t.Fatalf("stats %+v", p.f.Stats)
+	}
+}

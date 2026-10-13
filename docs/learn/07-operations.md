@@ -134,7 +134,7 @@ Adding an instrument could be a direct call into the engine's registry. But then
 - **`Server.Close`** ([server.go:346](../../internal/server/server.go#L346)): the order in §1.4.
 - **`Gateway.StopReading`** ([gateway.go:215](../../internal/gateway/gateway.go#L215)): sets `draining`, closes the listener, wakes every reader with `SetReadDeadline(now)`, and waits on the `readers` WaitGroup. The reader loop checks `draining` before and after re-arming its idle deadline, and on a read error, then returns without closing the session.
 - **`Gateway.FinishWriters`** ([gateway.go:240](../../internal/gateway/gateway.go#L240)): closes `finishing`; each writer, once its queues are empty, flushes, lingers and closes. After the timeout, everything left is closed by force.
-- **`session.lingerClose`** ([session.go:505](../../internal/gateway/session.go#L505)): `CloseWrite`, then discard input until EOF or `lingerTimeout` (1 s).
+- **`session.lingerClose`** ([session.go:548](../../internal/gateway/session.go#L548)): `CloseWrite`, then discard input until EOF or `lingerTimeout` (1 s).
 - **`shutdownSnapshot`** ([server.go:400](../../internal/server/server.go#L400)): skipped if snapshots are disabled, durability failed, or nothing changed. Otherwise freeze the stopped engine, `Writer.WriteNow`, thaw.
 - `cmd/engine`: `-http`, `-shutdown-timeout`, and a second signal exits at once.
 
