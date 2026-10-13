@@ -112,8 +112,8 @@ A **crash harness** starts the real program, drives load, kills it, and checks w
   - **`write`** ([writer.go:73](../../internal/snapshot/writer.go#L73)) polls until `durable ≥ seq`, encodes, writes atomically, appends to the manifest (keeping 2), writes the manifest, then calls `prune`.
   - **`prune`** ([writer.go:117](../../internal/snapshot/writer.go#L117)) removes unlisted snapshot files, and, only when 2 are listed, WAL segments below the older snapshot and fill-log segments before its last match.
 - **`filllog.go`:**
-  - **`Match`** ([filllog.go:19](../../internal/snapshot/filllog.go#L19)) holds both sides of one trade.
-  - **`FillLog.Released`** ([filllog.go:121](../../internal/snapshot/filllog.go#L121)) keeps the taker half, and on the maker half appends one record with the match id as its seq.
+  - **`Match`** ([filllog.go:23](../../internal/snapshot/filllog.go#L23)) holds both sides of one trade.
+  - **`FillLog.Released`** ([filllog.go:155](../../internal/snapshot/filllog.go#L155)) keeps the taker half, and on the maker half appends one record with the match id as its seq.
   - The log is a `wal.Log` with `AllowGaps`, and isn't fsynced.
 - **`recover.go`:**
   - **`LoadLatest`** ([recover.go:31](../../internal/snapshot/recover.go#L31)) picks the newest listed snapshot that decodes, falling back to an older one, and finally to none.

@@ -90,6 +90,11 @@ type Options struct {
 	StallThreshold time.Duration
 	// FsyncStalls, if set, counts fsyncs slower than StallThreshold.
 	FsyncStalls *metrics.Counter
+	// NoSyncOnRoll: finish a segment without fsyncing it. Only for a log
+	// that is not part of the durability contract (the fill log, written
+	// on the publisher goroutine, which must never wait on a 64 MiB fsync;
+	// review F-006). The command WAL never sets it.
+	NoSyncOnRoll bool
 }
 
 // Record is one log entry as seen by a replay callback. Payload aliases an
@@ -474,10 +479,12 @@ func (l *Log) roll(first uint64) error {
 	defer l.syncMu.Unlock()
 
 	if l.cur != nil {
-		if err := l.fsync(l.cur); err != nil {
-			return fmt.Errorf("wal: sync before roll: %w", err)
+		if !l.opts.NoSyncOnRoll {
+			if err := l.fsync(l.cur); err != nil {
+				return fmt.Errorf("wal: sync before roll: %w", err)
+			}
+			l.synced.Store(l.appended.Load())
 		}
-		l.synced.Store(l.appended.Load())
 		if err := l.cur.Close(); err != nil {
 			return fmt.Errorf("wal: close segment: %w", err)
 		}

@@ -43,6 +43,10 @@ Match ids in the fill log **may have gaps**: matches whose events were never rel
 
 The fill log is an **audit trail**, not part of the durability contract. Writing it costs one `write` per release batch. Fsyncing it would put a second fsync on every batch. A power failure may cut its tail, and that is allowed: replay-check treats *missing* matches as fine and *wrong or extra* ones as failures. A write failure is logged once and counted, but isn't fatal.
 
+*(Review F-006, two corrections to "not fsynced":)*
+- **Not even at a segment roll.** The fill log reused the WAL's roll, which fsyncs the finished segment, about every 615,000 matches (64 MiB). That ran on the publisher goroutine, which must never block: a 6–20 ms fsync stalled every client's answers. It now opens with `wal.Options{NoSyncOnRoll: true}`, an option only it uses. `TestFillLogNeverFsyncs` rolls 14 segments and counts 0 fsyncs.
+- **Damage doesn't stop the server.** The fill log is opened with the WAL's strict scanner, so damage beyond a torn tail (possible after a power failure, precisely because it isn't fsynced) made `server.Start` fail. An audit file was gating recovery of the real state. Now a damaged fill log is moved aside to `fills.damaged-<unix nanoseconds>`, kept for inspection, a warning is logged, and a fresh one is started. Replay-check sees the older matches as missing, which it allows. `TestDamagedFillLogIsMovedAside` covers it.
+
 ### What replay-check verifies (`snapshot.ReplayCheck`, `engctl replay-check --data DIR`)
 
 It only **reads** the data directory: the WAL is opened read-only, which reports a torn tail without truncating it. The engine must be stopped.

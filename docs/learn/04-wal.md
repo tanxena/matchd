@@ -82,26 +82,26 @@ A process crash loses nothing under *any* policy, because the OS keeps the page 
 
 - **Constants** ([wal.go:40](../../internal/wal/wal.go#L40)): the segment magic `MTCHWAL`, the format version, the 8-byte segment header, the 8-byte record header (length + CRC), and `MaxPayload` = 4 KB. **`castagnoli`** is the CRC table. **`ErrCorrupt`** marks anything recovery must not paper over.
 - **`File`** ([wal.go:62](../../internal/wal/wal.go#L62)): `Write`, `Sync`, `Close`. `*os.File` satisfies it; tests substitute wrappers that count, block or fail `Sync`.
-- **`Log`** ([wal.go:117](../../internal/wal/wal.go#L117)):
+- **`Log`** ([wal.go:122](../../internal/wal/wal.go#L122)):
   - `mu` guards the current file handle and size;
   - `syncMu` serialises `Sync` with segment rolls;
   - the atomics `appended` (written to the OS) and `synced` (fsynced);
   - `pending`, the batch being built, touched only by the appender.
-- **`Open`** ([wal.go:158](../../internal/wal/wal.go#L158)):
+- **`Open`** ([wal.go:163](../../internal/wal/wal.go#L163)):
   1. lists the segments in seq order;
   2. scans each one, calling `replay` for every record;
   3. truncates a torn tail in the last segment, or removes a segment that crashed while its header was being written;
   4. reopens the last segment for appending;
   5. sets both `appended` and `synced` to the last surviving seq. Whatever survived on disk counts as durable.
-- **`scanSegment` / `scanBytes`** ([wal.go:286, 296](../../internal/wal/wal.go#L286)): check the header (magic, version), then loop over records. They check that each record's seq is exactly the previous one + 1, and that the segment's first record matches its file name. `scanBytes` works on bytes in memory, so the fuzzer can call it millions of times without touching the disk.
-- **`parseRecord`** ([wal.go:375](../../internal/wal/wal.go#L375)) decodes one record or describes what is wrong with it. It also reports where the damage ends, which **`tailIsTorn`** uses: everything after it must be zero for the damage to count as a torn write. The long comment there is the torn-tail rule.
-- **`Append`** ([wal.go:416](../../internal/wal/wal.go#L416)) adds a record to `pending`: a placeholder CRC, then seq, time and payload, then the CRC is computed over the body and written in. It panics on a seq gap.
-- **`Flush`** ([wal.go:447](../../internal/wal/wal.go#L447)) rolls to a new segment if needed, writes all of `pending` with one `Write` under `mu`, and then publishes `appended`.
-- **`roll`** ([wal.go:472](../../internal/wal/wal.go#L472)), under `syncMu`:
+- **`scanSegment` / `scanBytes`** ([wal.go:291, 301](../../internal/wal/wal.go#L291)): check the header (magic, version), then loop over records. They check that each record's seq is exactly the previous one + 1, and that the segment's first record matches its file name. `scanBytes` works on bytes in memory, so the fuzzer can call it millions of times without touching the disk.
+- **`parseRecord`** ([wal.go:380](../../internal/wal/wal.go#L380)) decodes one record or describes what is wrong with it. It also reports where the damage ends, which **`tailIsTorn`** uses: everything after it must be zero for the damage to count as a torn write. The long comment there is the torn-tail rule.
+- **`Append`** ([wal.go:421](../../internal/wal/wal.go#L421)) adds a record to `pending`: a placeholder CRC, then seq, time and payload, then the CRC is computed over the body and written in. It panics on a seq gap.
+- **`Flush`** ([wal.go:452](../../internal/wal/wal.go#L452)) rolls to a new segment if needed, writes all of `pending` with one `Write` under `mu`, and then publishes `appended`.
+- **`roll`** ([wal.go:477](../../internal/wal/wal.go#L477)), under `syncMu`:
   1. fsyncs and closes the old segment, so a finished segment is always fully durable;
   2. creates the new one and writes its header;
   3. fsyncs the directory.
-- **`Sync`** ([wal.go:506](../../internal/wal/wal.go#L506)), under `syncMu`:
+- **`Sync`** ([wal.go:513](../../internal/wal/wal.go#L513)), under `syncMu`:
   1. takes `mu` only to read the file handle and `appended`;
   2. releases `mu` and fsyncs, so appends carry on meanwhile;
   3. on success, publishes `synced` as the value read before the fsync. Records written during the fsync aren't counted.

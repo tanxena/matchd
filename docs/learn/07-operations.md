@@ -113,7 +113,7 @@ Adding an instrument could be a direct call into the engine's registry. But then
 ### Where it's recorded
 
 - **`Engine.Run`** ([engine.go:117](../../internal/engine/engine.go#L117)): `start := clock.Now()`, `Step`, `stepped := clock.Now()`, the sends, then `step.Observe(stepped-start)` and `latency.Observe(clock.Now()-start)`. **`SetLatency`** ([engine.go:50](../../internal/engine/engine.go#L50)) wires the two histograms. `Step` now also stamps each event with its command's kind (`Event.Cmd`), and every delta carries the instrument's resting order count (`Event.Orders`, from `Book.Len`, O(1)), both in what was padding.
-- **`Log.Sync`** ([wal.go:506](../../internal/wal/wal.go#L506)): times every fsync; `Flush` counts bytes written.
+- **`Log.Sync`** ([wal.go:513](../../internal/wal/wal.go#L513)): times every fsync; `Flush` counts bytes written.
 - **`Publisher.count`** ([publisher.go:143](../../internal/publisher/publisher.go#L143)): called for each **released** event. It counts the command decided by `Ack`, `Reject`, `Cancelled(requested)` or `InstrumentAdded`, plus fills and trades, and logs the debug line per command. The **`Metrics`** struct ([publisher.go:128](../../internal/publisher/publisher.go#L128)) holds the counters.
 - **`registerMetrics`** ([metrics.go:16](../../internal/server/metrics.go#L16), server package) creates every series and wires the hot-path ones. **`snapshotAge`** ([metrics.go:85](../../internal/server/metrics.go#L85)) reports +Inf when no snapshot exists.
 

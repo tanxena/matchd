@@ -2,9 +2,13 @@ package snapshot
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/tanxena/matchd/internal/book"
 	"github.com/tanxena/matchd/internal/engine"
@@ -106,8 +110,38 @@ type FillLog struct {
 }
 
 // OpenFillLog opens (creating if needed) the fill log in dataDir.
+//
+// The fill log is an audit trail, not part of the durability contract
+// (review F-006), so:
+//   - its segments are never fsynced, not even when one fills and a new one
+//     starts: the publisher goroutine, which writes it, must never wait on
+//     a disk;
+//   - a fill log damaged beyond a torn tail (possible after a power
+//     failure, since it is never fsynced) doesn't stop the server: it is
+//     moved aside to fills.damaged-<unix nanoseconds>, a warning is
+//     logged, and a fresh one is started. Replay-check treats the missing
+//     matches as allowed.
 func OpenFillLog(dataDir string, log *slog.Logger) (*FillLog, error) {
-	l, info, err := wal.Open(fillDir(dataDir), wal.Options{AllowGaps: true, Log: log}, nil)
+	return openFillLog(dataDir, log, wal.Options{})
+}
+
+// openFillLog is OpenFillLog with base options (tests inject file wrappers
+// and small segments).
+func openFillLog(dataDir string, log *slog.Logger, opts wal.Options) (*FillLog, error) {
+	if log == nil {
+		log = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	opts.AllowGaps, opts.NoSyncOnRoll, opts.Log = true, true, log
+	l, info, err := wal.Open(fillDir(dataDir), opts, nil)
+	if errors.Is(err, wal.ErrCorrupt) {
+		aside := fmt.Sprintf("%s.damaged-%d", fillDir(dataDir), time.Now().UnixNano())
+		if rerr := os.Rename(fillDir(dataDir), aside); rerr != nil {
+			return nil, fmt.Errorf("snapshot: fill log damaged (%v), and moving it aside failed: %w", err, rerr)
+		}
+		log.Warn("fill log damaged: moved aside, starting a new one; replay-check will see the older matches as missing",
+			"err", err, "moved_to", aside)
+		l, info, err = wal.Open(fillDir(dataDir), opts, nil)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("snapshot: fill log: %w", err)
 	}

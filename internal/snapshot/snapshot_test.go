@@ -7,10 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync/atomic"
 	"testing"
 
 	"github.com/tanxena/matchd/internal/book"
 	"github.com/tanxena/matchd/internal/engine"
+	"github.com/tanxena/matchd/internal/wal"
 )
 
 var quiet = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -136,4 +138,84 @@ func TestFillLog(t *testing.T) {
 		t.Fatalf("reopen: last %d, %v", f2.LastMatchID(), err)
 	}
 	_ = f2.Close()
+}
+
+// syncCounter wraps a WAL file and counts Sync calls.
+type syncCounter struct {
+	wal.File
+	n *atomic.Int64
+}
+
+func (s syncCounter) Sync() error { s.n.Add(1); return s.File.Sync() }
+
+// Review F-006: the fill log is never fsynced, not even when a segment
+// fills and the next one starts (the publisher goroutine writes it and must
+// never wait on a disk).
+func TestFillLogNeverFsyncs(t *testing.T) {
+	dir := t.TempDir()
+	var syncs atomic.Int64
+	f, err := openFillLog(dir, quiet, wal.Options{SegmentSize: 4 << 10, OpenFile: func(path string) (wal.File, error) {
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		return syncCounter{File: file, n: &syncs}, err
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id := uint64(1); id <= 500; id++ { // 500 x 85-byte records: about 10 segments of 4 KB
+		tk, mk := fillPair(id, engine.Seq(id))
+		f.Released(&tk)
+		f.Released(&mk)
+		if err := f.Flush(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = f.Close()
+	segs, _ := filepath.Glob(filepath.Join(fillDir(dir), "*.log"))
+	if len(segs) < 5 {
+		t.Fatalf("only %d segments: the test didn't roll", len(segs))
+	}
+	if n := syncs.Load(); n != 0 {
+		t.Fatalf("the fill log fsynced %d times across %d segments", n, len(segs))
+	}
+}
+
+// ...and a fill log damaged beyond a torn tail is moved aside, with a
+// warning, instead of stopping the server from starting.
+func TestDamagedFillLogIsMovedAside(t *testing.T) {
+	dir := t.TempDir()
+	f, err := OpenFillLog(dir, quiet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id := uint64(1); id <= 50; id++ {
+		tk, mk := fillPair(id, engine.Seq(id))
+		f.Released(&tk)
+		f.Released(&mk)
+	}
+	if err := f.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	segs, _ := filepath.Glob(filepath.Join(fillDir(dir), "*.log"))
+	data, err := os.ReadFile(segs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	data[len(data)/2] ^= 0xff // a record in the middle, not a torn tail
+	if err := os.WriteFile(segs[0], data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	f2, err := OpenFillLog(dir, quiet)
+	if err != nil {
+		t.Fatalf("a damaged fill log stopped the open: %v", err)
+	}
+	defer func() { _ = f2.Close() }()
+	if f2.LastMatchID() != 0 {
+		t.Fatalf("fresh fill log starts at match %d", f2.LastMatchID())
+	}
+	aside, _ := filepath.Glob(fillDir(dir) + ".damaged-*")
+	if len(aside) != 1 {
+		t.Fatalf("damaged fill log not kept aside: %v", aside)
+	}
 }
