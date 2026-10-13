@@ -71,7 +71,7 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
-  engctl order   [--addr A] --client N [--instrument I] --side buy|sell --type limit|market [--px P] --qty Q [--tif gtc|day] [--clordid C]
+  engctl order   [--addr A] --client N [--instrument I] --side buy|sell --type limit|market [--px P] --qty Q [--tif gtc|day|ioc|fok] [--clordid C]
   engctl cancel  [--addr A] --client N [--instrument I] --id ORDER_ID
   engctl connect [--addr A] --client N [--instrument I]
   engctl book      SYMBOL|ID [--addr A] [--http H] [--depth N]
@@ -178,6 +178,20 @@ func parseSide(s string) (uint8, error) {
 	return 0, fmt.Errorf("side %q: want buy or sell", s)
 }
 
+func parseTIF(s string) (uint8, error) {
+	switch strings.ToLower(s) {
+	case "gtc":
+		return proto.TIFGTC, nil
+	case "day":
+		return proto.TIFDay, nil
+	case "ioc":
+		return proto.TIFIOC, nil
+	case "fok":
+		return proto.TIFFOK, nil
+	}
+	return 0, fmt.Errorf("tif %q: want gtc, day, ioc or fok", s)
+}
+
 func cmdOrder(args []string) error {
 	fs := flag.NewFlagSet("order", flag.ExitOnError)
 	var c common
@@ -186,7 +200,7 @@ func cmdOrder(args []string) error {
 	typ := fs.String("type", "limit", "limit or market")
 	px := fs.Int64("px", 0, "limit price in ticks")
 	qty := fs.Int64("qty", 0, "quantity in lots")
-	tif := fs.String("tif", "gtc", "gtc or day (limit only)")
+	tif := fs.String("tif", "gtc", "gtc, day, ioc or fok (limit orders; a market order with ioc or fok is rejected)")
 	clOrd := fs.Uint64("clordid", 0, "client order id (default: derived from the current time)")
 	_ = fs.Parse(args)
 
@@ -198,16 +212,16 @@ func cmdOrder(args []string) error {
 	switch strings.ToLower(*typ) {
 	case "limit":
 		m.Type = proto.TypeLimit
-		switch strings.ToLower(*tif) {
-		case "gtc":
-			m.TIF = proto.TIFGTC
-		case "day":
-			m.TIF = proto.TIFDay
-		default:
-			return fmt.Errorf("tif %q: want gtc or day", *tif)
+		if m.TIF, err = parseTIF(*tif); err != nil {
+			return err
 		}
 	case "market":
 		m.Type, m.Price = proto.TypeMarket, 0
+		// Passed through only if asked for, so the engine's answer (a
+		// reject: IOC and FOK are limit-only) is what the user sees.
+		if t := strings.ToLower(*tif); t == "ioc" || t == "fok" {
+			m.TIF, _ = parseTIF(t)
+		}
 	default:
 		return fmt.Errorf("type %q: want limit or market", *typ)
 	}
@@ -333,14 +347,14 @@ func cmdConnect(args []string) error {
 		var err error
 		switch f[0] {
 		case "help":
-			fmt.Println(`  buy|sell QTY PX     limit order (gtc)
+			fmt.Println(`  buy|sell QTY PX [ioc|fok|day]   limit order (gtc unless given)
   buy|sell QTY mkt    market order
   cancel ORDER_ID     cancel an order
   hb                  heartbeat
   quit`)
 		case "buy", "sell", "b", "s":
-			if len(f) != 3 {
-				err = errors.New("usage: buy|sell QTY PX|mkt")
+			if len(f) != 3 && len(f) != 4 {
+				err = errors.New("usage: buy|sell QTY PX|mkt [ioc|fok|day]")
 				break
 			}
 			clOrd++
@@ -353,6 +367,11 @@ func cmdConnect(args []string) error {
 				m.Type, m.TIF = proto.TypeMarket, 0
 			} else if m.Price, err = strconv.ParseInt(f[2], 10, 64); err != nil {
 				break
+			}
+			if len(f) == 4 {
+				if m.TIF, err = parseTIF(f[3]); err != nil {
+					break
+				}
 			}
 			err = conn.NewOrder(m)
 		case "cancel":

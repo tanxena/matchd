@@ -26,7 +26,7 @@ func TestArgumentErrors(t *testing.T) {
 		{"order without client", func() error { return cmdOrder([]string{"--side", "buy", "--qty", "1", "--px", "1"}) }, "--client"},
 		{"order bad side", func() error { return cmdOrder([]string{"--client", "1", "--side", "up"}) }, "side"},
 		{"order bad type", func() error { return cmdOrder([]string{"--client", "1", "--side", "buy", "--type", "stop"}) }, "type"},
-		{"order bad tif", func() error { return cmdOrder([]string{"--client", "1", "--side", "buy", "--tif", "ioc"}) }, "tif"},
+		{"order bad tif", func() error { return cmdOrder([]string{"--client", "1", "--side", "buy", "--tif", "gfd"}) }, "tif"},
 		{"cancel without id", func() error { return cmdCancel([]string{"--client", "1"}) }, "--id"},
 	}
 	for _, c := range cases {

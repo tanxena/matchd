@@ -134,8 +134,13 @@ func runClient(addr string, id uint32, clOrdBase uint64, rec *record, rng *rand.
 			}
 			o := proto.NewOrder{Instrument: uint32(1 + rng.IntN(2)), ClOrdID: clOrdBase + n, Side: side, Type: proto.TypeLimit,
 				TIF: proto.TIFGTC, Price: int64(100 + rng.IntN(9) - 4), Qty: int64(1 + rng.IntN(5))}
-			if r == 6 {
+			switch r {
+			case 6:
 				o.Type, o.TIF, o.Price = proto.TypeMarket, 0, 0
+			case 5: // the rest cancelled on arrival (milestone 8)
+				o.TIF = proto.TIFIOC
+			case 4: // all or nothing: often rejected
+				o.TIF, o.Qty = proto.TIFFOK, int64(1+rng.IntN(12))
 			}
 			err = c.NewOrder(o)
 		} else {

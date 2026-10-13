@@ -552,3 +552,41 @@ func TestManyConcurrentClients(t *testing.T) {
 	}
 	t.Logf("%d clients x %d orders: %d acks, %d matches", clients, orders, total, len(matches))
 }
+
+// IOC and FOK over the wire (decision 020).
+func TestIOCAndFOKOverTheWire(t *testing.T) {
+	s := start(t, nil)
+	maker, taker := dial(t, s, 1), dial(t, s, 2)
+	_ = maker.NewOrder(limit(1, 1, proto.SideSell, 100, 5))
+	recv(t, maker, 1)
+
+	ioc := limit(1, 1, proto.SideBuy, 100, 8)
+	ioc.TIF = proto.TIFIOC
+	_ = taker.NewOrder(ioc)
+	got := recv(t, taker, 3)
+	if got[0].Type != proto.TypeAck || got[1].Type != proto.TypeFill || got[2].Type != proto.TypeCancelAck ||
+		got[2].CancelAck.Reason != proto.CancelIOCUnfilled || got[2].CancelAck.Qty != 3 || got[2].CancelAck.Price != 100 {
+		t.Fatalf("IOC: %v", got)
+	}
+
+	_ = maker.NewOrder(limit(1, 2, proto.SideSell, 101, 4))
+	recv(t, maker, 2) // the earlier maker fill, then this ack
+	fok := limit(1, 2, proto.SideBuy, 101, 5)
+	fok.TIF = proto.TIFFOK
+	_ = taker.NewOrder(fok)
+	if m := recv(t, taker, 1)[0]; m.Type != proto.TypeReject || m.Reject.Reason != proto.ReasonFOKNoLiquidity || m.Reject.OrderID != 0 {
+		t.Fatalf("FOK short: %v", m)
+	}
+	fok.ClOrdID, fok.Qty = 3, 4
+	_ = taker.NewOrder(fok)
+	if got := recv(t, taker, 2); got[0].Type != proto.TypeAck || got[1].Type != proto.TypeFill || got[1].Fill.Leaves != 0 {
+		t.Fatalf("FOK filled: %v", got)
+	}
+
+	mkt := proto.NewOrder{Instrument: 1, ClOrdID: 4, Side: proto.SideBuy, Type: proto.TypeMarket, TIF: proto.TIFFOK, Qty: 1}
+	_ = taker.NewOrder(mkt)
+	if m := recv(t, taker, 1)[0]; m.Type != proto.TypeReject || m.Reject.Reason != proto.ReasonInvalidTIF {
+		t.Fatalf("market FOK: %v", m)
+	}
+	quiet(t, taker) // and nothing else: a rejected FOK leaves no trace
+}
