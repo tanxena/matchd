@@ -35,6 +35,10 @@ At least 50 consecutive runs.
 | sequence numbers continue with no gap or reuse | the WAL itself refuses gaps and repeats on open (decision 011); and **no seq answered in run k+1 is ≤ the WAL's last seq after run k**: the restarted engine never reuses a number |
 
 5. The next run starts the binary again on the same directory, so the engine's own recovery runs under test every time.
+6. **Every fifth run, a torn tail** *(review F-007)*. After the checks, the harness appends three bytes, the start of a record's length field, to the newest WAL segment: what a write cut short by a power failure leaves. The next start must find and cut it off: the harness requires `torn_bytes` > 0 in the binary's `recovered` log line. Kills alone essentially never tear a record (below), so this is how the real binary's torn-tail recovery runs under the harness.
+7. **After the last run, the whole history** *(review F-007)*. The engine runs with `-archive`, so segments that snapshots make unnecessary are moved aside instead of deleted, and pruning still happens as usual. The live WAL plus the archive is the complete log from seq 1. It is replayed into an empty engine, and **every acknowledged command and every fill received in any run** is checked against it: the command at its seq, the fill against the match with its id.
+
+**Why steps 6 and 7 were added:** the review measured what the per-run checks above actually covered. In 50 runs, 30% of acknowledged commands had been pruned before their run's check, and 71% of received fills were at or before replay-check's base, so they were checked only for duplicates. 0 runs had a torn tail. A bug corrupting a fill's content before a snapshot boundary would have passed about 70% of the time. Now, one 50-run measurement checked 447,645 of 447,645 acknowledged commands and 401,510 of 401,510 received fills against the full replay, and recovered 9 of 9 injected torn tails. The per-run checks still run too.
 
 ### Why not compare against "the pre-crash book" directly
 
@@ -55,7 +59,7 @@ Fsync behaviour is validated separately, as PRD 5.4 requires:
 **The README must say this plainly**, and must not claim the kill test validates fsync.
 
 Two more gaps:
-- **Torn tails rarely happen under process kills.** A `write` that has completed is in the page cache even if the process dies the next instant, so a kill almost never leaves a half-written record. In the 50-run results, 0 runs needed torn-tail recovery. Torn-tail handling is tested where it can be forced: every byte offset in `internal/wal` (`TestTornTailEveryOffset`), plus server-level restarts after a torn tail.
+- **Torn tails rarely happen under process kills.** A `write` that has completed is in the page cache even if the process dies the next instant, so a kill almost never leaves a half-written record. In the 50-run results, 0 runs needed torn-tail recovery. Torn-tail handling is tested where it can be forced: every byte offset in `internal/wal` (`TestTornTailEveryOffset`), plus server-level restarts after a torn tail. *(Since review F-007, the harness also injects a torn tail every fifth run, which the real binary must cut off: step 6.)*
 - **Snapshot-file atomicity under power loss** can't be tested here, for the same page-cache reason.
 
 ## Results (this laptop, Windows 11)

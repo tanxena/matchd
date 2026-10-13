@@ -96,12 +96,16 @@ restart:  manifest ─▶ newest snapshot ─▶ WAL records after its seq ─�
 - **Replay check** ([decision 014](docs/decisions/014-fill-log-and-replay-check.md)): `engctl replay-check --data DIR` rebuilds the newest snapshot independently, from the older one plus the WAL, and checks every logged fill against the replay.
 
 **What the crash test proves, and what it doesn't** ([decision 015](docs/decisions/015-crash-test.md)):
-- **What it does:** it runs the real binary under load, kills it with `SIGKILL` / `TerminateProcess` 50 times, and after each kill checks:
-  - every acknowledged command is in the WAL at the seq it was acknowledged with;
-  - no fill was delivered twice;
-  - every fill a client received is the one replay produces;
-  - recovery reaches the same state as replaying the WAL from scratch.
-- **What it doesn't:** killing a process leaves the operating system's page cache intact, so data the engine wrote but never fsynced still reaches the disk. **The crash test therefore validates recovery logic (replay, determinism, torn tails, sequence continuity), not power-loss durability under any fsync policy.** It would pass with `fsync=never`, and every third round deliberately runs with `never` to show it.
+- **What it does:** it runs the real binary under load and kills it with `SIGKILL` / `TerminateProcess` 50 times.
+  - **After each kill** it checks:
+    - no acknowledged seq is beyond the WAL's end;
+    - every acknowledged command still in the WAL is the command the client sent;
+    - no fill was delivered twice;
+    - every received fill after replay-check's base is the one replay produces;
+    - recovery reaches the same state as replaying the WAL independently.
+  - **After the last run** it checks every acknowledged command and every received fill, from all runs, against a replay of the whole history from seq 1. Pruned segments are kept aside for this with `-archive`.
+  - **Every fifth run** it leaves a torn record at the WAL's end, which the next start must cut off.
+- **What it doesn't:** killing a process leaves the operating system's page cache intact, so data the engine wrote but never fsynced still reaches the disk. **The crash test therefore validates recovery logic (replay, determinism, sequence continuity, and torn tails, which the harness injects since kills alone don't produce them), not power-loss durability under any fsync policy.** It would pass with `fsync=never`, and every third round deliberately runs with `never` to show it. Torn tails at every byte offset are also covered by unit tests (`internal/wal`).
 - **How fsync behaviour is validated instead:**
   - a test that wraps the WAL file, holds or fails its fsync, and shows no answer leaves before the fsync, under both `always` and `group`;
   - the throughput difference between the policies, in the benchmark.

@@ -95,6 +95,11 @@ type Options struct {
 	// on the publisher goroutine, which must never wait on a 64 MiB fsync;
 	// review F-006). The command WAL never sets it.
 	NoSyncOnRoll bool
+	// ArchiveDir, if set, is where RemoveSegmentsBelow moves the segments a
+	// snapshot has made unnecessary, instead of deleting them: a complete
+	// history for audits and for the crash test (review F-007). It must be
+	// on the same volume (segments are renamed, not copied).
+	ArchiveDir string
 }
 
 // Record is one log entry as seen by a replay callback. Payload aliases an
@@ -604,7 +609,14 @@ func (l *Log) RemoveSegmentsBelow(seq uint64) (int, error) {
 		if lastSeq >= seq || segs[i].path == current {
 			break // segments are in order: nothing later qualifies either
 		}
-		if err := os.Remove(segs[i].path); err != nil {
+		if l.opts.ArchiveDir != "" {
+			if err := os.MkdirAll(l.opts.ArchiveDir, 0o755); err != nil {
+				return removed, fmt.Errorf("wal: archive: %w", err)
+			}
+			if err := os.Rename(segs[i].path, filepath.Join(l.opts.ArchiveDir, filepath.Base(segs[i].path))); err != nil {
+				return removed, fmt.Errorf("wal: archive %s: %w", segs[i].path, err)
+			}
+		} else if err := os.Remove(segs[i].path); err != nil {
 			return removed, fmt.Errorf("wal: remove %s: %w", segs[i].path, err)
 		}
 		removed++

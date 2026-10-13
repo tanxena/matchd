@@ -108,7 +108,7 @@ The first version queued one event per level, so a book deeper than the queue (4
 
 ### Server
 
-At startup, for each recovered instrument, `Start` sums the resting orders per price (**`levelTotals`**, [server.go:474](../../internal/server/server.go#L474)) and calls `InitMarketData` with the instrument's `md_seq`. Config `MDRing` sets the ring size.
+At startup, for each recovered instrument, `Start` sums the resting orders per price (**`levelTotals`**, [server.go:488](../../internal/server/server.go#L488)) and calls `InitMarketData` with the instrument's `md_seq`. Config `MDRing` sets the ring size.
 
 **A real bug was found and fixed here:** when shutdown caught a snapshot in flight, the engine goroutine exited before the writer handed it back, so the books stayed **frozen**, and any later `Engine().State()` panicked. `Close` now thaws a snapshot left on the return channel.
 

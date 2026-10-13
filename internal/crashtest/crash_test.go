@@ -172,9 +172,9 @@ var listenRe = regexp.MustCompile(`msg="gateway listening" addr=(\S+)`)
 
 // startEngine runs the engine binary on dir and returns it once it accepts
 // connections, with its address and a buffer collecting its log.
-func startEngine(t *testing.T, dir, policy string, segBytes int) (*exec.Cmd, string, *strings.Builder) {
+func startEngine(t *testing.T, dir, archive, policy string, segBytes int) (*exec.Cmd, string, *strings.Builder) {
 	t.Helper()
-	cmd := exec.Command(engineBin, "-data", dir, "-listen", "127.0.0.1:0", "-http", "", "-fsync", policy,
+	cmd := exec.Command(engineBin, "-data", dir, "-archive", archive, "-listen", "127.0.0.1:0", "-http", "", "-fsync", policy,
 		"-snapshot-every", "200", "-snapshot-interval", "20ms", "-idle-timeout", "0",
 		"-wal-segment-bytes", fmt.Sprint(segBytes),
 		"-instrument", "XYZ:1:1", "-instrument", "ABC:1:1")
@@ -227,7 +227,13 @@ func TestCrashRecovery(t *testing.T) {
 	if *crashRuns > 0 {
 		runs = *crashRuns
 	}
-	dir := t.TempDir()
+	base := t.TempDir()
+	dir := filepath.Join(base, "data")
+	// Segments pruned behind snapshots are moved here, not deleted (review
+	// F-007), so after the last run every acknowledged command and every
+	// received fill, from every run, can be checked against a replay of
+	// the whole history from seq 1. Same volume as dir: they are renamed.
+	archive := filepath.Join(base, "archive")
 	policies := []string{"always", "group:1ms", "never"}
 	rng := rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), 1)) // a different crash pattern each time...
 	seed := rng.Uint64()
@@ -240,7 +246,12 @@ func TestCrashRecovery(t *testing.T) {
 	var totals struct {
 		answers, fills, checkedInWAL, matchesCompared, snapshotsCompared, tornTails int
 		walPruned                                                                   bool
+		injected                                                                    int // torn tails written into the WAL by the harness
 	}
+	var allAnswers []answer     // every run's, for the whole-history check
+	var allFills []receivedFill // likewise
+	injectedLast := 0           // bytes of torn tail injected after the previous run (0: none)
+	tornRe := regexp.MustCompile(`msg=recovered .*torn_bytes=(\d+)`)
 
 	for run := range runs {
 		policy := policies[run%len(policies)]
@@ -251,7 +262,18 @@ func TestCrashRecovery(t *testing.T) {
 		if run%2 == 1 {
 			segBytes = 64 << 10
 		}
-		cmd, addr, logs := startEngine(t, dir, policy, segBytes)
+		cmd, addr, logs := startEngine(t, dir, archive, policy, segBytes)
+		// A torn tail the harness injected after the previous run must have
+		// been found and cut off by the real binary's recovery.
+		if injectedLast > 0 {
+			m := tornRe.FindStringSubmatch(logs.String())
+			if m == nil || m[1] == "0" {
+				_ = cmd.Process.Kill()
+				t.Fatalf("run %d: the engine didn't report the %d-byte torn tail injected after the previous run:\n%s", run, injectedLast, logs.String())
+			}
+			totals.tornTails++
+			injectedLast = 0
+		}
 
 		rec := &record{live: map[uint32][]uint64{}}
 		var wg sync.WaitGroup // the client goroutines
@@ -367,7 +389,49 @@ func TestCrashRecovery(t *testing.T) {
 
 		totals.answers += len(rec.answers)
 		totals.fills += len(rec.fills)
+		allAnswers = append(allAnswers, rec.answers...)
+		allFills = append(allFills, rec.fills...)
 		prevWALLast = uint64(eng.LastSeq()) // the next run must continue from here
+
+		// 5. Every fifth run, leave a torn tail for the next start: the
+		//    first bytes of a record that never finished (shorter than a
+		//    record header). Kills alone almost never tear a record, since
+		//    a completed write is in the page cache (decision 015).
+		if run%5 == 4 && run+1 < runs {
+			injectedLast = injectTornTail(t, filepath.Join(dir, "wal"))
+			totals.injected++
+		}
+	}
+
+	// 6. The whole history, from seq 1: the live WAL plus every archived
+	//    segment. Every acknowledged command of every run is in it, with
+	//    the content the client sent, and every fill any client received is
+	//    exactly the match a replay from an empty engine produces.
+	cmds, matches := replayHistory(t, archive, dir)
+	for _, a := range allAnswers {
+		c, ok := cmds[a.seq]
+		if !ok {
+			t.Fatalf("acknowledged seq %d is missing from the full history", a.seq)
+		}
+		if c.Kind != a.kind || uint32(c.Client) != a.client ||
+			(a.kind == engine.CmdNewOrder && uint64(c.ClOrdID) != a.clOrd) ||
+			(a.kind == engine.CmdCancel && uint64(c.OrderID) != a.orderID) {
+			t.Fatalf("history record %d is %+v, but the client was answered for %+v", a.seq, c, a)
+		}
+	}
+	for _, rf := range allFills {
+		m, ok := matches[rf.fill.MatchID]
+		if !ok {
+			t.Fatalf("client %d received match %d, which replaying the full history does not produce", rf.client, rf.fill.MatchID)
+		}
+		if err := sameFill(rf.fill, m); err != nil {
+			t.Fatalf("client %d: %v", rf.client, err)
+		}
+	}
+	t.Logf("whole history: %d commands from seq 1; all %d acknowledged commands and all %d received fills checked against it",
+		len(cmds), len(allAnswers), len(allFills))
+	if totals.injected > 0 && totals.tornTails < totals.injected {
+		t.Fatalf("%d torn tails injected, %d recovered", totals.injected, totals.tornTails)
 	}
 	t.Logf("%d kill-and-recover runs: %d acknowledged commands (%d checked against the WAL, the rest pruned behind snapshots), "+
 		"%d fills received (%d compared with the replay), newest snapshot rebuilt from the WAL in %d runs, "+
@@ -377,4 +441,90 @@ func TestCrashRecovery(t *testing.T) {
 	if totals.answers == 0 || totals.fills == 0 {
 		t.Fatal("no traffic: the harness didn't exercise anything")
 	}
+}
+
+// injectTornTail appends the first bytes of a record header to the newest
+// WAL segment, as a write cut short by a crash would leave them, and
+// returns how many.
+func injectTornTail(t *testing.T, walDir string) int {
+	t.Helper()
+	segs, err := filepath.Glob(filepath.Join(walDir, "*.log"))
+	if err != nil || len(segs) == 0 {
+		t.Fatalf("no WAL segment to tear: %v", err)
+	}
+	f, err := os.OpenFile(segs[len(segs)-1], os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	torn := []byte{0x30, 0x00, 0x00} // a length field, unfinished
+	if _, err := f.Write(torn); err != nil {
+		t.Fatal(err)
+	}
+	return len(torn)
+}
+
+// replayHistory copies the archived and live WAL segments into one
+// directory, replays all of it from seq 1 into an empty engine, and returns
+// every command by seq and every match the replay produced.
+func replayHistory(t *testing.T, archive, dataDir string) (map[uint64]engine.Command, map[uint64]snapshot.Match) {
+	t.Helper()
+	full := t.TempDir()
+	for _, src := range []string{filepath.Join(archive, "wal"), filepath.Join(dataDir, "wal")} {
+		segs, _ := filepath.Glob(filepath.Join(src, "*.log"))
+		for _, p := range segs {
+			b, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(full, filepath.Base(p)), b, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	cmds := map[uint64]engine.Command{}
+	matches := map[uint64]snapshot.Match{}
+	eng := engine.New()
+	var evs []engine.Event
+	var taker engine.Event
+	_, info, err := wal.Open(full, wal.Options{ReadOnly: true}, func(r wal.Record) error {
+		var c engine.Command
+		if err := engine.DecodeCommand(r.Payload, &c); err != nil {
+			return err
+		}
+		c.Seq, c.Time = engine.Seq(r.Seq), engine.Timestamp(r.Time)
+		cmds[r.Seq] = c
+		evs = eng.Step(&c, evs[:0])
+		for _, ev := range evs {
+			if ev.Kind != engine.EvFill {
+				continue
+			}
+			if ev.Role == engine.RoleTaker {
+				taker = ev
+				continue
+			}
+			matches[ev.MatchID] = snapshot.MatchOf(taker, ev)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("replaying the full history: %v", err)
+	}
+	if info.FirstSeq != 1 {
+		t.Fatalf("the full history starts at seq %d, not 1: a pruned segment wasn't archived", info.FirstSeq)
+	}
+	return cmds, matches
+}
+
+// sameFill reports how a fill a client received differs from the match.
+func sameFill(f proto.Fill, m snapshot.Match) error {
+	orderID, clOrd, leaves := m.TakerOrder, m.TakerClOrd, m.TakerLeaves
+	if f.Role == proto.RoleMaker {
+		orderID, clOrd, leaves = m.MakerOrder, m.MakerClOrd, m.MakerLeaves
+	}
+	if f.Price != int64(m.Price) || f.Qty != int64(m.Qty) || f.OrderID != uint64(orderID) ||
+		f.ClOrdID != uint64(clOrd) || f.Leaves != int64(leaves) || f.Seq != uint64(m.Seq) {
+		return fmt.Errorf("fill %+v differs from the replay's match %+v", f, m)
+	}
+	return nil
 }

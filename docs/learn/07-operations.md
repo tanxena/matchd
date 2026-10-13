@@ -113,7 +113,7 @@ Adding an instrument could be a direct call into the engine's registry. But then
 ### Where it's recorded
 
 - **`Engine.Run`** ([engine.go:117](../../internal/engine/engine.go#L117)): `start := clock.Now()`, `Step`, `stepped := clock.Now()`, the sends, then `step.Observe(stepped-start)` and `latency.Observe(clock.Now()-start)`. **`SetLatency`** ([engine.go:50](../../internal/engine/engine.go#L50)) wires the two histograms. `Step` now also stamps each event with its command's kind (`Event.Cmd`), and every delta carries the instrument's resting order count (`Event.Orders`, from `Book.Len`, O(1)), both in what was padding.
-- **`Log.Sync`** ([wal.go:513](../../internal/wal/wal.go#L513)): times every fsync; `Flush` counts bytes written.
+- **`Log.Sync`** ([wal.go:518](../../internal/wal/wal.go#L518)): times every fsync; `Flush` counts bytes written.
 - **`Publisher.count`** ([publisher.go:143](../../internal/publisher/publisher.go#L143)): called for each **released** event. It counts the command decided by `Ack`, `Reject`, `Cancelled(requested)` or `InstrumentAdded`, plus fills and trades, and logs the debug line per command. The **`Metrics`** struct ([publisher.go:128](../../internal/publisher/publisher.go#L128)) holds the counters.
 - **`registerMetrics`** ([metrics.go:16](../../internal/server/metrics.go#L16), server package) creates every series and wires the hot-path ones. **`snapshotAge`** ([metrics.go:85](../../internal/server/metrics.go#L85)) reports +Inf when no snapshot exists.
 
@@ -131,11 +131,11 @@ Adding an instrument could be a direct call into the engine's registry. But then
 
 ### Graceful shutdown
 
-- **`Server.Close`** ([server.go:346](../../internal/server/server.go#L346)): the order in §1.4.
+- **`Server.Close`** ([server.go:360](../../internal/server/server.go#L360)): the order in §1.4.
 - **`Gateway.StopReading`** ([gateway.go:215](../../internal/gateway/gateway.go#L215)): sets `draining`, closes the listener, wakes every reader with `SetReadDeadline(now)`, and waits on the `readers` WaitGroup. The reader loop checks `draining` before and after re-arming its idle deadline, and on a read error, then returns without closing the session.
 - **`Gateway.FinishWriters`** ([gateway.go:240](../../internal/gateway/gateway.go#L240)): closes `finishing`; each writer, once its queues are empty, flushes, lingers and closes. After the timeout, everything left is closed by force.
 - **`session.lingerClose`** ([session.go:548](../../internal/gateway/session.go#L548)): `CloseWrite`, then discard input until EOF or `lingerTimeout` (1 s).
-- **`shutdownSnapshot`** ([server.go:400](../../internal/server/server.go#L400)): skipped if snapshots are disabled, durability failed, or nothing changed. Otherwise freeze the stopped engine, `Writer.WriteNow`, thaw.
+- **`shutdownSnapshot`** ([server.go:414](../../internal/server/server.go#L414)): skipped if snapshots are disabled, durability failed, or nothing changed. Otherwise freeze the stopped engine, `Writer.WriteNow`, thaw.
 - `cmd/engine`: `-http`, `-shutdown-timeout`, and a second signal exits at once.
 
 ### `engctl`

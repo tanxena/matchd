@@ -13,8 +13,8 @@ import (
 // on Windows) shuts the engine down gracefully, it exits 0 after writing a
 // shutdown snapshot, and the next start replays no WAL at all.
 func TestSignalShutsDownGracefully(t *testing.T) {
-	dir := t.TempDir()
-	cmd, addr, logs := startEngine(t, dir, "always", 1<<20)
+	dir, archive := t.TempDir(), t.TempDir()
+	cmd, addr, logs := startEngine(t, dir, archive, "always", 1<<20)
 	cl, err := client.Dial(addr, 1, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -61,7 +61,7 @@ func TestSignalShutsDownGracefully(t *testing.T) {
 		}
 	}
 
-	cmd2, _, logs2 := startEngine(t, dir, "always", 1<<20)
+	cmd2, _, logs2 := startEngine(t, dir, archive, "always", 1<<20)
 	_ = cmd2.Process.Kill()
 	_ = cmd2.Wait()
 	if !strings.Contains(logs2.String(), "wal_replayed=0") {

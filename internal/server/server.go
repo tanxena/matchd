@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -68,6 +69,11 @@ type Config struct {
 	// ShutdownTimeout bounds how long Close lets clients receive what is
 	// already queued for them (decision 019). 0 = 5 s.
 	ShutdownTimeout time.Duration
+	// ArchiveDir, if set, keeps the WAL and fill-log segments that snapshots
+	// make unnecessary: they are moved to ArchiveDir/wal and ArchiveDir/fills
+	// instead of deleted (on the same volume as DataDir). A complete history,
+	// for audits and the crash test (review F-007).
+	ArchiveDir string
 	// AdminTimeout bounds how long AddInstrument (POST /instruments) waits
 	// for its command to be durable and answered. 0 = 5 s.
 	AdminTimeout time.Duration
@@ -145,6 +151,9 @@ func Start(cfg Config) (*Server, error) {
 	if cfg.WAL.Log == nil {
 		cfg.WAL.Log = cfg.Log
 	}
+	if cfg.ArchiveDir != "" {
+		cfg.WAL.ArchiveDir = filepath.Join(cfg.ArchiveDir, "wal")
+	}
 	if cfg.ShutdownTimeout <= 0 {
 		cfg.ShutdownTimeout = 5 * time.Second
 	}
@@ -173,7 +182,12 @@ func Start(cfg Config) (*Server, error) {
 	cfg.Log.Info("recovered", "snapshot_seq", rec.SnapshotSeq, "wal_replayed", rec.Replayed,
 		"wal_segments", rec.WAL.Segments, "last_seq", eng.LastSeq(), "torn_bytes", rec.WAL.TornBytes,
 		"last_order_id", eng.LastOrderID(), "last_match_id", eng.LastMatchID())
-	fills, err := snapshot.OpenFillLog(cfg.DataDir, cfg.Log)
+	var fills *snapshot.FillLog
+	if cfg.ArchiveDir != "" {
+		fills, err = snapshot.OpenFillLogArchived(cfg.DataDir, cfg.Log, filepath.Join(cfg.ArchiveDir, "fills"))
+	} else {
+		fills, err = snapshot.OpenFillLog(cfg.DataDir, cfg.Log)
+	}
 	if err != nil {
 		_ = wl.Close()
 		return nil, err

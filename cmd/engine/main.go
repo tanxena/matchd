@@ -85,6 +85,7 @@ func main() {
 	httpAddr := flag.String("http", "127.0.0.1:9100", `HTTP address for /metrics, /healthz and /instruments ("" = off)`)
 	shutdownTimeout := flag.Duration("shutdown-timeout", 5*time.Second, "on shutdown, how long clients get to receive what is queued for them")
 	debug := flag.Bool("debug", false, "debug logging (one line per command)")
+	archive := flag.String("archive", "", "move WAL and fill-log segments pruned behind snapshots into this directory instead of deleting them (same volume as -data)")
 	flag.Parse()
 	policy, err := sequencer.ParsePolicy(*fsync)
 	if err != nil {
@@ -108,7 +109,7 @@ func main() {
 		DataDir: *dataDir, Fsync: policy, Gateway: gw, Instruments: instruments, Log: log,
 		SnapshotEvery: *snapEvery, SnapshotInterval: *snapInterval,
 		WAL:      wal.Options{SegmentSize: *segBytes, StallThreshold: *fsyncStall},
-		HTTPAddr: *httpAddr, ShutdownTimeout: *shutdownTimeout,
+		HTTPAddr: *httpAddr, ShutdownTimeout: *shutdownTimeout, ArchiveDir: *archive,
 	})
 	if err != nil {
 		log.Error("start failed", "err", err)

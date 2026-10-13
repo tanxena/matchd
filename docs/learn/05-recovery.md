@@ -113,7 +113,7 @@ A **crash harness** starts the real program, drives load, kills it, and checks w
   - **`prune`** ([writer.go:117](../../internal/snapshot/writer.go#L117)) removes unlisted snapshot files, and, only when 2 are listed, WAL segments below the older snapshot and fill-log segments before its last match.
 - **`filllog.go`:**
   - **`Match`** ([filllog.go:23](../../internal/snapshot/filllog.go#L23)) holds both sides of one trade.
-  - **`FillLog.Released`** ([filllog.go:155](../../internal/snapshot/filllog.go#L155)) keeps the taker half, and on the maker half appends one record with the match id as its seq.
+  - **`FillLog.Released`** ([filllog.go:161](../../internal/snapshot/filllog.go#L161)) keeps the taker half, and on the maker half appends one record with the match id as its seq.
   - The log is a `wal.Log` with `AllowGaps`, and isn't fsynced.
 - **`recover.go`:**
   - **`LoadLatest`** ([recover.go:31](../../internal/snapshot/recover.go#L31)) picks the newest listed snapshot that decodes, falling back to an older one, and finally to none.
@@ -155,7 +155,10 @@ A **crash harness** starts the real program, drives load, kills it, and checks w
 - **`TestCrashRecovery`** ([crash_test.go:222](../../internal/crashtest/crash_test.go#L222)), for each run:
   1. start the engine, with the policy and segment size rotating;
   2. start three clients, wait 80–400 ms, then `Process.Kill()`;
-  3. check: `ReplayCheck`; every answer's seq is ≤ the WAL's end, and, where still present, the WAL record is that command; no `(match, role)` is received twice across runs; every received fill equals the replayed match; `Recover`'s state equals the replay's; no answered seq reuses a number from before.
+  3. check: `ReplayCheck`; every answer's seq is ≤ the WAL's end, and, where still present, the WAL record is that command; no `(match, role)` is received twice across runs; every received fill equals the replayed match; `Recover`'s state equals the replay's; no answered seq reuses a number from before;
+  4. every fifth run, append a torn record to the WAL, which the next start must report and cut off *(review F-007)*.
+
+  After the last run, **every** answer and fill from all runs is checked against a replay of the whole history from seq 1 (`replayHistory`). The engine runs with `-archive`, so pruned segments are moved aside rather than deleted. The per-run checks alone had compared only about 29% of received fills and had never seen a torn tail.
 
   [Decision 015](../decisions/015-crash-test.md) maps each check to the PRD's wording.
 

@@ -551,6 +551,39 @@ func TestRemoveSegmentsBelow(t *testing.T) {
 	}
 }
 
+// Review F-007: with ArchiveDir set, removed segments are moved there
+// intact, so the live log plus the archive is the whole history.
+func TestRemoveSegmentsBelowArchives(t *testing.T) {
+	dir, archive := t.TempDir(), filepath.Join(t.TempDir(), "wal")
+	writeLog(t, dir, Options{SegmentSize: 300}, 1, 100, 5)
+	opts := Options{SegmentSize: 300, ArchiveDir: archive}
+	l, _, err := Open(dir, opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := l.RemoveSegmentsBelow(50)
+	_ = l.Close()
+	if err != nil || n == 0 {
+		t.Fatalf("removed %d, %v", n, err)
+	}
+	moved := segPaths(t, archive)
+	if len(moved) != n {
+		t.Fatalf("%d segments removed, %d in the archive", n, len(moved))
+	}
+	// Live plus archive, together, replay from seq 1 to 100 without a gap.
+	all := t.TempDir()
+	for _, p := range append(moved, segPaths(t, dir)...) {
+		b, _ := os.ReadFile(p)
+		if err := os.WriteFile(filepath.Join(all, filepath.Base(p)), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, info, err := Open(all, Options{ReadOnly: true}, nil)
+	if err != nil || info.FirstSeq != 1 || info.LastSeq != 100 {
+		t.Fatalf("live + archive: first %d last %d, %v; want 1..100", info.FirstSeq, info.LastSeq, err)
+	}
+}
+
 // ReadOnly reports a torn tail without truncating it.
 func TestReadOnlyLeavesTornTail(t *testing.T) {
 	dir := t.TempDir()

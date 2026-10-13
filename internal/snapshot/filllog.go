@@ -125,6 +125,12 @@ func OpenFillLog(dataDir string, log *slog.Logger) (*FillLog, error) {
 	return openFillLog(dataDir, log, wal.Options{})
 }
 
+// OpenFillLogArchived is OpenFillLog, but segments pruned behind the
+// snapshots are moved into archiveDir instead of deleted (review F-007).
+func OpenFillLogArchived(dataDir string, log *slog.Logger, archiveDir string) (*FillLog, error) {
+	return openFillLog(dataDir, log, wal.Options{ArchiveDir: archiveDir})
+}
+
 // openFillLog is OpenFillLog with base options (tests inject file wrappers
 // and small segments).
 func openFillLog(dataDir string, log *slog.Logger, opts wal.Options) (*FillLog, error) {
