@@ -26,6 +26,13 @@ The record is a `snapshot.Match`:
 
 That is everything both parties were told.
 
+**Matches only, no cancels (confirmed with the user in milestone 8).** The fill log has no record for a cancel of any kind: neither a requested cancel nor a remainder cancelled on arrival (a market order's `Expired`, an IOC's `IOCUnfilled`, [decision 020](020-ioc-and-fok.md)). That's deliberate for v1:
+- **Its job is replay-check on matches.** Fills are what move money between two parties, so they're what an audit must reproduce exactly. A cancel moves nothing.
+- **Cancel-on-arrival is verified elsewhere.** The differential test compares every result, including the quantity cancelled on arrival, with the reference book. The engine's `TestIOCAndFOKEvents` pins which reason each case gets, and `TestIOCAndFOKOverTheWire` checks the `CancelAck` a client receives. *The crash harness doesn't check cancels:* it checks acknowledged commands against the WAL, received fills against the replay, and the recovered state, but not the cancel events a client received.
+- **It would change the format.** A second record type means a type tag on every record, which is a format version change for an audit log that's otherwise complete.
+
+Cancel-on-arrival records are a possible **v2 addition**, for example if the fill log were to become an order-lifecycle audit trail ("show me everything that happened to order 812").
+
 ### Format: the WAL's record format, gaps allowed
 
 The fill log reuses `internal/wal`, with each record's seq set to the match id. That gives checksums, torn-tail handling, segments and crash recovery for free.
