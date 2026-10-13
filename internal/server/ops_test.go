@@ -2,7 +2,6 @@ package server
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"io"
 	"io/fs"
@@ -432,20 +431,26 @@ func copyDir(t *testing.T, from, to string) {
 // Acceptance 5: a subscriber that stops reading is disconnected, and the
 // engine's latency histogram does not move. The same load runs twice, once
 // with only healthy readers and once with a market-data subscriber that
-// never reads; the per-command latency distribution is compared bucket by
-// bucket at p50 and p99.
+// never reads. Two things are checked (review F-008):
+//   - exactly: the engine never found its output channel full during the
+//     slow phase (Engine.OutputBlocked), which is how a slow consumer would
+//     reach the engine at all;
+//   - statistically: p50, p99 and p99.9 from the 3.1%-precise latency
+//     histogram (not the 2-2.5x-wide /metrics buckets) stay within stated
+//     ratios of the baseline's (1.4x, 1.8x, 2.5x; measured 0.90-1.06x under
+//     -race), on 6,000 commands per phase.
 func TestSlowConsumerDoesNotMoveEngineLatency(t *testing.T) {
 	s := start(t, func(c *Config) {
 		c.Gateway.OutQueue = 256
 		c.Gateway.SocketWriteBuffer = 4 << 10
 		c.Gateway.WriteTimeout = 300 * time.Millisecond // how long it may stay behind (decision 022)
 	})
-	run := func() metrics.HistogramSnapshot {
-		before := s.latency.Snapshot()
-		load(t, s, 1500, 7, func() {})
-		return s.latency.Snapshot().Sub(before)
+	run := func() (metrics.LogSnapshot, uint64) {
+		before, blocked := s.fine.Snapshot(), s.Engine().OutputBlocked()
+		load(t, s, 3000, 7, func() {})
+		return s.fine.Snapshot().Sub(before), s.Engine().OutputBlocked() - blocked
 	}
-	baseline := run()
+	baseline, baseBlocked := run()
 
 	nc, err := net.DialTimeout("tcp", s.Addr(), wait)
 	if err != nil {
@@ -457,41 +462,27 @@ func TestSlowConsumerDoesNotMoveEngineLatency(t *testing.T) {
 		t.Fatal(err)
 	}
 	// ...and never reads.
-	slow := run()
+	slow, slowBlocked := run()
 	if slowConsumers(s) == 0 {
 		t.Fatalf("the stalled subscriber was never disconnected: %+v %+v", s.Publisher().Stats(), s.Gateway().Stats())
 	}
-
-	describe := func(h metrics.HistogramSnapshot) string {
-		var b bytes.Buffer
-		for i, c := range h.Counts {
-			le := "+Inf"
-			if i < len(h.Bounds) {
-				le = time.Duration(h.Bounds[i]).String()
-			}
-			if c > 0 {
-				b.WriteString(le + ":" + strconv.FormatUint(c, 10) + " ")
-			}
-		}
-		return b.String()
+	if baseBlocked != 0 || slowBlocked != 0 {
+		t.Errorf("the engine waited on a full output channel %d times in the baseline and %d with the stalled subscriber; want 0",
+			baseBlocked, slowBlocked)
 	}
-	t.Logf("baseline (%d cmds): %s", baseline.Count(), describe(baseline))
-	t.Logf("stalled subscriber (%d cmds): %s", slow.Count(), describe(slow))
-	for _, q := range []float64{0.5, 0.99} {
-		b, w := baseline.QuantileBucket(q), slow.QuantileBucket(q)
-		// One bucket of slack: buckets are 2-2.5x wide, and this runs on a
-		// shared laptop next to the rest of the suite.
-		if w > b+1 {
-			t.Errorf("p%v moved from bucket %d (le %v) to %d (le %v)", q*100, b, bound(baseline, b), w, bound(slow, w))
+	for _, q := range []struct {
+		q     float64
+		ratio float64
+	}{{0.5, 1.4}, {0.99, 1.8}, {0.999, 2.5}} {
+		b, w := baseline.QuantileNS(q.q), slow.QuantileNS(q.q)
+		t.Logf("p%v: baseline %v, stalled subscriber %v (%.2fx; limit %.1fx)", q.q*100, time.Duration(b), time.Duration(w), float64(w)/float64(b), q.ratio)
+		// The ratio, plus 200 ns of slack for the sub-microsecond p50, where
+		// a single cache miss is a large fraction.
+		if float64(w) > q.ratio*float64(b)+200 {
+			t.Errorf("p%v moved from %v to %v, more than %.1fx", q.q*100, time.Duration(b), time.Duration(w), q.ratio)
 		}
 	}
-}
-
-func bound(h metrics.HistogramSnapshot, i int) time.Duration {
-	if i < 0 || i >= len(h.Bounds) {
-		return time.Duration(math.MaxInt64)
-	}
-	return time.Duration(h.Bounds[i])
+	t.Logf("%d and %d commands", baseline.Count(), slow.Count())
 }
 
 // A rejected AddInstrument leaves no spec behind in the publisher, and

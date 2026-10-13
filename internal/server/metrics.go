@@ -28,6 +28,8 @@ func (s *Server) registerMetrics() {
 	// The same span in a log-linear histogram, served as JSON at
 	// GET /debug/latency rather than in /metrics: the benchmark reads its
 	// quantiles and maximum to within 3.1% (decision 021).
+	r.CounterFunc("matchd_engine_output_blocked_total",
+		"Event sends that found the engine's output channel full: the engine waited for the publisher.", s.eng.OutputBlocked)
 	s.fine = metrics.NewLogHistogram()
 	s.eng.SetFineLatency(s.fine)
 

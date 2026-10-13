@@ -58,7 +58,7 @@ When a network packet or disk completion arrives, the CPU runs an **interrupt** 
 
 ### The engine side
 
-- **`SetFineLatency`** ([engine.go:57](../../internal/engine/engine.go#L57)) and **`Run`** ([engine.go:117](../../internal/engine/engine.go#L117)): `Run` now computes `took := clock.Now() - start` once, observes it in the `/metrics` histogram, then in the fine one: `e.fine.Observe(took)`. The fine observation comes **after** the closing clock read, so it isn't part of the span it measures.
+- **`SetFineLatency`** ([engine.go:67](../../internal/engine/engine.go#L67)) and **`Run`** ([engine.go:127](../../internal/engine/engine.go#L127)): `Run` now computes `took := clock.Now() - start` once, observes it in the `/metrics` histogram, then in the fine one: `e.fine.Observe(took)`. The fine observation comes **after** the closing clock read, so it isn't part of the span it measures.
 - **`LogHistogram`** ([loghist.go:22](../../internal/metrics/loghist.go#L22)) has 1,152 atomic counters and a sum.
   - **`logIndex`** ([loghist.go:41](../../internal/metrics/loghist.go#L41)): values under 64 get their own bucket. Otherwise:
 

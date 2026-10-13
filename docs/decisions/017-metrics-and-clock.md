@@ -61,6 +61,7 @@ The boundaries are decided once. *(Amended in milestone 9, below: the benchmark 
 | `matchd_matching_latency_seconds` | engine goroutine | per command, dequeue → last event sent: PRD 7.1's matching-core latency. It includes handing the events to the publisher, so an engine blocked by a downstream would show up here (acceptance 5) |
 | `matchd_matching_step_seconds` | engine goroutine | `Step` alone: the matching work. Added beside the PRD's metric because the two differ by the cost of the handoff |
 | `matchd_wal_fsync_seconds` | WAL | every fsync, whoever calls it (sequencer, group syncer, startup) |
+| `matchd_engine_output_blocked_total` | engine goroutine | *(review F-008)* event sends that found the output channel full: the engine had to wait for the publisher, which is how a stalled consumer would reach matching latency |
 | `matchd_wal_fsync_stalls_total`, `matchd_wal_fsync_in_progress_seconds` | WAL | *(milestone 9, [decision 022](022-slow-consumers-and-durability-stalls.md))* fsyncs slower than `-fsync-stall` (25 ms), and the age of the fsync running now, so a stalled disk is visible rather than inferred |
 | `matchd_wal_written_bytes_total`, `matchd_durable_seq` | WAL, durable seq | read at scrape time |
 | `matchd_snapshot_age_seconds`, `matchd_snapshots_total{result}` | snapshot writer | age at scrape time; **+Inf when no snapshot exists**, so an age alert fires instead of staying silent |
@@ -131,4 +132,4 @@ Milestone 2's ~0.3 µs was a hot loop of `Step` with nothing else in the system.
 
 `TestMetricsCountOnlyDurableCommands`: with fsync held, the engine has executed the order but the counter is still 0 and no debug line was logged.
 
-`TestSlowConsumerDoesNotMoveEngineLatency` (**acceptance 5**): the same load with and without a stalled subscriber. The subscriber is disconnected, and the p50 and p99 buckets stay within one of the baseline. A planted bug where a slow subscriber blocks the publisher fails this test.
+`TestSlowConsumerDoesNotMoveEngineLatency` (**acceptance 5**): the same load with and without a stalled subscriber. The subscriber is disconnected, and the p50 and p99 buckets stay within one of the baseline. A planted bug where a slow subscriber blocks the publisher fails this test. *(Review F-008: one bucket of slack on buckets 2–2.5× wide let up to about a 4× shift pass. The test now asserts exactly that the engine never waited on a full output channel, counted by the new `matchd_engine_output_blocked_total`. It compares p50, p99 and p99.9 from the 3.1% log-linear histogram within 1.4×, 1.8× and 2.5×.)*

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/tanxena/matchd/internal/book"
@@ -36,6 +37,11 @@ type Engine struct {
 	// fine records the same span as latency, to within 3.1%, for the
 	// benchmark (GET /debug/latency, decision 021).
 	fine *metrics.LogHistogram
+	// outBlocked counts event sends that found the output channel full,
+	// so the engine had to wait for the publisher: what a stalled
+	// consumer downstream would show up as (review F-008). Written by Run,
+	// read by /metrics and tests.
+	outBlocked atomic.Uint64
 }
 
 // SetLatency makes Run record, for every command:
@@ -48,6 +54,10 @@ type Engine struct {
 //
 // Either may be nil. Call before Run.
 func (e *Engine) SetLatency(latency, step *metrics.Histogram) { e.latency, e.step = latency, step }
+
+// OutputBlocked is the number of event sends that found Run's output
+// channel full and had to wait for the publisher. Safe from any goroutine.
+func (e *Engine) OutputBlocked() uint64 { return e.outBlocked.Load() }
 
 // SetFineLatency makes Run also record latency's span in h, a log-linear
 // histogram precise to 3.1% at any scale (the benchmark's source for
@@ -152,7 +162,12 @@ func (e *Engine) Run(in <-chan Command, out chan<- Event, snap *SnapshotHooks) {
 			buf = e.Step(&c, buf[:0])
 			stepped := clock.Now()
 			for i := range buf {
-				out <- buf[i]
+				select {
+				case out <- buf[i]:
+				default: // full: count it, then wait
+					e.outBlocked.Add(1)
+					out <- buf[i]
+				}
 			}
 			e.step.Observe(stepped - start)
 			took := clock.Now() - start

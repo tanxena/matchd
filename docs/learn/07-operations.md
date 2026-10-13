@@ -112,10 +112,10 @@ Adding an instrument could be a direct call into the engine's registry. But then
 
 ### Where it's recorded
 
-- **`Engine.Run`** ([engine.go:117](../../internal/engine/engine.go#L117)): `start := clock.Now()`, `Step`, `stepped := clock.Now()`, the sends, then `step.Observe(stepped-start)` and `latency.Observe(clock.Now()-start)`. **`SetLatency`** ([engine.go:50](../../internal/engine/engine.go#L50)) wires the two histograms. `Step` now also stamps each event with its command's kind (`Event.Cmd`), and every delta carries the instrument's resting order count (`Event.Orders`, from `Book.Len`, O(1)), both in what was padding.
+- **`Engine.Run`** ([engine.go:127](../../internal/engine/engine.go#L127)): `start := clock.Now()`, `Step`, `stepped := clock.Now()`, the sends, then `step.Observe(stepped-start)` and `latency.Observe(clock.Now()-start)`. **`SetLatency`** ([engine.go:56](../../internal/engine/engine.go#L56)) wires the two histograms. `Step` now also stamps each event with its command's kind (`Event.Cmd`), and every delta carries the instrument's resting order count (`Event.Orders`, from `Book.Len`, O(1)), both in what was padding.
 - **`Log.Sync`** ([wal.go:518](../../internal/wal/wal.go#L518)): times every fsync; `Flush` counts bytes written.
 - **`Publisher.count`** ([publisher.go:143](../../internal/publisher/publisher.go#L143)): called for each **released** event. It counts the command decided by `Ack`, `Reject`, `Cancelled(requested)` or `InstrumentAdded`, plus fills and trades, and logs the debug line per command. The **`Metrics`** struct ([publisher.go:128](../../internal/publisher/publisher.go#L128)) holds the counters.
-- **`registerMetrics`** ([metrics.go:16](../../internal/server/metrics.go#L16), server package) creates every series and wires the hot-path ones. **`snapshotAge`** ([metrics.go:85](../../internal/server/metrics.go#L85)) reports +Inf when no snapshot exists.
+- **`registerMetrics`** ([metrics.go:16](../../internal/server/metrics.go#L16), server package) creates every series and wires the hot-path ones. **`snapshotAge`** ([metrics.go:87](../../internal/server/metrics.go#L87)) reports +Inf when no snapshot exists.
 
 ### The HTTP side (`internal/server`)
 
@@ -151,7 +151,7 @@ Adding an instrument could be a direct call into the engine's registry. But then
 | `TestForcedQPCFallback` | QPC path works, 78–94 ns per read, 0 allocations |
 | `TestRunRecordsLatencyWithoutAllocating` | 2 heap allocations over 20,000 commands (runtime background noise; a planted per-command allocation shows 40,006) |
 | `TestMetricsEndpoint`, `TestMetricsCountOnlyDurableCommands` | every series correct; nothing counted before its fsync |
-| `TestSlowConsumerDoesNotMoveEngineLatency` (**acceptance 5**) | stalled subscriber disconnected; p50 and p99 in the same buckets as the baseline (e.g. 3,000 commands each, p50 ≤ 50 µs under `-race`) |
+| `TestSlowConsumerDoesNotMoveEngineLatency` (**acceptance 5**) | stalled subscriber disconnected; *(since review F-008)* the engine never found its output channel full (`Engine.OutputBlocked` = 0), and p50/p99/p99.9 from the 3.1% histogram within 1.4×/1.8×/2.5× of the baseline (measured 0.90–1.06× under `-race`, 6,000 commands each). Before, it compared only p50 and p99 buckets 2–2.5× wide, with a bucket of slack: up to about a 4× shift passed |
 | `TestInstrumentEndpoints`, `TestAdminRejectForgetsSpec`, `TestHealthzAfterDurabilityFailure` | as in decision 018 |
 | `TestGracefulShutdownDrainsAndSnapshots` | e.g. 1,002 of 2,000 pipelined orders accepted before shutdown, all 1,002 answered; restart replayed 0 WAL records |
 | `TestShutdownDoesNotResetAClientStillSending` | every ack readable after shutdown; **0** without the lingering close |
