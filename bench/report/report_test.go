@@ -92,6 +92,13 @@ func TestDisturbedRunsAreExcluded(t *testing.T) {
 
 func TestRenderStatesHardwareAndFootnote(t *testing.T) {
 	runs := append(fixture("full", "mix", "resting", 900, 910, 920, 930, 940), fixture("full", "mix", "crossing", 1000, 1010, 1020, 1030, 1040)...)
+	// A suite starts with a clock run, which pins only itself and has no
+	// load: the pinning and protocol must still come from a load run.
+	clock := *runs[0]
+	clock.ID, clock.Table, clock.Config, clock.Order, clock.Load = "clock", "clock", "clock", 0, nil
+	clock.Pinning = result.Pinning{LoadgenMask: 0x0F, LoadgenReadBack: 0x0F}
+	clock.Clock = &result.Clock{Source: "tsc", CostNS: 15.5, Reads: 1000, Resolution: 12}
+	runs = append(runs, &clock)
 	out := render(runs, false)
 	for _, want := range []string{
 		"Test CPU, 4 physical cores, 8 logical CPUs",
@@ -103,6 +110,8 @@ func TestRenderStatesHardwareAndFootnote(t *testing.T) {
 		"| crossing¹ |",
 		"engine-line", "loadgen-line",
 		"Commit `aaaaaaaaaaaa`",
+		"30s warmup discarded, 1m0s measured",
+		"| full (high performance) | tsc | 15.5 |",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)

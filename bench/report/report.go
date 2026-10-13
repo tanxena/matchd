@@ -286,6 +286,18 @@ func (d *doc) first(suite string) *result.Run {
 	return best
 }
 
+// firstLoadRun is a suite's first load run: the pinning and protocol come
+// from one (a clock run pins only itself and has no warmup).
+func (d *doc) firstLoadRun(suite string) *result.Run {
+	var best *result.Run
+	for _, r := range d.runs {
+		if r.Suite == suite && r.Load != nil && (best == nil || r.Order < best.Order) {
+			best = r
+		}
+	}
+	return best
+}
+
 func planLabel(p sysinfo.Power) string {
 	s := fmt.Sprintf("%q power plan (%s)", p.SchemeName, p.Personality)
 	if p.Overlay != "" {
@@ -341,7 +353,11 @@ func (d *doc) hardware(main string) {
 			s.med, s.hi, worst, result.MaxOtherCPU)
 	}
 
-	p := r.Pinning
+	lr := d.firstLoadRun(main)
+	if lr == nil {
+		return
+	}
+	p := lr.Pinning
 	if p.EngineMask != 0 {
 		shared := "no physical core is shared (verified from the OS's processor topology)"
 		if len(p.SharedCores) > 0 {
@@ -350,8 +366,7 @@ func (d *doc) hardware(main string) {
 		d.p("**Pinning:** engine on logical CPUs %s (physical cores %s), load generator on %s (cores %s), with the process affinity mask (as `start /affinity` sets it), read back after setting; %s. Both share the L3 cache and memory bandwidth.\n\n",
 			cpuRange(sysinfo.MaskCPUs(p.EngineMask)), coresOf(m, p.EngineMask), cpuRange(sysinfo.MaskCPUs(p.LoadgenMask)), coresOf(m, p.LoadgenMask), shared)
 	}
-	t := r
-	if t.Load != nil {
+	if t := lr; t.Load != nil {
 		d.p("**Protocol** (PRD 7): a fresh engine per run; %v warmup discarded, %v measured; each configuration run %s times, interleaved round by round with the other configurations, with a cooldown between runs. Cells are the **median (min–max) across runs**, never the best run. Commit `%s`.\n\n",
 			time.Duration(t.Load.RequestedWarmupNS), time.Duration(t.Load.RequestedNS), runsPerConfig(d, main), shortCommit(t.GitCommit))
 	}
