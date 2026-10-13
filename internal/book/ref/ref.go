@@ -23,6 +23,19 @@ type Book struct {
 	instr book.Instrument
 	bids  []book.RestingOrder // highest price first; FIFO within a price
 	asks  []book.RestingOrder // lowest price first; FIFO within a price
+	// group is every book a client order id must be unique across (Link):
+	// one engine's instruments (PRD 5.1, review F-003). nil: this book.
+	group []*Book
+}
+
+// Link makes client order ids unique per client across all of books: a
+// book refuses an order whose (client, client order id) is live in any of
+// them. The real book shares one index (book.ClOrdIDs); this one simply
+// looks through every linked book's orders.
+func Link(books ...*Book) {
+	for _, b := range books {
+		b.group = books
+	}
 }
 
 // New returns an empty reference book.
@@ -95,10 +108,16 @@ func (b *Book) Submit(o book.Order, fills []book.Fill) (book.Result, []book.Fill
 	if r := validate(o); r != book.RejectNone {
 		return book.Result{Reject: r}, fills
 	}
-	for _, list := range [][]book.RestingOrder{b.bids, b.asks} {
-		for _, r := range list {
-			if r.Client == o.Client && r.ClOrdID == o.ClOrdID {
-				return book.Result{Reject: book.RejectDuplicateClientOrderID}, fills
+	group := b.group
+	if group == nil {
+		group = []*Book{b}
+	}
+	for _, g := range group {
+		for _, list := range [][]book.RestingOrder{g.bids, g.asks} {
+			for _, r := range list {
+				if r.Client == o.Client && r.ClOrdID == o.ClOrdID {
+					return book.Result{Reject: book.RejectDuplicateClientOrderID}, fills
+				}
 			}
 		}
 	}

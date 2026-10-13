@@ -50,6 +50,12 @@ The duplicate-client-order-id check runs only after an order passes validation.
 
 A new order whose `(client_id, client_order_id)` matches a **resting** order is rejected with `DuplicateClientOrderID`. This applies to market orders too, because the rule says "a `NewOrder`". Once the original order has left the book, by full fill or cancel, the id may be reused. Different clients may use the same client order id.
 
+**Across instruments (review F-003).** PRD 5.1 says unique "per client among live orders": that client's live orders on *every* instrument. Until the review, each book checked only its own orders, so client 7 could rest client order id 5 on two instruments at once.
+- **Now:** the engine keeps one `book.ClOrdIDs`, the live (client, client order id) pairs of all its books, and every book shares it (`Book.Share`). A book checks it before accepting an order, adds its resting orders and removes them as they leave. A restored engine rebuilds it from the restored books' orders.
+- **The reference book** implements the same rule independently: linked reference books (`ref.Link`) look through each other's orders. `TestDifferentialAcrossInstruments` spreads the command stream over two instruments in both implementations. The engine-level test is `TestClientOrderIDUniqueAcrossInstruments`.
+- **This changes reject behaviour:** a `NewOrder` reusing a live client order id on a *different* instrument is now rejected with `DuplicateClientOrderID`, where it used to be accepted.
+- **The WAL format is unaffected.** The log records commands, not outcomes, and no existing log is being replayed. A log written before this change would replay with the new rule and could diverge from what was acknowledged then.
+
 ## Cancel is scoped to the owning client
 
 `Cancel(client, order_id)` succeeds only if the order is resting **and** belongs to `client`. Every other case returns `UnknownOrder`:

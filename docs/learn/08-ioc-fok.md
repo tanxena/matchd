@@ -65,17 +65,17 @@ The new TIFs are 3 and 4, not 2 and 3. **2 is `Day`**, and has been in every log
 
 ### The book: `internal/book/book.go`
 
-- **`Submit`** ([book.go:171](../../internal/book/book.go#L171)): after validation and the duplicate check, `if o.TIF == FOK && !b.canFill(&o)` returns the reject before anything is touched. After matching, `o.Type == Market || o.TIF == IOC` puts the remainder in `Expired` instead of resting it. A FOK with a remainder at that point would mean the check was wrong, so it **panics** rather than rest part of an all-or-nothing order.
-- **`canFill`** ([book.go:247](../../internal/book/book.go#L247)) and **`fillCheck`** ([book.go:254](../../internal/book/book.go#L254)): the walk from §1.3. The ladder keeps the best level **last** (decision 001), so it iterates from the end. `fillCheck` also returns how many levels it visited, which the bound test checks; `canFill` discards it.
+- **`Submit`** ([book.go:189](../../internal/book/book.go#L189)): after validation and the duplicate check, `if o.TIF == FOK && !b.canFill(&o)` returns the reject before anything is touched. After matching, `o.Type == Market || o.TIF == IOC` puts the remainder in `Expired` instead of resting it. A FOK with a remainder at that point would mean the check was wrong, so it **panics** rather than rest part of an all-or-nothing order.
+- **`canFill`** ([book.go:265](../../internal/book/book.go#L265)) and **`fillCheck`** ([book.go:272](../../internal/book/book.go#L272)): the walk from §1.3. The ladder keeps the best level **last** (decision 001), so it iterates from the end. `fillCheck` also returns how many levels it visited, which the bound test checks; `canFill` discards it.
 
 ### The reference book: `internal/book/ref/ref.go`
 
-- **`acceptable`** ([ref.go:82](../../internal/book/ref/ref.go#L82)): "would this order trade at this price?", written separately from the real book's `crosses`.
-- **`Submit`** ([ref.go:94](../../internal/book/ref/ref.go#L94)): for a FOK, adds up resting orders in priority order (order by order, not level by level), stopping at an unacceptable price or once covered. Same rule, different code: that's what lets the differential test catch a mistake in either.
+- **`acceptable`** ([ref.go:95](../../internal/book/ref/ref.go#L95)): "would this order trade at this price?", written separately from the real book's `crosses`.
+- **`Submit`** ([ref.go:107](../../internal/book/ref/ref.go#L107)): for a FOK, adds up resting orders in priority order (order by order, not level by level), stopping at an unacceptable price or once covered. Same rule, different code: that's what lets the differential test catch a mistake in either.
 
 ### The engine: `internal/engine/engine.go`
 
-- **`newOrder`** ([engine.go:215](../../internal/engine/engine.go#L215)): unchanged for FOK. A book reject is an engine `Reject`, and the order id is only committed on acceptance, so a rejected FOK uses no id. For an expired remainder it picks the reason: `CancelExpired` for a market order, `CancelIOCUnfilled` for a limit (IOC). The cancel event now carries the order's price (0 for a market order, as before).
+- **`newOrder`** ([engine.go:220](../../internal/engine/engine.go#L220)): unchanged for FOK. A book reject is an engine `Reject`, and the order id is only committed on acceptance, so a rejected FOK uses no id. For an expired remainder it picks the reason: `CancelExpired` for a market order, `CancelIOCUnfilled` for a limit (IOC). The cancel event now carries the order's price (0 for a market order, as before).
 
 ### The wire and the CLI
 

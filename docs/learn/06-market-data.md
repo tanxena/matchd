@@ -51,7 +51,7 @@ Market data is subject to the same rule as everything else ([decision 012](../de
 
 ### Engine: md_seq and trades
 
-- **`nextMD`** ([engine.go:191](../../internal/engine/engine.go#L191)) bumps and returns the instrument's counter. `e.mdSeq` grows alongside `e.books`.
+- **`nextMD`** ([engine.go:196](../../internal/engine/engine.go#L196)) bumps and returns the instrument's counter. `e.mdSeq` grows alongside `e.books`.
 - **`delta`** stamps every `BookDelta` with `nextMD`.
 - In **`newOrder`**, each match now appends three events: the taker's fill, the maker's fill, and an **`EvTrade`** print (client 0, aggressor side, match id, `md_seq`).
 - **`Snapshot`/`State`/`Restore`** carry each instrument's `MDSeq`.

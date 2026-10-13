@@ -18,6 +18,10 @@ type Engine struct {
 	books   []*book.Book            // indexed by InstrumentID; [0] is unused
 	mdSeq   []uint64                // per instrument: md_seq of its last market-data event (decision 016)
 	symbols map[string]InstrumentID // registry: symbol -> id
+	// clOrds is the live (client, client order id) pairs across every
+	// book: PRD 5.1 makes a client order id unique per client among its
+	// live orders on any instrument (review F-003). Every book shares it.
+	clOrds *book.ClOrdIDs
 
 	lastSeq     Seq          // Seq of the last command applied
 	lastOrderID book.OrderID // last order id given to an accepted order
@@ -58,6 +62,7 @@ func New() *Engine {
 		books:   make([]*book.Book, 1), // slot 0 reserved: InstrumentID 0 is invalid
 		mdSeq:   make([]uint64, 1),
 		symbols: make(map[string]InstrumentID),
+		clOrds:  book.NewClOrdIDs(),
 	}
 }
 
@@ -323,6 +328,9 @@ func (e *Engine) addInstrument(c *Command, out []Event) []Event {
 	bk, err := book.New(c.Spec)
 	if err != nil { // unreachable: Spec was validated above
 		panic(fmt.Sprintf("engine: book.New after validation: %v", err))
+	}
+	if err := bk.Share(e.clOrds); err != nil { // unreachable: a new book is empty
+		panic(fmt.Sprintf("engine: sharing a new book's client order ids: %v", err))
 	}
 	id := InstrumentID(len(e.books))
 	e.books = append(e.books, bk)

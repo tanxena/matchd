@@ -337,3 +337,39 @@ func TestStepPanicsOnUnknownKind(t *testing.T) {
 	}()
 	e.Step(&engine.Command{Seq: 1, Kind: 99}, nil)
 }
+
+// Review F-003: a client order id is unique per client among its live
+// orders on every instrument (PRD 5.1), not per instrument; and the rule
+// survives a snapshot restore.
+func TestClientOrderIDUniqueAcrossInstruments(t *testing.T) {
+	d := newDriver(t)
+	a, b := d.addInstrument("AAA"), d.addInstrument("BBB")
+	if ev := d.step(limit(a, 7, 5, book.Buy, 100, 1)); ev[0].Kind != engine.EvAck {
+		t.Fatalf("first order: %v", fmtEvents(ev))
+	}
+	ev := d.step(limit(b, 7, 5, book.Buy, 100, 1))
+	if len(ev) != 1 || ev[0].Kind != engine.EvReject || ev[0].Reason != book.RejectDuplicateClientOrderID {
+		t.Fatalf("client 7 reused live client order id 5 on another instrument: %v", fmtEvents(ev))
+	}
+	if ev := d.step(limit(b, 8, 5, book.Buy, 100, 1)); ev[0].Kind != engine.EvAck {
+		t.Fatalf("another client's id 5: %v", fmtEvents(ev))
+	}
+
+	// After a snapshot and restore the rule still holds across instruments.
+	st := d.e.State()
+	r, err := engine.Restore(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.e = r
+	if ev := d.step(limit(b, 7, 5, book.Sell, 200, 1)); ev[0].Kind != engine.EvReject || ev[0].Reason != book.RejectDuplicateClientOrderID {
+		t.Fatalf("after restore: %v", fmtEvents(ev))
+	}
+	// Once the first order is gone (cancelled), id 5 is free on any instrument.
+	if ev := d.step(cancel(a, 7, 1)); ev[0].Kind != engine.EvCancelled {
+		t.Fatalf("cancel: %v", fmtEvents(ev))
+	}
+	if ev := d.step(limit(b, 7, 5, book.Sell, 200, 1)); ev[0].Kind != engine.EvAck {
+		t.Fatalf("id 5 after its order was cancelled: %v", fmtEvents(ev))
+	}
+}

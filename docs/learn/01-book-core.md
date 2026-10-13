@@ -64,7 +64,7 @@ The result is `Filled=20, Rested=0`, with three fills. With a limit of **100** i
 There are two ids:
 
 - **`order_id`** is assigned by the engine (the caller of the book) and is unique forever. Cancels use it.
-- **`client_order_id`** is the client's own label. PRD 5.1: it must be unique **among that client's live orders**. While your order with client order id 77 is resting, another new order with 77 is rejected (`DuplicateClientOrderID`). Once the first one has been filled or cancelled, 77 is free again. Two different clients may both use 77.
+- **`client_order_id`** is the client's own label. PRD 5.1: it must be unique **among that client's live orders**, on every instrument (enforced across instruments since review F-003, decision 003; each book shares one `book.ClOrdIDs`). While your order with client order id 77 is resting, another new order with 77 is rejected (`DuplicateClientOrderID`). Once the first one has been filled or cancelled, 77 is free again. Two different clients may both use 77.
 
 ### 1.5 Why a second, "dumb" implementation: differential testing
 
@@ -135,11 +135,11 @@ Three things make this trustworthy rather than theatrical:
 
 *Revised in milestone 2:* these two were Go maps in milestone 1. They are now the book's own open-addressing hash table (`internal/book/index.go`), because Go maps were measured allocating in steady state. See [02-engine.md](02-engine.md) and [decision 002, revision 2](../decisions/002-order-storage-and-cancel.md).
 
-**`New`** ([book.go:129](../../internal/book/book.go#L129)) validates the instrument, sets the ladder signs, and creates the first chunk, with slot 0 reserved.
+**`New`** ([book.go:133](../../internal/book/book.go#L133)) validates the instrument, sets the ladder signs, and creates the first chunk, with slot 0 reserved.
 
-**`crosses(s, limit, resting)`** ([book.go:156](../../internal/book/book.go#L156)) says whether a level is tradable for a limit taker on side `s`. For a buy, that means resting ≤ limit; for a sell, resting ≥ limit. **Equality crosses**: a bid at 100 trades with an ask at 100.
+**`crosses(s, limit, resting)`** ([book.go:160](../../internal/book/book.go#L160)) says whether a level is tradable for a limit taker on side `s`. For a buy, that means resting ≤ limit; for a sell, resting ≥ limit. **Equality crosses**: a bid at 100 trades with an ask at 100.
 
-**`Submit(o, fills)`** ([book.go:171](../../internal/book/book.go#L171)) is the main path:
+**`Submit(o, fills)`** ([book.go:189](../../internal/book/book.go#L189)) is the main path:
 
 1. `o.Validate()`. If it fails, return the reject with no fills and the book untouched.
 2. Look up `(client, clOrdID)` in `byClOrd`. If the pair is live, reject with `DuplicateClientOrderID`.
@@ -162,7 +162,7 @@ Three things make this trustworthy rather than theatrical:
 - `alloc`s a slot, fills it in, and links it at the **tail**, which is what gives time priority.
 - Updates `count` and `total`, then records the order in `byID` and `byClOrd`.
 
-**`Cancel(client, id)`** ([book.go:318](../../internal/book/book.go#L318)):
+**`Cancel(client, id)`** ([book.go:339](../../internal/book/book.go#L339)):
 
 - Looks up `id` in `byID`. If it is missing **or owned by a different client**, returns `UnknownOrder`.
 - Otherwise copies the node (the slot is about to be cleared) and binary-searches for its level.
@@ -171,14 +171,14 @@ Three things make this trustworthy rather than theatrical:
 
 Cost: O(1) for the order plus O(log L) to find the level (decision 002).
 
-**`unlink(lv, i)`** ([book.go:342](../../internal/book/book.go#L342)) is the standard doubly linked list removal: point the neighbours at each other, fixing up `head`/`tail` when `i` was at an end, then decrement `count`. It deliberately does **not** change `total`; the caller knows how much quantity left.
+**`unlink(lv, i)`** ([book.go:363](../../internal/book/book.go#L363)) is the standard doubly linked list removal: point the neighbours at each other, fixing up `head`/`tail` when `i` was at an end, then decrement `count`. It deliberately does **not** change `total`; the caller knows how much quantity left.
 
-**`alloc`** ([cow.go:78](../../internal/book/cow.go#L78)) and **`release`** ([book.go:359](../../internal/book/book.go#L359)) manage the slab.
+**`alloc`** ([cow.go:78](../../internal/book/cow.go#L78)) and **`release`** ([book.go:380](../../internal/book/book.go#L380)) manage the slab.
 
 - `alloc` pops a slot from the free list, or hands out the next one, adding a chunk when the last is full. It panics at 2³²−1 slots.
 - `release` deletes the order from both indexes, **zeroes** the slot (so a stale index reads as an obviously empty order), and pushes it on the free list through `next`.
 
-**`newLevel` and `freeLevel`** ([book.go:367, 378](../../internal/book/book.go#L367)) do the same for level structs.
+**`newLevel` and `freeLevel`** ([book.go:391, 402](../../internal/book/book.go#L391)) do the same for level structs.
 
 ### `internal/book/inspect.go`: read-only views
 
@@ -201,7 +201,7 @@ Cost: O(1) for the order plus O(log L) to find the level (decision 002).
 
 - **`Book`** ([ref.go:22](../../internal/book/ref/ref.go#L22)) is just `bids` and `asks` as `[]book.RestingOrder`, each **in priority order, best first**.
 - **`validate`** is the oracle's *own* copy of the validation rules. It doesn't call `book.Order.Validate`, so a validation bug in the real book can't hide by also being in the oracle.
-- **`Submit`** ([ref.go:94](../../internal/book/ref/ref.go#L94)):
+- **`Submit`** ([ref.go:107](../../internal/book/ref/ref.go#L107)):
   - scans both slices for a live `(client, clOrdID)`;
   - repeatedly trades with element `[0]` of the opposite slice, stopping when a buy meets an ask above its limit or a sell meets a bid below its limit;
   - deletes makers that reach zero;

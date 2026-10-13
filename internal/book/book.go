@@ -123,6 +123,10 @@ type Book struct {
 
 	byID    index[OrderID]        // live order id -> slab index (cancel lookup)
 	byClOrd index[clientOrderKey] // live (client, clOrdID) -> slab index (duplicate check)
+	// shared, if set, is the client order ids live across all the books of
+	// one engine (Share): checked before accepting an order, kept up to date
+	// on rest and removal (PRD 5.1, review F-003). nil: this book alone.
+	shared *ClOrdIDs
 }
 
 // New returns an empty book for instr.
@@ -160,6 +164,20 @@ func crosses(s Side, limit, resting Price) bool {
 	return resting >= limit
 }
 
+// duplicate reports whether client already has a live order with clOrdID:
+// in this book, or (if it shares) in any book of its group.
+func (b *Book) duplicate(client ClientID, clOrdID ClientOrderID) bool {
+	k := clientOrderKey{client, clOrdID}
+	if _, dup := b.byClOrd.get(k); dup {
+		return true
+	}
+	if b.shared != nil {
+		_, dup := b.shared.live.get(k)
+		return dup
+	}
+	return false
+}
+
 // Submit processes a new order. Fills are appended to fills, which is returned
 // (the append-to-caller-buffer idiom: the caller reuses one slice across calls,
 // so matching does not allocate once the buffer has grown).
@@ -172,7 +190,7 @@ func (b *Book) Submit(o Order, fills []Fill) (Result, []Fill) {
 	if r := o.Validate(); r != RejectNone {
 		return Result{Reject: r}, fills
 	}
-	if _, dup := b.byClOrd.get(clientOrderKey{o.Client, o.ClOrdID}); dup {
+	if b.duplicate(o.Client, o.ClOrdID) {
 		return Result{Reject: RejectDuplicateClientOrderID}, fills
 	}
 	if o.TIF == FOK && !b.canFill(&o) {
@@ -307,6 +325,9 @@ func (b *Book) rest(o *Order, qty Qty) {
 
 	b.byID.put(o.ID, idx)
 	b.byClOrd.put(clientOrderKey{o.Client, o.ClOrdID}, idx)
+	if b.shared != nil {
+		b.shared.live.put(clientOrderKey{o.Client, o.ClOrdID}, 1)
+	}
 }
 
 // Cancel removes a resting order. The order must exist and belong to client;
@@ -360,6 +381,9 @@ func (b *Book) release(i uint32) {
 	n := b.nodeW(i)
 	b.byID.delete(n.id)
 	b.byClOrd.delete(clientOrderKey{n.client, n.clOrdID})
+	if b.shared != nil {
+		b.shared.live.delete(clientOrderKey{n.client, n.clOrdID})
+	}
 	*n = orderNode{next: b.freeNode}
 	b.freeNode = i
 }

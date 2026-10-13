@@ -91,6 +91,9 @@ func Restore(st State) (*Engine, error) {
 		if err != nil {
 			return nil, fmt.Errorf("engine: restore: %w", err)
 		}
+		if err := b.Share(e.clOrds); err != nil {
+			return nil, fmt.Errorf("engine: restore: %w", err)
+		}
 		e.books = append(e.books, b)
 		e.mdSeq = append(e.mdSeq, is.MDSeq)
 		e.symbols[is.Spec.Symbol] = InstrumentID(i + 1)
