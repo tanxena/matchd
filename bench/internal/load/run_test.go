@@ -131,3 +131,29 @@ func TestAnswerOutOfOrderIsAnError(t *testing.T) {
 		t.Fatal("Ack with a cancel at the head accepted")
 	}
 }
+
+// Open loop measures from the scheduled send time (no coordinated
+// omission): a command scheduled at 100 but written late at 900 and
+// answered at 1000 took 900, not 100. Closed loop measures from the write.
+func TestLatencyIsMeasuredFromTheSchedule(t *testing.T) {
+	for _, tc := range []struct {
+		rate int
+		want int64
+	}{{1000, 900}, {0, 100}} {
+		r := &runner{cfg: Config{Rate: tc.rate, Window: 1}, stop: make(chan struct{})}
+		r.cfg.Defaults()
+		r.cfg.mix = Mixes["resting"]
+		k := newConn(r, 0, nil)
+		if k.tokens != nil {
+			<-k.tokens // the slot the command occupies
+		}
+		k.pend = append(k.pend, pending{kind: Passive, clOrd: 1, intended: 100, sent: 900, measured: true})
+		if err := k.handle(&client.Msg{Type: proto.TypeAck, Ack: proto.Ack{ClOrdID: 1, OrderID: 1}}, 1000); err != nil {
+			t.Fatal(err)
+		}
+		s := k.e2e.Snapshot()
+		if s.Count() != 1 || s.SumNS != tc.want {
+			t.Errorf("rate %d: recorded %d ns (count %d), want %d", tc.rate, s.SumNS, s.Count(), tc.want)
+		}
+	}
+}
