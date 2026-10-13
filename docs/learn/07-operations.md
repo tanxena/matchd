@@ -96,9 +96,9 @@ Adding an instrument could be a direct call into the engine's registry. But then
 
 ### `internal/clock`
 
-- **`Now`** ([clock.go:64](../../internal/clock/clock.go#L64)): if a calibration is stored, read the TSC and convert (`calibration.ns`); otherwise the fallback source. One atomic load, no allocation.
-- **`WallNanos`** ([clock.go:76](../../internal/clock/clock.go#L76)): wall time at `Init`, plus elapsed `Now`.
-- **`Init`** ([clock.go:85](../../internal/clock/clock.go#L85)) and **`setup`** ([clock.go:92](../../internal/clock/clock.go#L92)): choose and calibrate once (`sync.Once`), then measure the chosen source (`describe`: resolution, and read cost as the best of three passes). Takes about 0.1 s on Windows.
+- **`Now`** ([clock.go:71](../../internal/clock/clock.go#L71)): if a calibration is stored, read the TSC and convert (`calibration.ns`); otherwise the fallback source. One atomic load, no allocation.
+- **`WallNanos`** ([clock.go:83](../../internal/clock/clock.go#L83)): wall time at `Init`, plus elapsed `Now`.
+- **`Init`** ([clock.go:92](../../internal/clock/clock.go#L92)) and **`setup`** ([clock.go:92](../../internal/clock/clock.go#L92)): choose and calibrate once (`sync.Once`), then measure the chosen source (`describe`: resolution, and read cost as the best of three passes). Takes about 0.1 s on Windows.
 - **`calibrate`** ([clock_windows.go:51](../../internal/clock/clock_windows.go#L51)) and **`pair`** ([clock_windows.go:76](../../internal/clock/clock_windows.go#L76)): the 100 ms comparison against QPC described in §1.3, rejecting implausible rates (under 100 MHz or over 20 GHz).
 - **`qpc`** ([clock_windows.go:29](../../internal/clock/clock_windows.go#L29)): `syscall.SyscallN` into `kernel32.dll`. **`qpcNS`** ([clock_windows.go:37](../../internal/clock/clock_windows.go#L37)) converts ticks to nanoseconds without overflowing: `ticks × 1e9` would overflow after about ten days of uptime.
 - **`invariantTSC`** ([tsc_amd64.go:13](../../internal/clock/tsc_amd64.go#L13)), with `rdtsc` and `cpuid` in `tsc_amd64.s`. On other architectures, `tsc_noasm.go` reports no TSC; on other OSes, `clock_other.go` uses Go's monotonic clock.

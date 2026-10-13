@@ -91,3 +91,18 @@ func TestReadCostIsMeasured(t *testing.T) {
 		t.Fatalf("Init's read cost %v disagrees with %v measured over 300 ms", in.ReadCost, independent)
 	}
 }
+
+// Review F-020: a TSC reading a little below the calibration base (cross-
+// core skew) converts to a time a little before it, not ~2^64 ticks later.
+func TestConversionBelowTheBase(t *testing.T) {
+	c := &calibration{baseTSC: 1_000_000, baseNS: 5_000_000_000, mult: 1 << 31} // 0.5 ns per tick
+	if got := c.ns(1_000_000 - 10); got != 5_000_000_000-5 {
+		t.Fatalf("10 ticks below the base: %d ns, want 5 before %d", got, c.baseNS)
+	}
+	if got := c.ns(1_000_000 + 10); got != 5_000_000_000+5 {
+		t.Fatalf("10 ticks above: %d", got)
+	}
+	if got := c.ns(c.baseTSC); got != c.baseNS {
+		t.Fatalf("at the base: %d", got)
+	}
+}

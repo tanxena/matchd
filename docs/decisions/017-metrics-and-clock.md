@@ -99,7 +99,7 @@ QPC costs that much because every call crosses Go's syscall boundary: switching 
 
 **Costs and risks:**
 - About 30 lines of amd64 assembly (`RDTSC` with `LFENCE`, `CPUID`).
-- An invariant TSC is synchronised across cores on modern CPUs. This relies on that, because the engine goroutine can move between threads mid-measurement. Windows itself builds QPC on the same counter when it's reliable.
+- An invariant TSC is synchronised across cores on modern CPUs. This relies on that, because the engine goroutine can move between threads mid-measurement. Windows itself builds QPC on the same counter when it's reliable. *(Review F-020: if a core's counter nonetheless reads slightly below the calibration base, the conversion used to wrap, giving a time about 2^64 ticks in the future, which a command timestamp would then carry into the WAL. It is now signed: such a reading converts to a time just before the base. `TestConversionBelowTheBase` covers it.)*
 - The calibration error (a few ppm) is irrelevant for durations of microseconds.
 - `WallNanos` doesn't follow later steps of the system clock. Timestamps only need to be ordered and precise, and replay uses logged values.
 

@@ -45,7 +45,14 @@ type calibration struct {
 	hz      float64
 }
 
+// A reading below baseTSC (another core's counter a few ticks behind the
+// one calibrated on) converts to a time just before baseNS, not one about
+// 2^64 ticks in the future, as an unsigned difference would (review F-020).
 func (c *calibration) ns(tsc uint64) int64 {
+	if tsc < c.baseTSC {
+		hi, lo := bits.Mul64(c.baseTSC-tsc, c.mult)
+		return c.baseNS - int64(hi<<32|lo>>32)
+	}
 	hi, lo := bits.Mul64(tsc-c.baseTSC, c.mult)
 	return c.baseNS + int64(hi<<32|lo>>32)
 }
