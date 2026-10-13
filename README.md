@@ -212,11 +212,11 @@ CPU columns are logical CPUs busy on average over the window. The load generator
 
 PRD 7.2 and 7.6. Closed loop: 4 connections × 64 commands in flight, resting mix, snapshots off. Throughput is commands (orders and cancels) answered per second over the window; end-to-end latency here is at saturation, so it is mostly queueing (in flight ÷ throughput). Matching-core latency doesn't depend on the fsync policy (PRD 7.1), so it isn't given per policy. Latency in microseconds.
 
-| fsync | commands/s | e2e p50 | e2e p99 | e2e p99.9 | e2e max | fsyncs/s | commands per fsync | fsync mean (µs) | engine CPU | loadgen CPU | runs |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| `always` | 32,411 (29,697–32,854) | 8651 (8651–8913) | 14680 (14418–17826) | 23593 (23069–32506) | 35652 (32506–47186) | 268 (243–273) | 121 (120–123) | 3629 (3565–4015) | 1.49 (1.33–1.51) | 0.75 (0.65–0.78) | 5 |
-| `group:1ms` | 53,777 (51,653–54,947) | 3998 (3932–4325) | 12059 (11796–12059) | 17302 (16515–19399) | 34603 (28836–35652) | 245 (223–249) | 221 (220–231) | 2688 (2586–2807) | 0.77 (0.70–0.82) | 0.28 (0.26–0.32) | 5 |
-| `never` | 67,590 (66,597–71,712) | 3736 (3539–3801) | 5898 (5505–6029) | 7864 (6816–10486) | 40894 (24117–55575) | 0.07 (0.05–0.07) | – (segment rolls only) | 9467 (6654–20199) | 3.78 (3.78–3.80) | 1.95 (1.92–1.98) | 5 |
+| fsync | commands/s | e2e count per run | e2e p50 | e2e p99 | e2e p99.9 | e2e max | fsyncs/s | commands per fsync | fsync mean (µs) | engine CPU | loadgen CPU | runs |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `always` | 32,411 (29,697–32,854) | 1,944,646 | 8651 (8651–8913) | 14680 (14418–17826) | 23593 (23069–32506) | 35652 (32506–47186) | 268 (243–273) | 121 (120–123) | 3629 (3565–4015) | 1.49 (1.33–1.51) | 0.75 (0.65–0.78) | 5 |
+| `group:1ms` | 53,777 (51,653–54,947) | 3,226,613 | 3998 (3932–4325) | 12059 (11796–12059) | 17302 (16515–19399) | 34603 (28836–35652) | 245 (223–249) | 221 (220–231) | 2688 (2586–2807) | 0.77 (0.70–0.82) | 0.28 (0.26–0.32) | 5 |
+| `never` | 67,590 (66,597–71,712) | 4,055,398 | 3736 (3539–3801) | 5898 (5505–6029) | 7864 (6816–10486) | 40894 (24117–55575) | 0.07 (0.05–0.07) | – (segment rolls only) | 9467 (6654–20199) | 3.78 (3.78–3.80) | 1.95 (1.92–1.98) | 5 |
 
 `never` is for tests only: acknowledged work can be lost on power failure (decision 012).
 
@@ -224,10 +224,10 @@ PRD 7.2 and 7.6. Closed loop: 4 connections × 64 commands in flight, resting mi
 
 PRD 5.4: the copy-on-write snapshot's effect on the tail. Resting mix, open loop at 20,000 commands/s, fsync `group:1ms`, snapshots on and off alternating. Microseconds.
 
-| snapshots | core p50¹ | core p99 | core p99.9 | core max | e2e p99.9 | e2e max | snapshots per run | runs |
-|---|---|---|---|---|---|---|---|---|
-| on | 1.34 (1.09–1.44) | 15.4 (15.1–15.4) | 26.6 (25.6–27.1) | 213 (143–311) | 163578 (155189–184549) | 184549 (176161–213910) | 6 | 5 |
-| off | 1.12 (1.05–1.63) | 15.1 (15.1–15.6) | 25.6 (24.6–26.6) | 242 (209–1180) | 22544 (21496–23069) | 29884 (27787–33554) | 0 | 5 |
+| snapshots | core count per run¹ | core p50 | core p99 | core p99.9 | core max | e2e count per run | e2e p50 | e2e p99 | e2e p99.9 | e2e max | snapshots per run | runs |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| on | 1,200,175 | 1.34 (1.09–1.44) | 15.4 (15.1–15.4) | 26.6 (25.6–27.1) | 213 (143–311) | 1,200,008 | 3277 (3211–3342) | 34603 (31982–49283) | 163578 (155189–184549) | 184549 (176161–213910) | 6 | 5 |
+| off | 1,200,181 | 1.12 (1.05–1.63) | 15.1 (15.1–15.6) | 25.6 (24.6–26.6) | 242 (209–1180) | 1,200,005 | 3211 (3146–3342) | 17826 (14680–19923) | 22544 (21496–23069) | 29884 (27787–33554) | 0 | 5 |
 
 ¹ Timed inside the engine with `internal/clock` (source `tsc`; one read costs 12 (11–14) ns as the engine measured it at startup, see the clock-overhead table): from taking the command off the engine's input channel to sending its last event, which includes one clock read in between. Quantiles and max come from a log-linear histogram (`GET /debug/latency`) and are at most 3.1% above the true value, never below.
 
@@ -235,10 +235,10 @@ PRD 5.4: the copy-on-write snapshot's effect on the tail. Resting mix, open loop
 
 What a reader running this on a laptop with default power settings would see: the mix table's resting row, and the same configuration run under the Balanced plan (on its own, after the main suite: a plan can't be switched mid-suite). Microseconds.
 
-| plan | core p50¹ | core p99 | core p99.9 | core max | e2e p50 | e2e p99.9 | clock read (ns) | runs |
-|---|---|---|---|---|---|---|---|---|
-| High performance (mix table) | 1.47 (1.09–1.53) | 15.1 (14.8–15.4) | 26.1 (24.6–26.1) | 221 (180–258) | 3342 (3211–3342) | 23069 (22544–23069) | 13.5 (13.3–13.6) | 5 |
-| Balanced, best power efficiency | 1.34 (1.05–1.41) | 14.8 (14.6–15.1) | 26.6 (26.6–27.6) | 385 (344–393) | 3342 (3277–5505) | 23593 (23069–25690) | 14.0 (13.7–16.1) | **n=3** of 5† |
+| plan | core count per run¹ | core p50 | core p99 | core p99.9 | core max | e2e count per run | e2e p50 | e2e p99 | e2e p99.9 | e2e max | clock read (ns) | runs |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| High performance (mix table) | 1,200,188 | 1.47 (1.09–1.53) | 15.1 (14.8–15.4) | 26.1 (24.6–26.1) | 221 (180–258) | 1,200,006 | 3342 (3211–3342) | 19399 (16515–19923) | 23069 (22544–23069) | 27787 (26739–31982) | 13.5 (13.3–13.6) | 5 |
+| Balanced, best power efficiency | 1,200,189 | 1.34 (1.05–1.41) | 14.8 (14.6–15.1) | 26.6 (26.6–27.6) | 385 (344–393) | 1,199,993 | 3342 (3277–5505) | 19923 (19399–19923) | 23593 (23069–25690) | 30933 (28312–33030) | 14.0 (13.7–16.1) | **n=3** of 5† |
 
 † Runs left out of the numbers (failed, or disturbed by the checks in `bench/internal/result/assess.go`):
 

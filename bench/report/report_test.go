@@ -153,3 +153,26 @@ func TestSplice(t *testing.T) {
 		t.Fatal("spliced into a file without markers")
 	}
 }
+
+// Review F-011: PRD 7.1 wants every reported latency labelled p50, p99,
+// p99.9 and max, with the count, in every table.
+func TestEveryLatencyHasItsCountAndQuantiles(t *testing.T) {
+	var runs []*result.Run
+	runs = append(runs, fixture("full", "mix", "resting", 900, 910, 920, 930, 940)...)
+	runs = append(runs, fixture("full", "fsync", "always", 900, 910, 920, 930, 940)...)
+	runs = append(runs, fixture("full", "snapshot", "snapshots-on", 900, 910, 920, 930, 940)...)
+	runs = append(runs, fixture("balanced", "balanced", "resting", 900, 910, 920, 930, 940)...)
+	out := render(runs, false)
+	for _, header := range []string{
+		"| fsync | commands/s | e2e count per run | e2e p50 | e2e p99 | e2e p99.9 | e2e max |",
+		"| snapshots | core count per run¹ | core p50 | core p99 | core p99.9 | core max | e2e count per run | e2e p50 | e2e p99 | e2e p99.9 | e2e max |",
+		"| plan | core count per run¹ | core p50 | core p99 | core p99.9 | core max | e2e count per run | e2e p50 | e2e p99 | e2e p99.9 | e2e max |",
+	} {
+		if !strings.Contains(out, header) {
+			t.Errorf("missing table header %q in:\n%s", header, out)
+		}
+	}
+	if !strings.Contains(out, "| `always` | 0 | 1,200,000 |") {
+		t.Errorf("fsync row lacks its count:\n%s", out)
+	}
+}

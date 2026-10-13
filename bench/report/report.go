@@ -541,6 +541,28 @@ func (d *doc) e2eRow(g *group, lag bool) {
 		over(g.Runs, func(r *result.Run) float64 { return r.Load.CPU.Loadgen }).num("%.2f"), runsCell(g))
 }
 
+// latCells are the cells PRD 7.1 requires for every reported latency:
+// the count (per run), p50, p99, p99.9 and max, each median (min-max)
+// across the runs.
+func latCells(runs []*result.Run, sel func(*result.Run) result.Latency) []string {
+	lat := func(f func(result.Latency) float64) stat {
+		return over(runs, func(r *result.Run) float64 { return f(sel(r)) })
+	}
+	return []string{
+		lat(func(x result.Latency) float64 { return float64(x.Count) }).count(),
+		lat(func(x result.Latency) float64 { return float64(x.P50NS) }).us(),
+		lat(func(x result.Latency) float64 { return float64(x.P99NS) }).us(),
+		lat(func(x result.Latency) float64 { return float64(x.P999NS) }).us(),
+		lat(func(x result.Latency) float64 { return float64(x.MaxNS) }).us(),
+	}
+}
+
+func core(r *result.Run) result.Latency { return r.Load.Core }
+func e2e(r *result.Run) result.Latency  { return r.Load.E2E }
+
+// row writes one table row from its cells.
+func (d *doc) row(cells ...string) { d.p("| %s |\n", strings.Join(cells, " | ")) }
+
 func (d *doc) fsyncTable(main string) {
 	gs := d.tableGroups(main, "fsync")
 	if len(gs) == 0 {
@@ -549,11 +571,8 @@ func (d *doc) fsyncTable(main string) {
 	l := firstLoad(gs)
 	d.p("#### Throughput and end-to-end latency by fsync policy\n\n")
 	d.p("PRD 7.2 and 7.6. Closed loop: %d connections × %d commands in flight, resting mix, snapshots off. Throughput is commands (orders and cancels) answered per second over the window; end-to-end latency here is at saturation, so it is mostly queueing (in flight ÷ throughput). Matching-core latency doesn't depend on the fsync policy (PRD 7.1), so it isn't given per policy. Latency in microseconds.\n\n", l.Conns, l.Window)
-	d.p("| fsync | commands/s | e2e p50 | e2e p99 | e2e p99.9 | e2e max | fsyncs/s | commands per fsync | fsync mean (µs) | engine CPU | loadgen CPU | runs |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+	d.p("| fsync | commands/s | e2e count per run | e2e p50 | e2e p99 | e2e p99.9 | e2e max | fsyncs/s | commands per fsync | fsync mean (µs) | engine CPU | loadgen CPU | runs |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
 	for _, g := range gs {
-		lat := func(f func(result.Latency) float64) stat {
-			return over(g.Runs, func(r *result.Run) float64 { return f(r.Load.E2E) })
-		}
 		perSec := func(r *result.Run) float64 { return r.Load.Engine.Fsyncs / (float64(r.Load.MeasuredNS) / 1e9) }
 		perFsync := over(g.Runs, func(r *result.Run) float64 {
 			if r.Load.Engine.Fsyncs == 0 {
@@ -568,16 +587,12 @@ func (d *doc) fsyncTable(main string) {
 			// roll's, which says nothing per command.
 			pf, fps = "– (segment rolls only)", over(g.Runs, perSec).num("%.2f")
 		}
-		d.p("| `%s` | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", g.Config,
-			over(g.Runs, func(r *result.Run) float64 { return r.Load.ThroughputPerSec }).big(),
-			lat(func(x result.Latency) float64 { return float64(x.P50NS) }).us(),
-			lat(func(x result.Latency) float64 { return float64(x.P99NS) }).us(),
-			lat(func(x result.Latency) float64 { return float64(x.P999NS) }).us(),
-			lat(func(x result.Latency) float64 { return float64(x.MaxNS) }).us(),
-			fps, pf,
+		cells := append([]string{"`" + g.Config + "`", over(g.Runs, func(r *result.Run) float64 { return r.Load.ThroughputPerSec }).big()},
+			latCells(g.Runs, e2e)...)
+		d.row(append(cells, fps, pf,
 			over(g.Runs, func(r *result.Run) float64 { return r.Load.Engine.FsyncMeanNS / 1e3 }).num("%.0f"),
 			over(g.Runs, func(r *result.Run) float64 { return r.Load.CPU.Engine }).num("%.2f"),
-			over(g.Runs, func(r *result.Run) float64 { return r.Load.CPU.Loadgen }).num("%.2f"), runsCell(g))
+			over(g.Runs, func(r *result.Run) float64 { return r.Load.CPU.Loadgen }).num("%.2f"), runsCell(g))...)
 	}
 	d.p("\n`never` is for tests only: acknowledged work can be lost on power failure (decision 012).\n\n")
 }
@@ -590,24 +605,13 @@ func (d *doc) snapshotTable(main string) {
 	l := firstLoad(gs)
 	d.p("#### Snapshots: every 10 s vs none\n\n")
 	d.p("PRD 5.4: the copy-on-write snapshot's effect on the tail. Resting mix, open loop at %s commands/s, fsync `group:1ms`, snapshots on and off alternating. Microseconds.\n\n", thousands(float64(l.RatePerSec)))
-	d.p("| snapshots | core p50¹ | core p99 | core p99.9 | core max | e2e p99.9 | e2e max | snapshots per run | runs |\n|---|---|---|---|---|---|---|---|---|\n")
+	d.p("| snapshots | core count per run¹ | core p50 | core p99 | core p99.9 | core max | e2e count per run | e2e p50 | e2e p99 | e2e p99.9 | e2e max | snapshots per run | runs |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
 	var all []*result.Run
 	for _, g := range gs {
 		all = append(all, g.Runs...)
-		core := func(f func(result.Latency) float64) stat {
-			return over(g.Runs, func(r *result.Run) float64 { return f(r.Load.Core) })
-		}
-		e2e := func(f func(result.Latency) float64) stat {
-			return over(g.Runs, func(r *result.Run) float64 { return f(r.Load.E2E) })
-		}
-		d.p("| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", strings.TrimPrefix(g.Config, "snapshots-"),
-			core(func(x result.Latency) float64 { return float64(x.P50NS) }).us(),
-			core(func(x result.Latency) float64 { return float64(x.P99NS) }).us(),
-			core(func(x result.Latency) float64 { return float64(x.P999NS) }).us(),
-			core(func(x result.Latency) float64 { return float64(x.MaxNS) }).us(),
-			e2e(func(x result.Latency) float64 { return float64(x.P999NS) }).us(),
-			e2e(func(x result.Latency) float64 { return float64(x.MaxNS) }).us(),
-			over(g.Runs, func(r *result.Run) float64 { return r.Load.Engine.Snapshots }).num("%.0f"), runsCell(g))
+		cells := append([]string{strings.TrimPrefix(g.Config, "snapshots-")}, latCells(g.Runs, core)...)
+		cells = append(cells, latCells(g.Runs, e2e)...)
+		d.row(append(cells, over(g.Runs, func(r *result.Run) float64 { return r.Load.Engine.Snapshots }).num("%.0f"), runsCell(g))...)
 	}
 	d.coreFootnote(all)
 }
@@ -623,25 +627,15 @@ func (d *doc) balancedTable(main string) {
 	}
 	d.p("#### The same resting row under the Balanced plan\n\n")
 	d.p("What a reader running this on a laptop with default power settings would see: the mix table's resting row, and the same configuration run under the Balanced plan (on its own, after the main suite: a plan can't be switched mid-suite). Microseconds.\n\n")
-	d.p("| plan | core p50¹ | core p99 | core p99.9 | core max | e2e p50 | e2e p99.9 | clock read (ns) | runs |\n|---|---|---|---|---|---|---|---|---|\n")
+	d.p("| plan | core count per run¹ | core p50 | core p99 | core p99.9 | core max | e2e count per run | e2e p50 | e2e p99 | e2e p99.9 | e2e max | clock read (ns) | runs |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
 	row := func(label string, g *group, clock *group) {
-		core := func(f func(result.Latency) float64) stat {
-			return over(g.Runs, func(r *result.Run) float64 { return f(r.Load.Core) })
-		}
-		e2e := func(f func(result.Latency) float64) stat {
-			return over(g.Runs, func(r *result.Run) float64 { return f(r.Load.E2E) })
-		}
 		ck := "–"
 		if clock != nil && len(clock.Runs) > 0 {
 			ck = over(clock.Runs, func(r *result.Run) float64 { return r.Clock.CostNS }).num("%.1f")
 		}
-		d.p("| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", label,
-			core(func(x result.Latency) float64 { return float64(x.P50NS) }).us(),
-			core(func(x result.Latency) float64 { return float64(x.P99NS) }).us(),
-			core(func(x result.Latency) float64 { return float64(x.P999NS) }).us(),
-			core(func(x result.Latency) float64 { return float64(x.MaxNS) }).us(),
-			e2e(func(x result.Latency) float64 { return float64(x.P50NS) }).us(),
-			e2e(func(x result.Latency) float64 { return float64(x.P999NS) }).us(), ck, runsCell(g))
+		cells := append([]string{label}, latCells(g.Runs, core)...)
+		cells = append(cells, latCells(g.Runs, e2e)...)
+		d.row(append(cells, ck, runsCell(g))...)
 	}
 	label := func(g *group) string {
 		if len(g.Runs) > 0 {
