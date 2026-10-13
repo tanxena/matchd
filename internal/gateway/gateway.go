@@ -22,9 +22,15 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/tanxena/matchd/internal/book"
 	"github.com/tanxena/matchd/internal/engine"
 	"github.com/tanxena/matchd/internal/publisher"
 )
+
+// ReservedClientID is the client id the server's HTTP admin endpoint
+// submits its commands under (decision 018). A TCP Login with it is
+// refused, so no connection can receive the admin's answers.
+const ReservedClientID book.ClientID = 1<<32 - 1
 
 // Config holds the gateway's tunables.
 type Config struct {
@@ -74,6 +80,15 @@ type Gateway struct {
 	// wg counts every reader and writer goroutine, so Close can wait until
 	// none is left and the caller can then safely close cmds.
 	wg sync.WaitGroup
+	// readers counts reader goroutines only: StopReading waits for them.
+	readers sync.WaitGroup
+	// draining is set by StopReading: readers exit without closing their
+	// session, so its writer can still deliver what is queued.
+	draining atomic.Bool
+	// finishing is closed by FinishWriters: each writer closes its session
+	// once its queues are empty.
+	finishing  chan struct{}
+	finishOnce sync.Once
 
 	accepted atomic.Uint64 // counters for tests now, /metrics in milestone 7
 	active   atomic.Int64
@@ -85,7 +100,8 @@ func New(cfg Config, cmds chan<- engine.Command, pub *publisher.Publisher, log *
 	if cfg.OutQueue <= 0 {
 		cfg.OutQueue = DefaultConfig().OutQueue
 	}
-	return &Gateway{cfg: cfg, cmds: cmds, pub: pub, log: log, sessions: make(map[*session]struct{})}
+	return &Gateway{cfg: cfg, cmds: cmds, pub: pub, log: log, sessions: make(map[*session]struct{}),
+		finishing: make(chan struct{})}
 }
 
 // Listen opens the listening socket.
@@ -137,6 +153,7 @@ func (g *Gateway) start(conn net.Conn) {
 	}
 	g.sessions[s] = struct{}{}
 	g.wg.Add(2)
+	g.readers.Add(1)
 	g.mu.Unlock()
 	g.accepted.Add(1)
 	g.active.Add(1)
@@ -176,6 +193,54 @@ func (g *Gateway) Close() error {
 	}
 	g.wg.Wait()
 	return err
+}
+
+// StopReading is the first half of a graceful shutdown (decision 019): it
+// closes the listener and stops every reader, but not the sessions, and
+// waits until no reader can send another command. Writers carry on, so the
+// answers to commands already accepted still reach their clients. After it
+// returns the caller may close cmds. Commands a client sent that no reader
+// had taken yet are not executed; the client never gets an answer for them.
+func (g *Gateway) StopReading() error {
+	g.mu.Lock()
+	g.draining.Store(true)
+	first := g.closed.CompareAndSwap(false, true)
+	all := make([]*session, 0, len(g.sessions))
+	for s := range g.sessions {
+		all = append(all, s)
+	}
+	g.mu.Unlock()
+	var err error
+	if first && g.ln != nil {
+		err = g.ln.Close()
+	}
+	for _, s := range all {
+		_ = s.conn.SetReadDeadline(time.Now()) // wake a reader blocked in Read
+	}
+	g.readers.Wait()
+	return err
+}
+
+// FinishWriters is the second half: each session's writer sends what is
+// already queued, then closes the session. Sessions still sending after
+// timeout (a client that isn't reading) are closed by force. Call it once
+// nothing more will be queued (the publisher has finished). It returns how
+// many sessions had to be cut off.
+func (g *Gateway) FinishWriters(timeout time.Duration) int {
+	g.finishOnce.Do(func() { close(g.finishing) })
+	done := make(chan struct{})
+	go func() { g.wg.Wait(); close(done) }()
+	t := time.NewTimer(timeout)
+	defer t.Stop()
+	select {
+	case <-done:
+		return 0
+	case <-t.C:
+	}
+	cut := int(g.active.Load())
+	g.log.Warn("shutdown timeout: closing connections that are still being sent to", "connections", cut, "timeout", timeout)
+	_ = g.Close()
+	return cut
 }
 
 // Stats is a snapshot of the gateway's counters.

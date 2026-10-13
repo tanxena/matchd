@@ -6,20 +6,31 @@
 //
 // cmd/engine and the end-to-end tests both start it through Start, so the
 // tests exercise exactly the wiring that ships.
+//
+// Beside the TCP gateway there is a small HTTP listener (decision 018):
+// /metrics, /healthz, and GET/POST /instruments. Nothing on it touches the
+// order path: admin commands go through the sequencer like any other, and
+// reads are answered from the publisher's view.
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tanxena/matchd/internal/book"
+	"github.com/tanxena/matchd/internal/clock"
 	"github.com/tanxena/matchd/internal/durable"
 	"github.com/tanxena/matchd/internal/engine"
 	"github.com/tanxena/matchd/internal/gateway"
+	"github.com/tanxena/matchd/internal/metrics"
 	"github.com/tanxena/matchd/internal/publisher"
 	"github.com/tanxena/matchd/internal/sequencer"
 	"github.com/tanxena/matchd/internal/snapshot"
@@ -50,7 +61,30 @@ type Config struct {
 	// Channel capacities between the stages. 0 = defaults.
 	CommandQueue int
 	EventQueue   int
+
+	// HTTPAddr is the side HTTP listener for /metrics, /healthz and
+	// /instruments, e.g. "127.0.0.1:9100" (decision 018). "" = none.
+	HTTPAddr string
+	// ShutdownTimeout bounds how long Close lets clients receive what is
+	// already queued for them (decision 019). 0 = 5 s.
+	ShutdownTimeout time.Duration
+	// AdminTimeout bounds how long AddInstrument (POST /instruments) waits
+	// for its command to be durable and answered. 0 = 5 s.
+	AdminTimeout time.Duration
+
+	// beforeShutdownSnapshot, if set, runs after the final fsync and just
+	// before the shutdown snapshot is written. Tests use it to capture the
+	// data directory as a crash at that moment would leave it.
+	beforeShutdownSnapshot func()
+	// noShutdownSnapshot: tests that need an exact number of snapshots.
+	noShutdownSnapshot bool
 }
+
+// Server states, for /healthz.
+const (
+	stateRunning int32 = iota
+	stateStopping
+)
 
 // Server is a running engine.
 type Server struct {
@@ -71,6 +105,18 @@ type Server struct {
 	ticker    *time.Ticker          // snapshot time trigger (nil if disabled)
 	closeOnce sync.Once
 	closeErr  error
+
+	cfg       Config
+	reg       *metrics.Registry
+	latency   *metrics.Histogram // the engine's per-command latency
+	httpSrv   *http.Server
+	httpLn    net.Listener
+	admin     *admin
+	state     atomic.Int32
+	recovered snapshot.Recovered
+	submitMu  sync.RWMutex // guards stopping against submit
+	stopping  bool         // no more admin commands (Close has begun)
+	clockInfo clock.Info
 }
 
 // Start recovers state (latest snapshot, then the WAL after it), ensures
@@ -98,6 +144,20 @@ func Start(cfg Config) (*Server, error) {
 	if cfg.WAL.Log == nil {
 		cfg.WAL.Log = cfg.Log
 	}
+	if cfg.ShutdownTimeout <= 0 {
+		cfg.ShutdownTimeout = 5 * time.Second
+	}
+	if cfg.AdminTimeout <= 0 {
+		cfg.AdminTimeout = 5 * time.Second
+	}
+	// The hot-path clock (decision 017): calibrated before anything is timed
+	// or stamped.
+	ci := clock.Init()
+	cfg.Log.Info("clock", "source", ci.Source, "read_cost", ci.ReadCost, "resolution", ci.Resolution,
+		"tsc_ghz", fmt.Sprintf("%.4f", ci.TSCHz/1e9))
+	reg := metrics.NewRegistry()
+	fsyncLatency := reg.Histogram("matchd_wal_fsync_seconds", "Duration of each WAL fsync.", metrics.FsyncBuckets)
+	cfg.WAL.FsyncLatency = fsyncLatency
 
 	// Recovery (PRD 5.4): manifest -> latest snapshot -> replay the WAL
 	// records after it. The engine is deterministic, so this rebuilds
@@ -160,14 +220,19 @@ func Start(cfg Config) (*Server, error) {
 	}
 
 	s := &Server{
-		pub:     publisher.New(cfg.Log, d, fills),
-		eng:     eng,
-		wal:     wl,
-		fills:   fills,
-		durable: d,
-		cmds:    make(chan engine.Command, cfg.CommandQueue), // gateway readers -> sequencer
-		done:    make(chan struct{}),
-		log:     cfg.Log,
+		pub:       publisher.New(cfg.Log, d, fills),
+		eng:       eng,
+		wal:       wl,
+		fills:     fills,
+		durable:   d,
+		cmds:      make(chan engine.Command, cfg.CommandQueue), // gateway readers and admin -> sequencer
+		done:      make(chan struct{}),
+		log:       cfg.Log,
+		cfg:       cfg,
+		reg:       reg,
+		admin:     newAdmin(),
+		recovered: rec,
+		clockInfo: ci,
 	}
 	// Market data starts from the recovered books: each instrument's levels
 	// and md_seq, so a subscriber after a restart sees exactly the recovered
@@ -175,8 +240,11 @@ func Start(cfg Config) (*Server, error) {
 	s.pub.SetRingSize(cfg.MDRing)
 	for i, is := range eng.State().Instruments {
 		bids, asks := levelTotals(is.Bids), levelTotals(is.Asks)
-		s.pub.InitMarketData(engine.InstrumentID(i+1), is.MDSeq, bids, asks)
+		s.pub.InitMarketData(engine.InstrumentID(i+1), is.Spec, is.MDSeq, uint32(len(is.Bids)+len(is.Asks)), bids, asks)
 	}
+	// The admin endpoint's commands are answered like a client's: the
+	// publisher routes them, once durable, to this reserved id.
+	s.pub.Register(gateway.ReservedClientID, s.admin)
 
 	sequenced := make(chan engine.Command, cfg.CommandQueue) // sequencer -> engine
 	events := make(chan engine.Event, cfg.EventQueue)        // engine -> publisher
@@ -184,6 +252,13 @@ func Start(cfg Config) (*Server, error) {
 	s.gw = gateway.New(cfg.Gateway, s.cmds, s.pub, cfg.Log)
 	if err := s.gw.Listen(); err != nil {
 		return fail(err)
+	}
+	s.registerMetrics() // matchd_wal_fsync_seconds was registered above, before recovery opened the WAL
+	if cfg.HTTPAddr != "" {
+		if err := s.listenHTTP(cfg.HTTPAddr); err != nil {
+			_ = s.gw.Close()
+			return fail(err)
+		}
 	}
 	cfg.Log.Info("fsync policy", "policy", cfg.Fsync.String())
 
@@ -224,6 +299,13 @@ func Start(cfg Config) (*Server, error) {
 			cfg.Log.Error("gateway stopped", "err", err)
 		}
 	}()
+	if s.httpSrv != nil {
+		go func() {
+			if err := s.httpSrv.Serve(s.httpLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				cfg.Log.Error("http listener stopped", "err", err)
+			}
+		}()
+	}
 	// If durability fails, nothing more can be acknowledged: disconnect
 	// everyone now rather than let clients wait for answers that won't come.
 	go func() {
@@ -240,14 +322,40 @@ func Start(cfg Config) (*Server, error) {
 // Addr returns the gateway's listening address.
 func (s *Server) Addr() string { return s.gw.Addr().String() }
 
-// Close stops accepting and disconnects clients, then lets every command
-// already accepted flow through the sequencer (final fsync), engine and
-// publisher, waits for an in-progress snapshot, and closes the files.
-// (Snapshot-on-shutdown is milestone 7.) It returns the durability error if
-// one occurred.
+// Close shuts down gracefully (PRD 6, decision 019), in this order:
+//
+//  1. Stop accepting: /healthz turns 503; the HTTP listener stops taking
+//     requests (in-flight ones finish); the gateway closes its listener and
+//     stops every reader, so no further command can be submitted.
+//  2. Drain: every command already accepted flows through the sequencer,
+//     which writes and fsyncs it (the WAL is durable before anything else
+//     happens), then the engine and the publisher, which releases every
+//     event.
+//  3. Clients receive what is queued for them, for up to ShutdownTimeout;
+//     connections still being sent to after that are closed. Meanwhile the
+//     shutdown snapshot is written, unless nothing changed since the last
+//     one or snapshots are disabled. It only shortens the next start: a
+//     crash while it is being written loses nothing, because step 2 already
+//     made the WAL durable.
+//  4. Close the files.
+//
+// It returns the durability error if one occurred.
 func (s *Server) Close() error {
 	s.closeOnce.Do(func() {
-		gwErr := s.gw.Close() // after this, nothing sends on cmds
+		s.state.Store(stateStopping)
+		var httpErr error
+		if s.httpSrv != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout)
+			if err := s.httpSrv.Shutdown(ctx); err != nil {
+				_ = s.httpSrv.Close()
+				httpErr = fmt.Errorf("http shutdown: %w", err)
+			}
+			cancel()
+		}
+		gwErr := s.gw.StopReading() // after this, no reader sends on cmds
+		s.submitMu.Lock()
+		s.stopping = true // ...and no admin request either
+		s.submitMu.Unlock()
 		close(s.cmds)
 		<-s.done
 		<-s.snapDone
@@ -264,13 +372,76 @@ func (s *Server) Close() error {
 		if s.ticker != nil {
 			s.ticker.Stop()
 		}
+
+		snapDone := make(chan error, 1)
+		go func() { snapDone <- s.shutdownSnapshot() }()
+		if cut := s.gw.FinishWriters(s.cfg.ShutdownTimeout); cut > 0 {
+			s.log.Warn("shutdown: connections closed before receiving everything", "connections", cut)
+		}
+		gwErr = errors.Join(gwErr, s.gw.Close())
+		snapErr := <-snapDone
+
 		walErr := s.wal.Close()
 		fillErr := s.fills.Close()
-		s.closeErr = errors.Join(s.seqErr, gwErr, walErr, fillErr)
+		s.closeErr = errors.Join(s.seqErr, httpErr, gwErr, snapErr, walErr, fillErr)
 		s.log.Info("server stopped", "last_seq", s.eng.LastSeq(), "durable_seq", s.durable.Load(), "err", s.closeErr)
 	})
 	return s.closeErr
 }
+
+// shutdownSnapshot writes a final snapshot of the stopped engine, so the
+// next start replays (almost) no WAL. It is skipped when snapshots are
+// disabled, when durability failed (the engine may then hold commands the
+// WAL doesn't), or when nothing changed since the last snapshot. A failure
+// is reported but loses nothing: the WAL is already durable.
+func (s *Server) shutdownSnapshot() error {
+	if s.snaps == nil || s.durable.Err() != nil || s.cfg.noShutdownSnapshot {
+		return nil
+	}
+	seq := uint64(s.eng.LastSeq())
+	if seq <= max(s.recovered.SnapshotSeq, s.snaps.Stats().LastSeq) {
+		s.log.Info("shutdown snapshot skipped: nothing changed since the last one", "seq", seq)
+		return nil
+	}
+	if s.cfg.beforeShutdownSnapshot != nil {
+		s.cfg.beforeShutdownSnapshot()
+	}
+	// The engine goroutine has exited, so this goroutine may freeze it.
+	snap := s.eng.Freeze()
+	err := s.snaps.WriteNow(snap)
+	s.eng.Thaw(snap)
+	if err != nil {
+		return fmt.Errorf("shutdown snapshot: %w", err)
+	}
+	return nil
+}
+
+// submit hands an admin command to the sequencer. It returns false once
+// Close has begun or durability has failed.
+func (s *Server) submit(c engine.Command) bool {
+	s.submitMu.RLock()
+	defer s.submitMu.RUnlock()
+	if s.stopping {
+		return false
+	}
+	select {
+	case s.cmds <- c:
+		return true
+	case <-s.durable.Failed():
+		return false
+	}
+}
+
+// HTTPAddr returns the HTTP listener's address, or "" if there is none.
+func (s *Server) HTTPAddr() string {
+	if s.httpLn == nil {
+		return ""
+	}
+	return s.httpLn.Addr().String()
+}
+
+// Metrics returns the registry /metrics renders.
+func (s *Server) Metrics() *metrics.Registry { return s.reg }
 
 // Snapshots returns the snapshot writer's counters (zero if disabled).
 func (s *Server) Snapshots() snapshot.Stats {

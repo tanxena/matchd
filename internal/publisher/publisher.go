@@ -21,6 +21,7 @@
 package publisher
 
 import (
+	"context"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -28,6 +29,7 @@ import (
 	"github.com/tanxena/matchd/internal/book"
 	"github.com/tanxena/matchd/internal/durable"
 	"github.com/tanxena/matchd/internal/engine"
+	"github.com/tanxena/matchd/internal/metrics"
 )
 
 // FillRecorder is told about every event the publisher releases (the fill
@@ -112,6 +114,58 @@ type Publisher struct {
 	ringSize int
 	requests chan request
 	stopped  chan struct{}
+
+	// Specs of AddInstrument commands in flight (ExpectInstrument).
+	specMu       sync.Mutex
+	pendingSpecs map[specKey]book.Instrument
+
+	m     *Metrics // nil: no metrics (unit tests)
+	debug bool     // log one line per command (PRD 5.8); checked first so a disabled log costs nothing
+}
+
+// Metrics are the publisher's counters, counted on release, so they too
+// only ever reflect durable commands (decision 017).
+type Metrics struct {
+	// Commands[kind][outcome], outcome 0 = accepted, 1 = rejected. Each
+	// command is counted once, by the event that decides it: Ack, Reject,
+	// Cancelled (requested) or InstrumentAdded.
+	Commands [engine.CmdAddInstrument + 1][2]*metrics.Counter
+	Fills    *metrics.Counter // fill events, one per party per match
+	Trades   *metrics.Counter // matches
+}
+
+// SetMetrics makes the publisher count into m. Call before Run.
+func (p *Publisher) SetMetrics(m *Metrics) { p.m = m }
+
+// count records a released event in the metrics, and logs the command it
+// decides at debug level: one line per command (PRD 5.8), on release, so
+// only durable commands are logged, and never on the engine goroutine.
+func (p *Publisher) count(ev *engine.Event) {
+	if p.debug {
+		switch {
+		case ev.Kind == engine.EvAck, ev.Kind == engine.EvReject, ev.Kind == engine.EvInstrumentAdded,
+			ev.Kind == engine.EvCancelled && ev.CancelReason == engine.CancelRequested:
+			p.log.Debug("command", "seq", ev.Seq, "cmd", ev.Cmd, "result", ev.Kind, "client", ev.Client,
+				"instrument", ev.Instrument, "order_id", ev.OrderID, "reason", ev.Reason)
+		}
+	}
+	if p.m == nil {
+		return
+	}
+	switch ev.Kind {
+	case engine.EvAck, engine.EvInstrumentAdded:
+		p.m.Commands[ev.Cmd][0].Inc()
+	case engine.EvReject:
+		p.m.Commands[ev.Cmd][1].Inc()
+	case engine.EvCancelled:
+		if ev.CancelReason == engine.CancelRequested { // not a market order's expired rest
+			p.m.Commands[ev.Cmd][0].Inc()
+		}
+	case engine.EvFill:
+		p.m.Fills.Inc()
+	case engine.EvTrade:
+		p.m.Trades.Inc()
+	}
 }
 
 // New returns a publisher with no clients. Events are released only once
@@ -122,6 +176,8 @@ func New(log *slog.Logger, d *durable.Seq, fills FillRecorder) *Publisher {
 		log: log, durable: d, fills: fills, pending: make([]engine.Event, 0, 1024),
 		md: map[engine.InstrumentID]*mdBook{}, ringSize: DefaultRingSize,
 		requests: make(chan request, 256), stopped: make(chan struct{}),
+		pendingSpecs: map[specKey]book.Instrument{},
+		debug:        log.Enabled(context.Background(), slog.LevelDebug),
 	}
 	empty := registry{}
 	p.clients.Store(&empty)
@@ -223,6 +279,7 @@ func (p *Publisher) release() {
 		if p.fills != nil {
 			p.fills.Released(ev)
 		}
+		p.count(ev)
 		p.route(*ev)
 		p.head++
 		p.held.Add(-1)
@@ -268,6 +325,13 @@ func (p *Publisher) route(ev engine.Event) {
 	case engine.EvInstrumentAdded:
 		if p.md[ev.Instrument] == nil {
 			p.md[ev.Instrument] = newMDBook(0)
+		}
+		if spec, ok := p.takeSpec(&ev); ok {
+			p.md[ev.Instrument].spec = spec
+		}
+	case engine.EvReject:
+		if ev.Cmd == engine.CmdAddInstrument {
+			p.takeSpec(&ev) // it won't be added
 		}
 	}
 	if ev.Client == 0 {

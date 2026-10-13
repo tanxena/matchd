@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -60,11 +61,17 @@ func start(t *testing.T, tweak func(*Config)) *testServer {
 			{Symbol: "ABC", TickSize: 1, LotSize: 1},
 		},
 		Clock: func() engine.Timestamp { now += 1000; return now },
-		Log:   slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	}
 	if tweak != nil {
 		tweak(&cfg)
 	}
+	// Info by default: the debug level logs a line per command, which slows
+	// the publisher enough under -race to make timing-sensitive tests flaky.
+	level := slog.LevelInfo
+	if cfg.Log == debugLogging {
+		level = slog.LevelDebug
+	}
+	cfg.Log = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: level}))
 	s, err := Start(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -78,6 +85,12 @@ func start(t *testing.T, tweak func(*Config)) *testServer {
 	})
 	return ts
 }
+
+// debugLogging, set as Config.Log by a tweak (withDebugLog), asks start for
+// a debug-level log.
+var debugLogging = slog.New(slog.DiscardHandler)
+
+func withDebugLog(c *Config) { c.Log = debugLogging }
 
 func dial(t *testing.T, s *testServer, id uint32) *client.Conn {
 	t.Helper()
@@ -441,6 +454,10 @@ func TestManyConcurrentClients(t *testing.T) {
 	}
 	results := make([]result, clients)
 	var wg sync.WaitGroup // one goroutine per client
+	// Maker fills can arrive for a client until every client's orders are
+	// done, so no reader may stop before all have been answered.
+	var answered atomic.Int32 // clients with an answer to every order
+	allAnswered := make(chan struct{})
 	for i := range clients {
 		wg.Add(1)
 		go func() {
@@ -452,7 +469,16 @@ func TestManyConcurrentClients(t *testing.T) {
 			got := make(chan struct{}) // closed when every order is answered
 			go func() {
 				for {
-					_ = c.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+					// Generous until every order is answered (under -race the
+					// last client's first answer can take ~300 ms); then a short
+					// quiet period for stray maker fills.
+					quiet := wait
+					select {
+					case <-allAnswered:
+						quiet = 300 * time.Millisecond
+					default:
+					}
+					_ = c.SetReadDeadline(time.Now().Add(quiet))
 					m, err := c.Next()
 					if err != nil {
 						if res.answers < orders {
@@ -469,6 +495,10 @@ func TestManyConcurrentClients(t *testing.T) {
 						res.answers++
 					case proto.TypeFill:
 						res.matches[m.Fill.MatchID]++
+					}
+					if (m.Type == proto.TypeAck || m.Type == proto.TypeReject) && res.answers == orders &&
+						answered.Add(1) == clients {
+						close(allAnswered)
 					}
 				}
 			}()

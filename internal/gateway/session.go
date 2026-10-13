@@ -154,6 +154,7 @@ func (s *session) fatal(r proto.Reason, rej proto.Reject, reason string) {
 // readLoop is the reader goroutine.
 func (s *session) readLoop() {
 	defer s.g.wg.Done()
+	defer s.g.readers.Done()
 	r := proto.NewReader(s.conn)
 	var (
 		login  proto.Login
@@ -163,11 +164,23 @@ func (s *session) readLoop() {
 		resend proto.Resend
 	)
 	for {
+		// A graceful shutdown stops readers but leaves the session to its
+		// writer (StopReading). Checked again after setting the idle
+		// deadline, which could otherwise replace StopReading's wake-up.
+		if s.g.draining.Load() {
+			return
+		}
 		if s.g.cfg.IdleTimeout > 0 {
 			_ = s.conn.SetReadDeadline(time.Now().Add(s.g.cfg.IdleTimeout))
 		}
+		if s.g.draining.Load() {
+			return
+		}
 		typ, payload, err := r.Next()
 		if err != nil {
+			if s.g.draining.Load() {
+				return
+			}
 			s.close(readErrorReason(err))
 			return
 		}
@@ -260,6 +273,9 @@ func (s *session) handleLogin(id uint32) bool {
 	case id == 0:
 		s.fatal(proto.ReasonInvalidClientID, proto.Reject{}, "login with client id 0")
 		return false
+	case book.ClientID(id) == ReservedClientID:
+		s.fatal(proto.ReasonInvalidClientID, proto.Reject{}, "login with the admin endpoint's reserved client id")
+		return false
 	}
 	// Mark the session logged in before registering, under closeMu, so that
 	// if close runs concurrently it either sees client == 0 (and we notice
@@ -317,8 +333,23 @@ func (s *session) writeLoop() {
 	defer s.g.wg.Done()
 	bw := bufio.NewWriterSize(s.conn, 32<<10)
 	buf := make([]byte, 0, 128) // one encoded frame at a time, reused
+	finishing := s.g.finishing  // closed by FinishWriters; nil once seen
+	draining := false
 	for {
+		if draining && len(s.out) == 0 && len(s.ctrl) == 0 {
+			// Graceful shutdown: everything queued has been written.
+			if err := s.flush(bw); err != nil {
+				s.close("write error: " + err.Error())
+				return
+			}
+			s.lingerClose()
+			s.close("server shutting down")
+			return
+		}
 		select {
+		case <-finishing:
+			draining, finishing = true, nil
+			continue
 		case ev := <-s.out:
 			if ev.Kind == engine.EvSnapshot {
 				if err := s.streamSnapshot(bw); err != nil {
@@ -400,6 +431,28 @@ func (s *session) write(bw *bufio.Writer, frame []byte) error {
 	}
 	_, err := bw.Write(frame)
 	return err
+}
+
+// lingerTimeout bounds lingerClose's wait for the client to close.
+const lingerTimeout = time.Second
+
+// lingerClose ends a graceful shutdown's session without destroying the
+// answers just sent. Closing a TCP socket that still has unread input (a
+// client pipelining orders the stopped reader no longer takes) sends a
+// reset instead of a FIN, and a reset makes the client's stack discard data
+// it received but hadn't read yet: answers that arrived would be lost. So:
+// half-close (FIN: "nothing more from us"), then read and discard what the
+// client still sends until it closes or lingerTimeout passes (decision 019).
+func (s *session) lingerClose() {
+	tc, ok := s.conn.(*net.TCPConn)
+	if !ok {
+		return
+	}
+	if tc.CloseWrite() != nil {
+		return
+	}
+	_ = tc.SetReadDeadline(time.Now().Add(lingerTimeout))
+	_, _ = io.Copy(io.Discard, tc)
 }
 
 func (s *session) flush(bw *bufio.Writer) error {

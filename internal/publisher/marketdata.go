@@ -27,9 +27,11 @@ import (
 const DefaultRingSize = 1 << 16
 
 type mdBook struct {
-	mdSeq uint64 // md_seq of the last event applied
-	bids  map[book.Price]book.Qty
-	asks  map[book.Price]book.Qty
+	spec   book.Instrument // symbol, tick, lot (empty until known; see ExpectInstrument)
+	orders uint32          // resting orders, from the last released delta's Orders
+	mdSeq  uint64          // md_seq of the last event applied
+	bids   map[book.Price]book.Qty
+	asks   map[book.Price]book.Qty
 
 	ring      []engine.Event // ring[md_seq % len(ring)]; allocated on first use
 	ringFirst uint64         // first md_seq stored since this process started (0 = none yet)
@@ -54,9 +56,11 @@ func (mb *mdBook) oldestAvailable(size int) uint64 {
 }
 
 // InitMarketData seeds an instrument's view at startup from the recovered
-// engine: its md_seq and its levels as price -> total qty. Call before Run.
-func (p *Publisher) InitMarketData(id engine.InstrumentID, mdSeq uint64, bids, asks map[book.Price]book.Qty) {
+// engine: its spec, md_seq, resting order count, and levels as price ->
+// total qty. Call before Run.
+func (p *Publisher) InitMarketData(id engine.InstrumentID, spec book.Instrument, mdSeq uint64, orders uint32, bids, asks map[book.Price]book.Qty) {
 	mb := newMDBook(mdSeq)
+	mb.spec, mb.orders = spec, orders
 	for px, q := range bids {
 		mb.bids[px] = q
 	}
@@ -71,6 +75,7 @@ type requestKind uint8
 const (
 	reqSubscribe requestKind = iota + 1
 	reqResend
+	reqInstruments
 )
 
 type request struct {
@@ -78,6 +83,76 @@ type request struct {
 	instrument engine.InstrumentID
 	from       uint64 // reqResend
 	sub        Subscriber
+	reply      chan []InstrumentInfo // reqInstruments
+}
+
+// InstrumentInfo is one instrument as GET /instruments reports it: all of
+// it from released (durable) events.
+type InstrumentInfo struct {
+	ID       engine.InstrumentID `json:"id"`
+	Symbol   string              `json:"symbol"`
+	TickSize int64               `json:"tick_size"`
+	LotSize  int64               `json:"lot_size"`
+	MDSeq    uint64              `json:"md_seq"`
+	Orders   uint32              `json:"orders"` // resting orders
+}
+
+// Instruments lists every instrument whose registration has been
+// released, by id. It is answered on the publisher goroutine between
+// events, from the publisher's own view, never the engine's. It returns
+// false once the publisher has stopped. Safe from any goroutine.
+func (p *Publisher) Instruments() ([]InstrumentInfo, bool) {
+	reply := make(chan []InstrumentInfo, 1)
+	select {
+	case p.requests <- request{kind: reqInstruments, reply: reply}:
+	case <-p.stopped:
+		return nil, false
+	}
+	select {
+	case list := <-reply:
+		return list, true
+	case <-p.stopped:
+		return nil, false
+	}
+}
+
+func (p *Publisher) instruments() []InstrumentInfo {
+	list := make([]InstrumentInfo, 0, len(p.md))
+	for id, mb := range p.md {
+		if mb.spec.Symbol == "" {
+			continue // added, but its spec isn't known here (see ExpectInstrument)
+		}
+		list = append(list, InstrumentInfo{ID: id, Symbol: mb.spec.Symbol, TickSize: mb.spec.TickSize,
+			LotSize: mb.spec.LotSize, MDSeq: mb.mdSeq, Orders: mb.orders})
+	}
+	slices.SortFunc(list, func(a, b InstrumentInfo) int { return cmp.Compare(a.ID, b.ID) })
+	return list
+}
+
+// specKey identifies an AddInstrument command by its submitter.
+type specKey struct {
+	client  book.ClientID
+	clOrdID book.ClientOrderID
+}
+
+// ExpectInstrument tells the publisher the spec of an AddInstrument command
+// about to be submitted by client with clOrdID. Events are pointer-free, so
+// InstrumentAdded can't carry the symbol; the publisher attaches this spec
+// when the (durable) InstrumentAdded for that command is released, and
+// forgets it if the command is rejected. Safe from any goroutine.
+func (p *Publisher) ExpectInstrument(client book.ClientID, clOrdID book.ClientOrderID, spec book.Instrument) {
+	p.specMu.Lock()
+	p.pendingSpecs[specKey{client, clOrdID}] = spec
+	p.specMu.Unlock()
+}
+
+func (p *Publisher) takeSpec(ev *engine.Event) (book.Instrument, bool) {
+	k := specKey{ev.Client, ev.ClOrdID}
+	p.specMu.Lock()
+	defer p.specMu.Unlock()
+	spec, ok := p.pendingSpecs[k]
+	delete(p.pendingSpecs, k)
+	return spec, ok
 }
 
 // Subscribe asks for instrument's market data on s: a snapshot, then every
@@ -101,6 +176,10 @@ func (p *Publisher) request(r request) {
 }
 
 func (p *Publisher) handle(r request) {
+	if r.kind == reqInstruments {
+		r.reply <- p.instruments()
+		return
+	}
 	mb := p.md[r.instrument]
 	if mb == nil {
 		p.offer(r.sub, engine.Event{Kind: engine.EvReject, Instrument: r.instrument, Reason: book.RejectUnknownInstrument})
@@ -196,6 +275,7 @@ func (p *Publisher) marketData(ev *engine.Event) {
 		} else {
 			side[ev.Price] = ev.Qty
 		}
+		mb.orders = ev.Orders
 	}
 	mb.mdSeq = ev.MDSeq
 	if mb.ring == nil {

@@ -245,6 +245,7 @@ func TestRecoveryFromWALWhenOnlySnapshotDamaged(t *testing.T) {
 		c.DataDir = dir
 		c.SnapshotEvery = 150                  // rounds of 100, 100, 50 commands: exactly one snapshot
 		c.WAL = wal.Options{SegmentSize: 2048} // each round's batch lands in its own segment
+		c.noShutdownSnapshot = true            // ...and none at shutdown
 	})
 	for round, n := range []int{100, 100, 50} {
 		trade(t, s1, n, uint64(1+round*1000))
