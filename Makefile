@@ -11,7 +11,7 @@ EXE  := $(if $(filter Windows_NT,$(OS)),.exe,)
 # The race detector needs cgo.
 export CGO_ENABLED := 1
 
-.PHONY: build test test-long test-race-loop lint run bench ci fmt-check clean
+.PHONY: build test test-long test-race-loop lint run bench bench-build bench-smoke bench-full bench-balanced bench-report ci fmt-check clean
 
 ## build: engine and engctl into bin/
 build:
@@ -49,6 +49,32 @@ run: build
 ## bench: every benchmark, with allocation counts
 bench:
 	$(GO) test -run '^$$' -bench . -benchmem ./...
+
+## bench-build: the engine and the benchmark programs into bin/
+bench-build:
+	$(GO) build -o $(BIN)/ ./cmd/engine ./bench/loadgen ./bench/clockprobe ./bench/benchrun ./bench/report
+
+## bench-smoke: every benchmark configuration once, briefly (about 2 min),
+## then the report generator over the results: does the harness work?
+## Results go to bin/bench-smoke (not committed).
+bench-smoke: bench-build
+	$(BIN)/benchrun$(EXE) -suite smoke -results $(BIN)/bench-smoke
+	$(BIN)/report$(EXE) -results $(BIN)/bench-smoke -smoke -min-runs 1 -out $(BIN)/bench-smoke/report.md
+	@echo "report: $(BIN)/bench-smoke/report.md"
+
+## bench-full: the benchmark under the High performance plan (about 75
+## min; read bench/CHECKLIST.md first). Results go to bench/results/full.
+bench-full: bench-build
+	$(BIN)/benchrun$(EXE) -suite full -results bench/results/full
+
+## bench-balanced: the resting and clock rows under the Balanced plan
+## (about 10 min). Results go to bench/results/balanced.
+bench-balanced: bench-build
+	$(BIN)/benchrun$(EXE) -suite balanced -results bench/results/balanced
+
+## bench-report: regenerate the README's benchmark section from bench/results.
+bench-report: bench-build
+	$(BIN)/report$(EXE) -results bench/results -readme README.md
 
 ## ci: what CI runs, plus a Linux cross-compile of every binary and test
 ## binary. Linux is compiled here but not run; the GitHub Actions workflow
