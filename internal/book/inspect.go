@@ -29,6 +29,12 @@ func (b *Book) Live(id OrderID) bool {
 	return ok
 }
 
+// Footprint reports the book's storage: slab chunks allocated (each holds
+// 4,096 orders) and slots in the order-id index (it starts at 1,024 and
+// doubles as it fills). Tests use it to prove a stream reached multi-chunk
+// and grown-index states (review F-004).
+func (b *Book) Footprint() (chunks, indexSlots int) { return len(b.chunks), len(b.byID.slots) }
+
 // Len returns the number of resting orders.
 func (b *Book) Len() int { return b.byID.len() }
 

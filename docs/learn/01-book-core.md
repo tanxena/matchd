@@ -186,7 +186,7 @@ Cost: O(1) for the order plus O(log L) to find the level (decision 002).
 - **`Live(id)`** is an index lookup; **`Len()`** is the index's count.
 - **`LevelQty(s, px)`** *(added in milestone 2)* returns the total resting at one price, or 0. It is a binary search, and the engine uses it to report each touched level's new size.
 - **`Orders(s, dst)`** appends every resting order on side `s` in priority order: levels from last to first (best first), and within a level from head to tail.
-- **`CheckInvariants()`** ([inspect.go:64](../../internal/book/inspect.go#L64)) walks everything and returns the first inconsistency it finds. It checks:
+- **`CheckInvariants()`** ([inspect.go:70](../../internal/book/inspect.go#L70)) walks everything and returns the first inconsistency it finds. It checks:
   - the book isn't crossed;
   - levels are strictly sorted, none is empty, and no entry is nil;
   - each queue's `prev` links match a forward walk, and `tail` is the last node;
@@ -225,8 +225,12 @@ Cost: O(1) for the order plus O(log L) to find the level (decision 002).
     - Limit prices come from `limitPrice` under a **regime** that changes every 2,000 commands: balanced (spread 10, half crossing), deep (spread 40, 85% passive, which builds books hundreds of orders deep), or tight (spread 3, mostly crossing).
     - Cancels target a live order (sometimes from the wrong client), any past order (usually already dead), or an id never issued.
     - `observe` keeps the generator's live set in step with the **oracle's** results.
-  - **`runPair`** ([diff_test.go:357](../../internal/book/diff_test.go#L357)) runs each command through both books. It compares result, fills, resting state (both sides, order by order), best price and quantity, and length. It then runs both invariant checkers and asserts that every maker that just left, and every just-cancelled id, is gone from both books. On the first difference it calls `fail`, which prints the seed, the command number, the command, both sides of the difference, and a replay command line.
+  - **`runPair`** ([diff_test.go:400](../../internal/book/diff_test.go#L400)) runs each command through both books. It compares result, fills, resting state (both sides, order by order), best price and quantity, and length. It then runs both invariant checkers and asserts that every maker that just left, and every just-cancelled id, is gone from both books. On the first difference it calls `fail`, which prints the seed, the command number, the command, both sides of the difference, and a replay command line.
   - **`coverage`** counts fills, multi-fill orders, partial-then-rest, market expiries, successful cancels, successful reuse of a dead client order id, and every reject reason. **`requireCoverage`** fails the test if any count is below 0.1% of commands.
+  - **Since review F-004, deep books and edge values.** The "deep" regime above still peaks at a few hundred orders (177 in the 1.2M-command run). So the slab never left its first 4,096-order chunk under the oracle, and the indexes never grew past their initial 1,024 slots. Two additions:
+    - **Edge values in every seed:** about 1 limit order in 400 has quantity `MaxQty`, and 1 in 400 is an IOC at price 1 or `MaxPrice`; invalid orders include `MaxQty + 1` and `MaxPrice + 1`. Floors require each.
+    - **`TestDifferentialDeepBook`** (1 seed, 3 with `-long`): a build-up of 13,000 mostly resting orders, then 7,000 normal commands, with freezes throughout. It requires more than 10,000 resting orders, at least 3 chunks, a grown order index, and copy-on-write copying more than one chunk per snapshot. It measured 11,473–11,615 orders, 3 chunks and 32,768 index slots. The full resting state is compared every 50 commands there (results and fills every command), since comparing 11,000 orders each time made the test 20 times slower.
+  - **`TestDifferentialAcrossInstruments`** (review F-003): the stream spread over two instruments whose books share client order ids.
   - **Flags.** `-long` runs 20 seeds × 60k = 1.2M commands. `-seed N` runs one seed, and `-cmds K` limits it to K commands. `-diffstats` prints per-seed coverage.
 
 **Measured on this machine** (`go test ./internal/book -run Differential -v`):
