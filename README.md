@@ -375,7 +375,7 @@ Go 1.27 ([decision 004](docs/decisions/004-toolchain.md)). The race detector nee
 | `make run` | an engine on `./data` with one instrument |
 | `make bench` | every Go benchmark, with allocation counts |
 | `make ci` | gofmt, vet (Windows and Linux), lint, Linux cross-compile of every binary and test binary, and the race suite |
-| `make bench-smoke` | every benchmark configuration once, briefly (about 1.5 min), and a test report in `bin/bench-smoke/report.md`: checks the harness works |
+| `make bench-smoke` | every benchmark configuration once, briefly (about 1.5–2 min), and a test report in `bin/bench-smoke/report.md`: checks the harness works |
 | `make bench-full`, `make bench-balanced` | the benchmark suites, High performance plan (about 75 min) and Balanced (about 10 min); read [`bench/CHECKLIST.md`](bench/CHECKLIST.md) first |
 | `make bench-report` | regenerate the benchmark tables above from `bench/results` |
 

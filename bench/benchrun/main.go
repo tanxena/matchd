@@ -5,7 +5,7 @@
 //
 //	benchrun -suite full     -results bench/results/full      # High performance plan, about 85 min
 //	benchrun -suite balanced -results bench/results/balanced  # Balanced plan, about 10 min
-//	benchrun -suite smoke    -results bin/bench-smoke         # every configuration once, about 2 min
+//	benchrun -suite smoke    -results bin/bench-smoke         # every configuration once, about 1.5-2 min
 //	benchrun -suite full -dry-run                             # print the plan and the commands
 //
 // It refuses to start a full or balanced suite on battery power or under

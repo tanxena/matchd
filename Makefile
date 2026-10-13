@@ -54,7 +54,7 @@ bench:
 bench-build:
 	$(GO) build -o $(BIN)/ ./cmd/engine ./bench/loadgen ./bench/clockprobe ./bench/benchrun ./bench/report
 
-## bench-smoke: every benchmark configuration once, briefly (about 2 min),
+## bench-smoke: every benchmark configuration once, briefly (about 1.5-2 min),
 ## then the report generator over the results: does the harness work?
 ## Results go to bin/bench-smoke (not committed).
 bench-smoke: bench-build

@@ -4,7 +4,7 @@ For `make bench-full` (about **75 min**, High performance plan) and `make bench-
 
 Run every `make` from **PowerShell or cmd, not Git Bash** (decision 010 §13). `make` needs `C:\msys64\usr\bin` and `C:\msys64\ucrt64\bin` on `PATH`.
 
-## 0. Once: check the harness (2 minutes)
+## 0. Once: check the harness (about 1.5–2 minutes)
 
 ```powershell
 make bench-smoke
@@ -12,7 +12,7 @@ make bench-smoke
 
 It runs every configuration once, for 2 s warmup + 5 s, under whatever plan is active, then generates `bin\bench-smoke\report.md` from the results. Expect:
 - 10 lines like `[ 5/10] 05-mix-resting-r1   20007/s  core p50 …  e2e p50 …  cpu eng … gen … other …`;
-- `done in about 1m20s: 10 runs, N disturbed, 0 failed`;
+- `done in` about 1.5–2 minutes (81 s and 103 s when measured): `10 runs, N disturbed, 0 failed`;
 - **0 failed.** "Disturbed" is expected here if anything else is running: the line names what (e.g. `chrome.exe 1.63`), which is the point of the check;
 - a report that starts with "Smoke test of the harness, not benchmark results".
 
@@ -59,7 +59,7 @@ and remove the exclusion afterwards (step 6):
 Remove-MpPreference -ExclusionPath "$env:TEMP\matchd-bench"
 ```
 
-Only that directory is excluded: the engine's data for the runs, deleted after each run. If you'd rather not exclude anything, run without it. The "other processes" check will then flag any run Defender disturbs, and the README's environment line will say no exclusion was set.
+Only that directory is excluded: the engine's data for the runs, deleted after each run. If you'd rather not exclude anything, run without it, and the "other processes" check will flag any run Defender disturbs. **The harness can't tell whether an exclusion was set**, so the README's environment line states only what `bench-report` is told: the Makefile's `bench-report` target passes `-asserted "Microsoft Defender exclusion …"` for the committed results. Remove or change that line if you ran without the exclusion.
 
 ## 2. Nothing else running
 
@@ -108,7 +108,7 @@ Every result file holds the same in its `disturbed` list, plus the raw CPU figur
 
 **If any run is disturbed:** the report won't use it, and won't generate at all until you decide. Either:
 - re-run the whole suite: delete `bench\results\full`, fix the cause, `make bench-full` (cleanest);
-- or accept fewer runs for that row: `bin\report -results bench\results -allow-disturbed -readme README.md`. That row then shows "4 of 5†", and the disturbed run is listed under the table with its reason. PRD 7.5 asks for at least 5, so the report refuses a row with fewer than 5 counted runs unless you also pass `-min-runs 4`.
+- or accept fewer runs for that row: `bin\report -results bench\results -allow-disturbed -min-runs-suite full=4 -readme README.md` (the suite that lost the run). That row then shows "**n=4** of 5†", and the disturbed run is listed under the table with its reason. PRD 7.5 asks for at least 5, so the report refuses a row with fewer than 5 counted runs unless `-min-runs-suite` lowers it for that suite. The Makefile's `bench-report` target does exactly this for the committed Balanced results (`balanced=3`); see its comment.
 
 ## 5. The Balanced row
 
@@ -133,7 +133,7 @@ make bench-report
 git add bench/results README.md
 ```
 
-`bench-report` regenerates the README's benchmark section from every file in `bench\results` (`bench/report`), and refuses if anything is disturbed (step 4). Commit the results and the README together; I'll write the rest of the README around them.
+`bench-report` regenerates the README's benchmark section from every file in `bench\results` (`bench/report`). For the committed results the Makefile passes `-allow-disturbed -min-runs-suite balanced=3`, because two Balanced runs were disturbed (step 4). After a clean re-run, remove both flags, so that the report refuses disturbed runs again. Commit the results and the README together; I'll write the rest of the README around them.
 
 To restore your usual plan: `powercfg /setactive <guid>` (`powercfg /list` shows them). If you added the Defender exclusion in step 1b, remove it now.
 
