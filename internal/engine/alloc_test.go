@@ -92,6 +92,21 @@ var allocCycles = []struct {
 		a.do(limit(allocInst, 1, 3, book.Sell, 1003, 2))
 		a.do(market(allocInst, 2, 1, book.Buy, 6))
 	}},
+	{"IOC partial fill, rest cancelled", func(a *allocBench) {
+		a.do(limit(allocInst, 1, 1, book.Sell, 1005, 3))
+		ioc := limit(allocInst, 2, 1, book.Buy, 1005, 5) // fills 3, cancels 2
+		ioc.TIF = book.IOC
+		a.do(ioc)
+	}},
+	{"FOK across two levels, then FOK rejected", func(a *allocBench) {
+		a.do(limit(allocInst, 1, 1, book.Sell, 1004, 3))
+		a.do(limit(allocInst, 1, 2, book.Sell, 1005, 3))
+		fok := limit(allocInst, 2, 1, book.Buy, 1005, 6) // exactly fills both
+		fok.TIF = book.FOK
+		a.do(fok)
+		fok.ClOrdID, fok.Qty = 2, 1 // nothing left inside the spread: rejected
+		a.do(fok)
+	}},
 	{"rejects", func(a *allocBench) {
 		a.do(limit(allocInst, 1, 1, book.Buy, 0, 5)) // invalid price
 		a.do(cancel(allocInst, 1, 999_999_999))      // unknown order

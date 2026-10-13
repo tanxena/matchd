@@ -174,8 +174,11 @@ func (m Msg) String() string {
 	case proto.TypeCancelAck:
 		c := m.CancelAck
 		why := "cancelled"
-		if c.Reason == proto.CancelExpired {
+		switch c.Reason {
+		case proto.CancelExpired:
 			why = "expired"
+		case proto.CancelIOCUnfilled:
+			why = "ioc-unfilled"
 		}
 		return fmt.Sprintf("CancelAck seq=%d order=%d clordid=%d %s %s qty=%d @ %d",
 			c.Seq, c.OrderID, c.ClOrdID, why, sideName(c.Side), c.Qty, c.Price)

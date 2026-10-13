@@ -18,12 +18,15 @@ const (
 
 	TIFGTC uint8 = 1
 	TIFDay uint8 = 2
+	TIFIOC uint8 = 3 // limit only (milestone 8, decision 020)
+	TIFFOK uint8 = 4 // limit only
 
 	RoleTaker uint8 = 1
 	RoleMaker uint8 = 2
 
-	CancelRequested uint8 = 1
-	CancelExpired   uint8 = 2
+	CancelRequested   uint8 = 1
+	CancelExpired     uint8 = 2
+	CancelIOCUnfilled uint8 = 3 // an IOC order's unfilled remainder (milestone 8)
 )
 
 // Reason is a reject reason on the wire. 1–99 are the engine's reasons;
@@ -41,6 +44,7 @@ const (
 	ReasonUnknownInstrument      Reason = 8
 	ReasonInvalidInstrument      Reason = 9
 	ReasonDuplicateSymbol        Reason = 10
+	ReasonFOKNoLiquidity         Reason = 11 // a fill-or-kill order the book couldn't fill in full (milestone 8)
 
 	ReasonNotLoggedIn     Reason = 100 // an order or cancel before Login
 	ReasonAlreadyLoggedIn Reason = 101 // a second Login on one connection
@@ -74,6 +78,8 @@ func (r Reason) String() string {
 		return "InvalidInstrument"
 	case ReasonDuplicateSymbol:
 		return "DuplicateSymbol"
+	case ReasonFOKNoLiquidity:
+		return "FOKNoLiquidity"
 	case ReasonNotLoggedIn:
 		return "NotLoggedIn"
 	case ReasonAlreadyLoggedIn:
@@ -437,7 +443,7 @@ func (m *Fill) Decode(p []byte) error {
 //	20 client_order_id u64
 //	28 order_id        u64
 //	36 side            u8
-//	37 reason          u8 (CancelRequested or CancelExpired)
+//	37 reason          u8 (CancelRequested, CancelExpired or CancelIOCUnfilled)
 //	38 price           i64 (0 for an expired market order)
 //	46 qty             i64 (quantity removed)
 type CancelAck struct {

@@ -171,6 +171,40 @@ func TestNewOrderEventSequence(t *testing.T) {
 	)
 }
 
+// IOC and FOK (decision 020): an IOC's unfilled rest is a CancelAck with
+// reason IOCUnfilled (not "expired", a market order's); a FOK that can't
+// fill in full is a lone Reject that consumes no order id.
+func TestIOCAndFOKEvents(t *testing.T) {
+	d := newDriver(t)
+	x := d.addInstrument("XYZ")
+	d.step(limit(x, 1, 11, sell, 100, 5)) // order 1, md 1
+	d.step(limit(x, 1, 12, sell, 101, 5)) // order 2, md 2
+
+	ioc := limit(x, 2, 21, buy, 100, 8)
+	ioc.TIF = book.IOC
+	expect(t, d.step(ioc),
+		ack(2, 21, 3, buy, 100, 8),
+		fillT(2, 21, 3, buy, 100, 5, 3, 1), fillM(1, 11, 1, sell, 100, 5, 0, 1), trade(buy, 100, 5, 1, 3),
+		delta(sell, 100, 0, 4),
+		ev{kind: engine.EvCancelled, client: 2, clOrd: 21, order: 3, side: buy, px: 100, qty: 3, cxl: engine.CancelIOCUnfilled},
+	)
+
+	fok := limit(x, 2, 22, buy, 101, 6) // only 5 at or below 101
+	fok.TIF = book.FOK
+	expect(t, d.step(fok), ev{kind: engine.EvReject, client: 2, clOrd: 22, reason: book.RejectFOKNoLiquidity})
+	fok = limit(x, 2, 23, buy, 101, 5) // exactly what's there
+	fok.TIF = book.FOK
+	expect(t, d.step(fok),
+		ack(2, 23, 4, buy, 101, 5), // id 4: the rejected FOK consumed none
+		fillT(2, 23, 4, buy, 101, 5, 0, 2), fillM(1, 12, 2, sell, 101, 5, 0, 2), trade(buy, 101, 5, 2, 5),
+		delta(sell, 101, 0, 6),
+	)
+
+	mktIOC := market(x, 2, 24, buy, 1)
+	mktIOC.TIF = book.IOC // limit-only
+	expect(t, d.step(mktIOC), ev{kind: engine.EvReject, client: 2, clOrd: 24, reason: book.RejectInvalidTIF})
+}
+
 func TestCancelEvents(t *testing.T) {
 	d := newDriver(t)
 	x := d.addInstrument("XYZ")

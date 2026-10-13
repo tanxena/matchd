@@ -23,10 +23,13 @@ func TestEnumsMatchWire(t *testing.T) {
 		{"market", uint8(book.Market), proto.TypeMarket},
 		{"gtc", uint8(book.GTC), proto.TIFGTC},
 		{"day", uint8(book.Day), proto.TIFDay},
+		{"ioc", uint8(book.IOC), proto.TIFIOC},
+		{"fok", uint8(book.FOK), proto.TIFFOK},
 		{"taker", uint8(engine.RoleTaker), proto.RoleTaker},
 		{"maker", uint8(engine.RoleMaker), proto.RoleMaker},
 		{"cancel requested", uint8(engine.CancelRequested), proto.CancelRequested},
 		{"cancel expired", uint8(engine.CancelExpired), proto.CancelExpired},
+		{"cancel ioc unfilled", uint8(engine.CancelIOCUnfilled), proto.CancelIOCUnfilled},
 	}
 	for _, p := range pairs {
 		if p.engine != p.pr {
@@ -35,7 +38,7 @@ func TestEnumsMatchWire(t *testing.T) {
 	}
 	// Every engine reject reason must exist on the wire with the same number
 	// and the same name, and stay below the gateway's range (100+).
-	for r := book.RejectInvalidSide; r <= book.RejectDuplicateSymbol; r++ {
+	for r := book.RejectInvalidSide; r <= book.RejectFOKNoLiquidity; r++ {
 		w := proto.Reason(r)
 		if w.String() != r.String() {
 			t.Errorf("reason %d: engine %q, wire %q", r, r, w)
@@ -44,8 +47,8 @@ func TestEnumsMatchWire(t *testing.T) {
 			t.Errorf("engine reason %d collides with the gateway's range", r)
 		}
 	}
-	if s := (book.RejectDuplicateSymbol + 1).String(); s[:7] != "reject(" {
-		t.Errorf("book has a reason after DuplicateSymbol (%s); add it to the wire and extend this test", s)
+	if s := (book.RejectFOKNoLiquidity + 1).String(); s[:7] != "reject(" {
+		t.Errorf("book has a reason after FOKNoLiquidity (%s); add it to the wire and extend this test", s)
 	}
 }
 

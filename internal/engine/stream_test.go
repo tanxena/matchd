@@ -52,7 +52,15 @@ func (g *streamGen) next() engine.Command {
 	}
 	switch r := g.rng.IntN(100); {
 	case r < 55:
-		return limit(inst, client, g.clOrd, side, book.Price(g.mid[inst]+int64(g.rng.IntN(11)-5)), book.Qty(1+g.rng.IntN(10)))
+		c := limit(inst, client, g.clOrd, side, book.Price(g.mid[inst]+int64(g.rng.IntN(11)-5)), book.Qty(1+g.rng.IntN(10)))
+		switch t := g.rng.IntN(100); { // IOC and FOK too (milestone 8)
+		case t < 15:
+			c.TIF = book.IOC
+		case t < 25:
+			c.TIF = book.FOK
+			c.Qty = book.Qty(1 + g.rng.IntN(30))
+		}
+		return c
 	case r < 65:
 		return market(inst, client, g.clOrd, side, book.Qty(1+g.rng.IntN(25)))
 	case r < 90 && len(g.acked) > 0:
@@ -187,6 +195,20 @@ func (v *views) apply(c engine.Command, evs []engine.Event, lastOrderID *book.Or
 			}
 		default:
 			return fmt.Errorf("unexpected event kind %v", e.Kind)
+		}
+	}
+	// IOC and FOK orders never rest: whatever they didn't trade was
+	// cancelled (IOC) or the order was rejected whole (FOK).
+	if c.Kind == engine.CmdNewOrder && (c.TIF == book.IOC || c.TIF == book.FOK) && len(evs) > 0 && evs[0].Kind == engine.EvAck {
+		if _, resting := v.open[evs[0].OrderID]; resting {
+			return fmt.Errorf("%s order %d is resting after its command", c.TIF, evs[0].OrderID)
+		}
+		if c.TIF == book.FOK {
+			for _, e := range evs {
+				if e.Kind == engine.EvCancelled {
+					return fmt.Errorf("an accepted FOK was partly cancelled: it must fill in full or be rejected")
+				}
+			}
 		}
 	}
 	// Every delta carries its instrument's resting order count after the

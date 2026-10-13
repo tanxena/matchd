@@ -153,8 +153,9 @@ const (
 type CancelReason uint8
 
 const (
-	CancelRequested CancelReason = 1 // the owner sent a cancel
-	CancelExpired   CancelReason = 2 // a market order's unfilled remainder
+	CancelRequested   CancelReason = 1 // the owner sent a cancel
+	CancelExpired     CancelReason = 2 // a market order's unfilled remainder
+	CancelIOCUnfilled CancelReason = 3 // an IOC limit order's unfilled remainder (decision 020)
 )
 
 // Event is one output of the engine. Like Command it is a flat, pointer-free

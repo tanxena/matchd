@@ -258,10 +258,16 @@ func (e *Engine) newOrder(c *Command, out []Event) []Event {
 	}
 
 	if res.Expired > 0 {
+		// The unfilled rest, cancelled on arrival: a market order's (expired)
+		// or an IOC limit order's, told apart so consumers can (decision 020).
+		why := CancelExpired
+		if c.Type == book.Limit {
+			why = CancelIOCUnfilled
+		}
 		out = append(out, Event{
 			Seq: c.Seq, Time: c.Time, Kind: EvCancelled, Instrument: c.Instrument,
 			Client: c.Client, ClOrdID: c.ClOrdID, OrderID: o.ID,
-			Side: c.Side, Qty: res.Expired, CancelReason: CancelExpired,
+			Side: c.Side, Price: c.Price, Qty: res.Expired, CancelReason: why,
 		})
 	}
 	if res.Rested > 0 {
