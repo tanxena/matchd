@@ -220,10 +220,32 @@ type Instrument struct {
 	LotSize  int64
 }
 
-// Validate reports whether the instrument definition is usable.
+func symbolRune(r rune) bool {
+	switch {
+	case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+		return true
+	}
+	return r == '.' || r == '_' || r == '-'
+}
+
+// MaxSymbolLen bounds a symbol's length. The WAL's command encoding allows
+// 255 bytes; the tighter limit keeps symbols readable and leaves room.
+const MaxSymbolLen = 32
+
+// Validate reports whether the instrument definition is usable: a symbol of
+// 1 to MaxSymbolLen letters, digits, '.', '_' or '-', and positive tick and
+// lot sizes.
 func (in Instrument) Validate() error {
 	if in.Symbol == "" {
 		return errors.New("instrument: empty symbol")
+	}
+	if len(in.Symbol) > MaxSymbolLen {
+		return fmt.Errorf("instrument: symbol is %d bytes, the limit is %d", len(in.Symbol), MaxSymbolLen)
+	}
+	for _, r := range in.Symbol {
+		if !symbolRune(r) {
+			return fmt.Errorf("instrument: symbol %q: only letters, digits, '.', '_' and '-' are allowed", in.Symbol)
+		}
 	}
 	if in.TickSize <= 0 {
 		return fmt.Errorf("instrument %s: tick size must be positive, got %d", in.Symbol, in.TickSize)
