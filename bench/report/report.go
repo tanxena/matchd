@@ -499,7 +499,7 @@ func (d *doc) mixTables(main string) {
 
 	d.p("#### End-to-end latency by order mix\n\n")
 	d.p("PRD 7.1(b), the same runs: client send to client receipt of the command's first answer (Ack, Reject or CancelAck) over loopback TCP, measured from each command's *scheduled* send time, so the load generator falling behind counts against it. Microseconds. Every answer waits for its WAL fsync (`group:1ms`).\n\n")
-	d.p("| mix | count per run | p50 | p99 | p99.9 | max | send lag p99 | engine CPU | loadgen CPU | runs |\n|---|---|---|---|---|---|---|---|---|---|\n")
+	d.p("| mix | count per run | p50 | p99 | p99.9 | max | send lag p99 | fsync mean (µs) | engine CPU | loadgen CPU | runs |\n|---|---|---|---|---|---|---|---|---|---|---|\n")
 	for _, g := range gs {
 		d.e2eRow(g, true)
 	}
@@ -535,6 +535,7 @@ func (d *doc) e2eRow(g *group, lag bool) {
 			}
 			return float64(r.Load.SendLag.P99NS)
 		}).us())
+		d.p(" %s |", over(g.Runs, func(r *result.Run) float64 { return r.Load.Engine.FsyncMeanNS / 1e3 }).num("%.0f"))
 	}
 	d.p(" %s | %s | %s |\n",
 		over(g.Runs, func(r *result.Run) float64 { return r.Load.CPU.Engine }).num("%.2f"),
@@ -582,19 +583,20 @@ func (d *doc) fsyncTable(main string) {
 		})
 		pf := perFsync.num("%.0f")
 		fps := over(g.Runs, perSec).num("%.0f")
+		mean := over(g.Runs, func(r *result.Run) float64 { return r.Load.Engine.FsyncMeanNS / 1e3 }).num("%.0f")
 		if g.Config == "never" {
-			// No fsync on the commit path; the few left are a segment
-			// roll's, which says nothing per command.
-			pf, fps = "– (segment rolls only)", over(g.Runs, perSec).num("%.2f")
+			// No fsync on the commit path. The few fsyncs counted are WAL
+			// segment rolls (64 MiB each), not comparable per command or
+			// in time with the other rows (review F-012).
+			pf, fps, mean = "–", "–", "–"
 		}
 		cells := append([]string{"`" + g.Config + "`", over(g.Runs, func(r *result.Run) float64 { return r.Load.ThroughputPerSec }).big()},
 			latCells(g.Runs, e2e)...)
-		d.row(append(cells, fps, pf,
-			over(g.Runs, func(r *result.Run) float64 { return r.Load.Engine.FsyncMeanNS / 1e3 }).num("%.0f"),
+		d.row(append(cells, fps, pf, mean,
 			over(g.Runs, func(r *result.Run) float64 { return r.Load.CPU.Engine }).num("%.2f"),
 			over(g.Runs, func(r *result.Run) float64 { return r.Load.CPU.Loadgen }).num("%.2f"), runsCell(g))...)
 	}
-	d.p("\n`never` is for tests only: acknowledged work can be lost on power failure (decision 012).\n\n")
+	d.p("\n`never` is for tests only: acknowledged work can be lost on power failure (decision 012). It has no fsync on the commit path, so its fsync columns are blank. The only fsyncs it does are WAL segment rolls, each flushing a 64 MiB segment.\n\n")
 }
 
 func (d *doc) snapshotTable(main string) {
