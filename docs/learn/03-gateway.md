@@ -164,12 +164,12 @@ Arrival order on the one shared `cmds` channel *is* the global order of all clie
 
 ### `internal/server/server.go`: the wiring
 
-**`Start`** ([server.go:125](../../internal/server/server.go#L125)):
+**`Start`** ([server.go:126](../../internal/server/server.go#L126)):
 1. applies the configured instruments **synchronously**, through `Stamp` and `Step` before any goroutine starts, so a bad config fails startup;
 2. creates the three channels;
 3. starts the sequencer, engine and publisher goroutines and the accept loop.
 
-**`Close`** ([server.go:343](../../internal/server/server.go#L343)) closes the gateway, then closes `cmds`. The sequencer, engine and publisher then each drain their input and close their output in turn, and `Close` waits for the publisher to finish.
+**`Close`** ([server.go:344](../../internal/server/server.go#L344)) closes the gateway, then closes `cmds`. The sequencer, engine and publisher then each drain their input and close their output in turn, and `Close` waits for the publisher to finish.
 
 ### `internal/client` and the binaries
 

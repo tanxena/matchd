@@ -112,15 +112,15 @@ Adding an instrument could be a direct call into the engine's registry. But then
 
 ### Where it's recorded
 
-- **`Engine.Run`** ([engine.go:102](../../internal/engine/engine.go#L102)): `start := clock.Now()`, `Step`, `stepped := clock.Now()`, the sends, then `step.Observe(stepped-start)` and `latency.Observe(clock.Now()-start)`. **`SetLatency`** ([engine.go:43](../../internal/engine/engine.go#L43)) wires the two histograms. `Step` now also stamps each event with its command's kind (`Event.Cmd`), and every delta carries the instrument's resting order count (`Event.Orders`, from `Book.Len`, O(1)), both in what was padding.
+- **`Engine.Run`** ([engine.go:112](../../internal/engine/engine.go#L112)): `start := clock.Now()`, `Step`, `stepped := clock.Now()`, the sends, then `step.Observe(stepped-start)` and `latency.Observe(clock.Now()-start)`. **`SetLatency`** ([engine.go:46](../../internal/engine/engine.go#L46)) wires the two histograms. `Step` now also stamps each event with its command's kind (`Event.Cmd`), and every delta carries the instrument's resting order count (`Event.Orders`, from `Book.Len`, O(1)), both in what was padding.
 - **`Log.Sync`** ([wal.go:496](../../internal/wal/wal.go#L496)): times every fsync; `Flush` counts bytes written.
 - **`Publisher.count`** ([publisher.go:143](../../internal/publisher/publisher.go#L143)): called for each **released** event. It counts the command decided by `Ack`, `Reject`, `Cancelled(requested)` or `InstrumentAdded`, plus fills and trades, and logs the debug line per command. The **`Metrics`** struct ([publisher.go:128](../../internal/publisher/publisher.go#L128)) holds the counters.
-- **`registerMetrics`** ([metrics.go:16](../../internal/server/metrics.go#L16), server package) creates every series and wires the hot-path ones. **`snapshotAge`** ([metrics.go:76](../../internal/server/metrics.go#L76)) reports +Inf when no snapshot exists.
+- **`registerMetrics`** ([metrics.go:16](../../internal/server/metrics.go#L16), server package) creates every series and wires the hot-path ones. **`snapshotAge`** ([metrics.go:81](../../internal/server/metrics.go#L81)) reports +Inf when no snapshot exists.
 
 ### The HTTP side (`internal/server`)
 
 - **`listenHTTP`** ([http.go:17](../../internal/server/http.go#L17)): Go 1.22 method patterns (`"GET /instruments"`), with read and header timeouts.
-- **`handleHealth`** ([http.go:48](../../internal/server/http.go#L48)), **`handleListInstruments`** ([http.go:59](../../internal/server/http.go#L59)) and **`handleAddInstrument`** ([http.go:75](../../internal/server/http.go#L75)): a 4 KB body limit, unknown fields rejected, errors mapped to 400/409/503/504.
+- **`handleHealth`** ([http.go:63](../../internal/server/http.go#L63)), **`handleListInstruments`** ([http.go:74](../../internal/server/http.go#L74)) and **`handleAddInstrument`** ([http.go:90](../../internal/server/http.go#L90)): a 4 KB body limit, unknown fields rejected, errors mapped to 400/409/503/504.
 - **`AddInstrument`** ([admin.go:70](../../internal/server/admin.go#L70)):
   1. validate;
   2. allocate a request id;
@@ -131,11 +131,11 @@ Adding an instrument could be a direct call into the engine's registry. But then
 
 ### Graceful shutdown
 
-- **`Server.Close`** ([server.go:343](../../internal/server/server.go#L343)): the order in §1.4.
+- **`Server.Close`** ([server.go:344](../../internal/server/server.go#L344)): the order in §1.4.
 - **`Gateway.StopReading`** ([gateway.go:204](../../internal/gateway/gateway.go#L204)): sets `draining`, closes the listener, wakes every reader with `SetReadDeadline(now)`, and waits on the `readers` WaitGroup. The reader loop checks `draining` before and after re-arming its idle deadline, and on a read error, then returns without closing the session.
 - **`Gateway.FinishWriters`** ([gateway.go:229](../../internal/gateway/gateway.go#L229)): closes `finishing`; each writer, once its queues are empty, flushes, lingers and closes. After the timeout, everything left is closed by force.
 - **`session.lingerClose`** ([session.go:446](../../internal/gateway/session.go#L446)): `CloseWrite`, then discard input until EOF or `lingerTimeout` (1 s).
-- **`shutdownSnapshot`** ([server.go:397](../../internal/server/server.go#L397)): skipped if snapshots are disabled, durability failed, or nothing changed. Otherwise freeze the stopped engine, `Writer.WriteNow`, thaw.
+- **`shutdownSnapshot`** ([server.go:398](../../internal/server/server.go#L398)): skipped if snapshots are disabled, durability failed, or nothing changed. Otherwise freeze the stopped engine, `Writer.WriteNow`, thaw.
 - `cmd/engine`: `-http`, `-shutdown-timeout`, and a second signal exits at once.
 
 ### `engctl`

@@ -95,7 +95,7 @@ A **crash harness** starts the real program, drives load, kills it, and checks w
 
 - **`Engine.Freeze`/`Thaw`** ([snapshot.go:25, 36](../../internal/engine/snapshot.go#L25)) freeze or thaw every book, plus `Seq`, `LastOrderID` and `LastMatchID`.
 - **`State`** ([snapshot.go:63](../../internal/engine/snapshot.go#L63)) is the engine as plain data: instruments, and their orders in priority order. **`Snapshot.State()`** materialises a frozen view, safe from any goroutine. **`Restore`** ([snapshot.go:84](../../internal/engine/snapshot.go#L84)) rebuilds an engine from a `State`.
-- **`SnapshotHooks`** ([snapshot.go:113](../../internal/engine/snapshot.go#L113)) has `Every`, `Tick`, `Out` and `Done`. **`Run`** ([engine.go:102](../../internal/engine/engine.go#L102)) now selects on three channels: commands, ticks, and returned snapshots. After each command it checks the count. `trigger` freezes and sends the snapshot, unless one is in flight (it then remembers to take another as soon as the current one returns) or nothing changed since the last.
+- **`SnapshotHooks`** ([snapshot.go:113](../../internal/engine/snapshot.go#L113)) has `Every`, `Tick`, `Out` and `Done`. **`Run`** ([engine.go:112](../../internal/engine/engine.go#L112)) now selects on three channels: commands, ticks, and returned snapshots. After each command it checks the count. `trigger` freezes and sends the snapshot, unless one is in flight (it then remembers to take another as soon as the current one returns) or nothing changed since the last.
 
 ### `internal/snapshot`: files, manifest, writer, fill log, recovery, check
 

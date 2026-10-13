@@ -51,7 +51,7 @@ Market data is subject to the same rule as everything else ([decision 012](../de
 
 ### Engine: md_seq and trades
 
-- **`nextMD`** ([engine.go:179](../../internal/engine/engine.go#L179)) bumps and returns the instrument's counter. `e.mdSeq` grows alongside `e.books`.
+- **`nextMD`** ([engine.go:191](../../internal/engine/engine.go#L191)) bumps and returns the instrument's counter. `e.mdSeq` grows alongside `e.books`.
 - **`delta`** stamps every `BookDelta` with `nextMD`.
 - In **`newOrder`**, each match now appends three events: the taker's fill, the maker's fill, and an **`EvTrade`** print (client 0, aggressor side, match id, `md_seq`).
 - **`Snapshot`/`State`/`Restore`** carry each instrument's `MDSeq`.
@@ -108,7 +108,7 @@ The first version queued one event per level, so a book deeper than the queue (4
 
 ### Server
 
-At startup, for each recovered instrument, `Start` sums the resting orders per price (**`levelTotals`**, [server.go:471](../../internal/server/server.go#L471)) and calls `InitMarketData` with the instrument's `md_seq`. Config `MDRing` sets the ring size.
+At startup, for each recovered instrument, `Start` sums the resting orders per price (**`levelTotals`**, [server.go:472](../../internal/server/server.go#L472)) and calls `InitMarketData` with the instrument's `md_seq`. Config `MDRing` sets the ring size.
 
 **A real bug was found and fixed here:** when shutdown caught a snapshot in flight, the engine goroutine exited before the writer handed it back, so the books stayed **frozen**, and any later `Engine().State()` panicked. `Close` now thaws a snapshot left on the return channel.
 

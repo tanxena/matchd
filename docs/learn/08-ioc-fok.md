@@ -75,7 +75,7 @@ The new TIFs are 3 and 4, not 2 and 3. **2 is `Day`**, and has been in every log
 
 ### The engine: `internal/engine/engine.go`
 
-- **`newOrder`** ([engine.go:203](../../internal/engine/engine.go#L203)): unchanged for FOK. A book reject is an engine `Reject`, and the order id is only committed on acceptance, so a rejected FOK uses no id. For an expired remainder it picks the reason: `CancelExpired` for a market order, `CancelIOCUnfilled` for a limit (IOC). The cancel event now carries the order's price (0 for a market order, as before).
+- **`newOrder`** ([engine.go:215](../../internal/engine/engine.go#L215)): unchanged for FOK. A book reject is an engine `Reject`, and the order id is only committed on acceptance, so a rejected FOK uses no id. For an expired remainder it picks the reason: `CancelExpired` for a market order, `CancelIOCUnfilled` for a limit (IOC). The cancel event now carries the order's price (0 for a market order, as before).
 
 ### The wire and the CLI
 

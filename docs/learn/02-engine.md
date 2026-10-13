@@ -122,8 +122,8 @@ The general lesson: **a test of "nothing happened" needs its own test showing it
   - `fills`, a scratch buffer reused across commands.
 
   The doc comment states the ownership rule: one goroutine, no locks.
-- **`Step`** ([engine.go:61](../../internal/engine/engine.go#L61)) checks `c.Seq == lastSeq+1` (panicking otherwise), records it, and dispatches on `Kind`. It panics on an unknown kind.
-- **`Run`** ([engine.go:102](../../internal/engine/engine.go#L102)) is the goroutine body:
+- **`Step`** ([engine.go:71](../../internal/engine/engine.go#L71)) checks `c.Seq == lastSeq+1` (panicking otherwise), records it, and dispatches on `Kind`. It panics on an unknown kind.
+- **`Run`** ([engine.go:112](../../internal/engine/engine.go#L112)) is the goroutine body:
 
   ```
   defer close(out)
@@ -135,15 +135,15 @@ The general lesson: **a test of "nothing happened" needs its own test showing it
   When `in` is closed, the loop ends, the deferred `close(out)` runs, and the consumer's `range` loop ends. That is how shutdown propagates (draining is PRD 6's graceful shutdown, built in milestone 7: [decision 019](../decisions/019-graceful-shutdown.md)). Since milestone 7, `Run` also times each command with `internal/clock`, never `time.Now` ([07-operations.md](07-operations.md#13-timing-sub-microsecond-work-on-windows)).
 
   *Since milestone 5,* `Run` also takes snapshot hooks and selects on two more channels (a snapshot-trigger tick, and snapshots coming back to be thawed). It freezes the engine between commands when a trigger fires ([05-recovery.md](05-recovery.md#2-code-walkthrough)).
-- **`newOrder`** ([engine.go:203](../../internal/engine/engine.go#L203)):
+- **`newOrder`** ([engine.go:215](../../internal/engine/engine.go#L215)):
   1. Look up the book. If it doesn't exist, reject with `UnknownInstrument`.
   2. Build a `book.Order` with id `lastOrderID+1` and call `Submit` with the scratch fills buffer.
   3. If the book rejects it, emit a `Reject`. The id was never committed.
   4. Otherwise commit `lastOrderID`, then emit the `Ack`.
   5. For each fill: bump `lastMatchID`, reduce the taker's `leaves`, and emit the taker event then the maker event. Fills arrive grouped by price, best first, so after the **last fill at a price** (the next fill has a different price, or there isn't one), emit `BookDelta` with `bk.LevelQty(opp, price)`, the level's final size, because matching has already finished.
   6. Emit `Cancelled(expired)` for a market order's remainder, and a `BookDelta` for the taker's own level if a limit remainder rested.
-- **`cancel`** ([engine.go:281](../../internal/engine/engine.go#L281)) calls `book.Cancel` and emits `Cancelled(requested)`, echoing the client order id, side and price returned in `CancelResult`, then the level's delta. Or it emits a `Reject`.
-- **`addInstrument`** ([engine.go:304](../../internal/engine/engine.go#L304)) validates the spec, rejects duplicate symbols, creates the book, and appends it, so its id is `len(books)`.
+- **`cancel`** ([engine.go:293](../../internal/engine/engine.go#L293)) calls `book.Cancel` and emits `Cancelled(requested)`, echoing the client order id, side and price returned in `CancelResult`, then the level's delta. Or it emits a `Reject`.
+- **`addInstrument`** ([engine.go:316](../../internal/engine/engine.go#L316)) validates the spec, rejects duplicate symbols, creates the book, and appends it, so its id is `len(books)`.
 - **Accessors:** `LastSeq`, `LastOrderID`, `Lookup`, `Book`, `NumInstruments`. They are for tests now, and for snapshots in milestone 5.
 
 ### `internal/book/index.go`: the hash index (new)

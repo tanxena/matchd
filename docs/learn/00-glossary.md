@@ -165,6 +165,24 @@ Terms used in this repo's code and docs. Each entry names the milestone where th
 - **Prefix sum / Fenwick tree** (M8, rejected): a structure answering "how much quantity up to price P?" in O(log L); every book change would have to update it.
 - **Additive enum value** (M8): a new value appended to an enum, never reusing an old number, so existing logs and clients keep their meaning.
 
+## Benchmarks (milestone 9)
+
+- **Matching-core latency** (M7, M9): from the engine dequeuing a command to it having sent the command's last event, timed inside the engine (PRD 7.1a). **End-to-end latency** (M9): client send to client receipt of the first answer, over loopback TCP (PRD 7.1b).
+- **Throughput** (M9): commands answered per second, sustained over the measured window.
+- **Little's law** (M9): on average, in flight = throughput × latency. At saturation, latency is mostly queueing.
+- **Closed loop / open loop** (M9): a load that keeps a fixed number of requests in flight (each answer releases the next), versus one that sends on a fixed schedule whatever the answers do. Closed finds throughput; open measures latency at a known load.
+- **Coordinated omission** (M9): a load generator that stalls along with the system it measures, and so never sends (or times) the requests it should have sent during the stall. Avoided by measuring from each request's *scheduled* time.
+- **Send lag** (M9): how late the load generator wrote a command relative to its schedule.
+- **Log-linear (HDR-style) histogram** (M9): every power of two split into equal sub-buckets (32 here), so any quantile is known to a fixed relative precision (3.125%) at any scale.
+- **Warmup / measured window** (M9): the first 30 s of a run, discarded, so caches, the CPU's clock and the book reach steady state; then the 60 s that count.
+- **Interleaving** (M9): running configurations in rotation (A, B, C, A, B, C …) so slow drift in the machine affects them all alike.
+- **Affinity mask** (M9): the set of logical CPUs a process's threads may run on (`SetProcessAffinityMask`, `start /affinity`).
+- **Logical CPU / hyperthread / sibling** (M9): a physical core can run two hardware threads, which the OS shows as two logical CPUs. Siblings share the core's execution units and L1/L2 caches.
+- **Power plan / personality / power mode** (M9): Windows' set of power settings (Balanced, High performance …). Its *personality* says which kind it is, however it's named. The Windows 10/11 *power mode* slider overlays the Balanced plan.
+- **Interrupt / DPC time** (M9): CPU time spent handling hardware interrupts and their deferred procedure calls, for example the network stack. It belongs to no process.
+- **Disturbed run** (M9): a run that failed one of `result.Assess`'s checks (other processes busy, power changed, the load generator behind schedule …); its numbers are never reported.
+- **Depth control** (M9): the load generator scales its crossing orders' size to hold the book near a target number of resting orders (10,000).
+
 ## Later milestones
 - **ITCH / OUCH** (reference): NASDAQ's market-data (ITCH) and order-entry (OUCH) protocols. They are cited for terminology:
   - [TotalView-ITCH 5.0](https://www.nasdaqtrader.com/content/technicalsupport/specifications/dataproducts/NQTVITCHspecification.pdf)

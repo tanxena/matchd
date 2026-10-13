@@ -36,7 +36,7 @@ Every method works on a nil receiver, so a component can hold metrics that were 
 
 ## Decision 2: fixed buckets, defined in microseconds, exposed in seconds
 
-The boundaries are decided once and shared with the benchmark (milestone 9), so the benchmark tables and `/metrics` agree:
+The boundaries are decided once. *(Amended in milestone 9, below: the benchmark doesn't report from these buckets.)*
 
 | histogram | bounds (µs) |
 |---|---|
@@ -50,6 +50,8 @@ The boundaries are decided once and shared with the benchmark (milestone 9), so 
 - Seconds appear only when rendering, as the shortest decimal that parses back to the same `float64`. `TestBoundsRoundTrip` checks every bound renders, parses and converts back to the same nanoseconds.
 
 **Rejected:** HDR-style histograms (log-linear, thousands of buckets, more memory and more to render), and sampling (only some commands timed), which would undercount exactly the tail the histogram exists to show.
+
+**Amendment (milestone 9, chosen with the user; [decision 021](021-benchmark-harness.md)).** For the benchmark these buckets are too coarse: a p50 could only be reported as "between 0.5 and 1 µs", and no maximum at all. So the engine also records each command's matching latency (the same span) into a log-linear histogram (`metrics.LogHistogram`: 32 sub-buckets per power of two, quantiles at most 3.125% high, 12 ns per observation). It is served as JSON at `GET /debug/latency`, **not** in `/metrics`. The rejection above still holds for `/metrics`: the scrape stays small and the dashboard buckets are unchanged. The benchmark's core-latency tables come from `/debug/latency`.
 
 ## Decision 3: what is measured where
 

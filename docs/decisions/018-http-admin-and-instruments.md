@@ -19,6 +19,7 @@ Served by `net/http` with Go 1.22 method patterns; a wrong method gets 405.
 | `GET /metrics` | Prometheus text (decision 017) |
 | `GET /instruments` | `[{"id","symbol","tick_size","lot_size","md_seq","orders"}]`, by id |
 | `POST /instruments` | body `{"symbol","tick_size","lot_size"}` → 201 with the new instrument; 400 invalid; 409 duplicate symbol; 504 no answer in time; 503 shutting down or failed |
+| `GET /debug/latency` | *(milestone 9)* `{"matching":{"sub_bits":5,"counts":[…],"sum_ns":…}}`: the engine's matching latency since start in log-linear buckets, which the benchmark reads at each window's edges and subtracts ([decision 021](021-benchmark-harness.md), amending 017) |
 
 - **Address:** default `127.0.0.1:9100`, set with `-http`, `""` to disable.
 - **No authentication:** it's for operators on the machine. Binding to a public address would let anyone add instruments, which is noted in `cmd/engine`'s documentation.

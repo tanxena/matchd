@@ -158,7 +158,7 @@ The layout is persistent: changing it means a new WAL format version.
 
 ### `internal/server/server.go`: recovery and failure
 
-**`Start`** ([server.go:125](../../internal/server/server.go#L125)):
+**`Start`** ([server.go:126](../../internal/server/server.go#L126)):
 1. opens `DataDir/wal` with a `replay` callback that decodes each command, restores its seq and time, and calls `engine.Step`, discarding the events. It refuses a log that doesn't start at seq 1, because there are no snapshots yet.
 2. logs the recovery summary;
 3. checks configured instruments against the log, or adds them via `LogNow`;
@@ -166,7 +166,7 @@ The layout is persistent: changing it means a new WAL format version.
 
 *Superseded in milestone 5:* step 1 now loads the newest snapshot first and replays only the WAL after it (`snapshot.Recover`), so the WAL no longer has to start at seq 1. See [05-recovery.md](05-recovery.md#2-code-walkthrough).
 
-**`Close`** ([server.go:343](../../internal/server/server.go#L343)) runs once: gateway, then `cmds`, then wait for the pipeline (which ends with the sequencer's final fsync), then close the WAL. It returns the durability error, if any. **`Failed`** and **`Err`** expose the failure to `cmd/engine`, which shuts down on it.
+**`Close`** ([server.go:344](../../internal/server/server.go#L344)) runs once: gateway, then `cmds`, then wait for the pipeline (which ends with the sequencer's final fsync), then close the WAL. It returns the durability error, if any. **`Failed`** and **`Err`** expose the failure to `cmd/engine`, which shuts down on it.
 
 ### Tests
 
