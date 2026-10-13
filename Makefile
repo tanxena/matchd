@@ -22,10 +22,12 @@ test:
 	$(GO) test -race -count=1 ./...
 
 ## test-long: the acceptance-sized runs: the 1M-command differential test
-## over 20 seeds (acceptance 1) and 50 kill-and-recover runs (acceptance 2)
+## over 20 seeds (acceptance 1) and 50 kill-and-recover runs (acceptance 2).
+## The package comes before -long and -crash: go test hands everything after
+## an unknown flag to the test binary, package path included.
 test-long:
-	$(GO) test -count=1 -run TestDifferential -long -timeout 60m ./internal/book/
-	$(GO) test -count=1 -run TestCrashRecovery -crash -timeout 60m ./internal/crashtest/
+	$(GO) test -count=1 -timeout 60m ./internal/book/ -run TestDifferential -long
+	$(GO) test -count=1 -timeout 60m ./internal/crashtest/ -run TestCrashRecovery -crash
 
 ## lint: golangci-lint with its default linters
 lint:
