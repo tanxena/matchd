@@ -137,4 +137,6 @@ PRD 5.7 writes `engctl book <symbol>`, but the wire protocol identifies instrume
 - a snapshot stream that stops at the queue size (the old limit);
 - snapshot writes without a deadline.
 
+*(Review F-017: listed in the README's known limitations. There is no market-data heartbeat carrying the latest `md_seq`, so a lost final message is noticed only when the instrument next changes. Since F-005 that also applies to a rate-limited Resend, which the Feed retries only on a later message.)*
+
 **A test flaw found by repetition:** the convergence test failed 1 run in 20, when the final `md_seq` (4,440 = 37 × 120) was one the joiner dropped. A lost **last** message is only noticed when another one arrives, and none did. The test now stops dropping when trading ends, and sends one more order, whose delta reveals any lost tail. A production feed would send heartbeats carrying the latest `md_seq` for the same reason; v1 has none, so over TCP, where frames aren't lost, it doesn't need them.

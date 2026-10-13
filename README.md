@@ -353,6 +353,7 @@ set "GOMAXPROCS=4" && start "loadgen" /affinity F0 bin\loadgen.exe -addr 127.0.0
 - **No replication or failover.** It's a single process. Durability is the local disk's, with the fsync policy chosen.
 - **Day orders behave as GTC.** There are no trading sessions, so nothing expires them.
 - **IOC and FOK are limit-only.** There is no market FOK.
+- **No market-data heartbeat.** A consumer detects a gap only when a later `md_seq` arrives, so a lost *final* message, or a Resend refused by the rate limit that is waiting for a later message to retry on, stays unnoticed until the instrument next changes. Over TCP single frames aren't lost (a stalled consumer is disconnected instead), so this matters only after a bug or a refused Resend. A periodic per-instrument heartbeat carrying the latest `md_seq` would close it ([decision 016](docs/decisions/016-market-data.md)).
 - **No order-status query.** A client that disconnects loses the events sent while it was away; its orders stay on the book.
 - **No risk checks, accounts, auctions, stop, iceberg or pegged orders** (PRD non-goals). There is no TLS or authentication: the gateway and the HTTP side are for a trusted local network, and `/instruments` lets anyone with access add instruments. There's no limit on connections either: many connections each making their full allowance of market-data requests could still keep the publisher busy.
 - **One engine goroutine for all instruments:** see [Why the engine is single-threaded](#why-the-engine-is-single-threaded).
