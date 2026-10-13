@@ -16,6 +16,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 )
 
 // The README section between these markers is generated.
@@ -31,6 +33,10 @@ func main() {
 	allow := flag.Bool("allow-disturbed", false, "report even if some runs were disturbed or failed (they are left out and listed)")
 	minRuns := flag.Int("min-runs", 5, "least counted runs per configuration (PRD 7.5)")
 	smoke := flag.Bool("smoke", false, "checking the harness: count disturbed runs too, and say so at the top (never for the README)")
+	perSuite := suiteMins{}
+	flag.Var(perSuite, "min-runs-suite", "SUITE=N: a different minimum for one suite (repeatable), stated in its rows as n=N")
+	var asserted multi
+	flag.Var(&asserted, "asserted", "a statement about the environment the harness can't measure, for the hardware line (repeatable)")
 	flag.Parse()
 
 	runs, err := load(*dir)
@@ -40,10 +46,10 @@ func main() {
 	if *smoke && *readme != "" {
 		fatal(errors.New("-smoke output never goes into the README"))
 	}
-	if err := check(groups(runs, *smoke), *minRuns, *allow || *smoke); err != nil {
+	if err := check(groups(runs, *smoke), *minRuns, perSuite, *allow || *smoke); err != nil {
 		fatal(err)
 	}
-	section := render(runs, *smoke)
+	section := render(runs, *smoke, asserted...)
 	switch {
 	case *readme != "":
 		if err := splice(*readme, section); err != nil {
@@ -57,6 +63,27 @@ func main() {
 		fmt.Print(section)
 	}
 }
+
+// suiteMins collects -min-runs-suite SUITE=N.
+type suiteMins map[string]int
+
+func (m suiteMins) String() string { return fmt.Sprint(map[string]int(m)) }
+
+func (m suiteMins) Set(v string) error {
+	s, n, ok := strings.Cut(v, "=")
+	k, err := strconv.Atoi(n)
+	if !ok || err != nil || k < 1 {
+		return fmt.Errorf("want SUITE=N, got %q", v)
+	}
+	m[s] = k
+	return nil
+}
+
+// multi collects a repeated string flag.
+type multi []string
+
+func (m *multi) String() string     { return strings.Join(*m, "; ") }
+func (m *multi) Set(v string) error { *m = append(*m, v); return nil }
 
 func fatal(err error) {
 	fmt.Fprintln(os.Stderr, "report:", err)

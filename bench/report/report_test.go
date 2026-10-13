@@ -63,21 +63,28 @@ func TestDisturbedRunsAreExcluded(t *testing.T) {
 	runs[2].Disturbed = []string{"other processes used 1.50 CPUs"}
 	runs[2].Load.Core.P50NS = 99_000 // would move the median if it counted
 
-	if err := check(groups(runs, false), 5, false); err == nil || !strings.Contains(err.Error(), "4 counted runs, need 5") {
+	if err := check(groups(runs, false), 5, nil, false); err == nil || !strings.Contains(err.Error(), "4 counted runs, need 5") {
 		t.Fatalf("check passed or said the wrong thing: %v", err)
 	}
-	if err := check(groups(runs, false), 4, false); err == nil || !strings.Contains(err.Error(), "disturbed") {
+	if err := check(groups(runs, false), 4, nil, false); err == nil || !strings.Contains(err.Error(), "disturbed") {
 		t.Fatalf("check let a disturbed run through: %v", err)
 	}
-	if err := check(groups(runs, false), 4, true); err != nil {
+	if err := check(groups(runs, false), 4, nil, true); err != nil {
 		t.Fatal(err)
+	}
+	// A per-suite minimum applies to that suite only.
+	if err := check(groups(runs, false), 5, map[string]int{"full": 4}, true); err != nil {
+		t.Fatalf("per-suite minimum 4 not applied: %v", err)
+	}
+	if err := check(groups(runs, false), 4, map[string]int{"other": 3, "full": 5}, true); err == nil {
+		t.Fatal("per-suite minimum 5 not applied")
 	}
 	out := render(runs, false)
 	// Median of 900, 910, 930, 940 (the disturbed 920 left out) = 920 ns.
 	if !strings.Contains(out, "| resting¹ | 1,200,000 | 0.920 (0.900–0.940) |") {
 		t.Errorf("mix row wrong:\n%s", out)
 	}
-	if !strings.Contains(out, "4 of 5†") || !strings.Contains(out, "other processes used 1.50 CPUs") {
+	if !strings.Contains(out, "**n=4** of 5†") || !strings.Contains(out, "other processes used 1.50 CPUs") {
 		t.Errorf("exclusion not shown:\n%s", out)
 	}
 	if strings.Contains(out, "99.0") {
@@ -99,12 +106,12 @@ func TestRenderStatesHardwareAndFootnote(t *testing.T) {
 	clock.Pinning = result.Pinning{LoadgenMask: 0x0F, LoadgenReadBack: 0x0F}
 	clock.Clock = &result.Clock{Source: "tsc", CostNS: 15.5, Reads: 1000, Resolution: 12}
 	runs = append(runs, &clock)
-	out := render(runs, false)
+	out := render(runs, false, "Defender exclusion on the bench directory")
 	for _, want := range []string{
-		"Test CPU, 4 physical cores, 8 logical CPUs",
-		`"High performance" power plan (high performance)`,
-		"engine on logical CPUs 0–3 (physical cores 0–1), load generator on 4–7 (cores 2–3)",
-		"no physical core is shared",
+		"Test CPU, 4 cores / 8 threads",
+		"High performance plan on AC",
+		"engine pinned to CPUs 0–3 and load generator to 4–7 (no shared physical core",
+		"Defender exclusion on the bench directory (stated by the operator; the harness can't check it)",
 		"**median (min–max) across runs**, never the best run",
 		"source `tsc`; one read costs 15 ns",
 		"| crossing¹ |",

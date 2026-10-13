@@ -72,11 +72,16 @@ func groups(runs []*result.Run, smoke bool) map[[3]string]*group {
 
 // check enforces PRD 7.5: every row needs at least minRuns counted runs,
 // and (unless allowed) no run may have been excluded.
-func check(gs map[[3]string]*group, minRuns int, allowExcluded bool) error {
+// minRuns applies to every suite unless perSuite names it.
+func check(gs map[[3]string]*group, minRuns int, perSuite map[string]int, allowExcluded bool) error {
 	var problems []string
 	for _, g := range sortedGroups(gs) {
-		if len(g.Runs) < minRuns {
-			problems = append(problems, fmt.Sprintf("%s/%s/%s: %d counted runs, need %d", g.Suite, g.Table, g.Config, len(g.Runs), minRuns))
+		need := minRuns
+		if n, ok := perSuite[g.Suite]; ok {
+			need = n
+		}
+		if len(g.Runs) < need {
+			problems = append(problems, fmt.Sprintf("%s/%s/%s: %d counted runs, need %d", g.Suite, g.Table, g.Config, len(g.Runs), need))
 		}
 		if !allowExcluded {
 			for _, r := range g.Excluded {
@@ -206,18 +211,19 @@ func runsCell(g *group) string {
 	if len(g.Excluded) == 0 {
 		return fmt.Sprint(len(g.Runs))
 	}
-	return fmt.Sprintf("%d of %d†", len(g.Runs), len(g.Runs)+len(g.Excluded))
+	return fmt.Sprintf("**n=%d** of %d†", len(g.Runs), len(g.Runs)+len(g.Excluded))
 }
 
 // ---------------------------------------------------------------------------
 // The document.
 
 type doc struct {
-	b      strings.Builder
-	gs     map[[3]string]*group
-	runs   []*result.Run
-	excl   []*result.Run
-	suites []string
+	asserted []string
+	b        strings.Builder
+	gs       map[[3]string]*group
+	runs     []*result.Run
+	excl     []*result.Run
+	suites   []string
 }
 
 func (d *doc) p(f string, a ...any) { fmt.Fprintf(&d.b, f, a...) }
@@ -246,8 +252,11 @@ func (d *doc) mainSuite() string {
 	return d.suites[0]
 }
 
-func render(runs []*result.Run, smoke bool) string {
-	d := &doc{gs: groups(runs, smoke), runs: runs}
+// render generates the section. asserted are statements about the
+// environment the harness can't measure (a Defender exclusion), given by
+// whoever ran the suites; the hardware line labels them as such.
+func render(runs []*result.Run, smoke bool, asserted ...string) string {
+	d := &doc{gs: groups(runs, smoke), runs: runs, asserted: asserted}
 	if smoke {
 		d.p("> **Smoke test of the harness, not benchmark results:** short runs, any power plan, and disturbed runs counted.\n\n")
 	}
@@ -298,14 +307,6 @@ func (d *doc) firstLoadRun(suite string) *result.Run {
 	return best
 }
 
-func planLabel(p sysinfo.Power) string {
-	s := fmt.Sprintf("%q power plan (%s)", p.SchemeName, p.Personality)
-	if p.Overlay != "" {
-		s += ", power mode " + p.Overlay
-	}
-	return s
-}
-
 func (d *doc) hardware(main string) {
 	r := d.first(main)
 	m := r.Machine
@@ -315,20 +316,49 @@ func (d *doc) hardware(main string) {
 			l3 = fmt.Sprintf(", %d MB L3 shared by logical CPUs %s", c.Bytes>>20, cpuRange(c.Logical))
 		}
 	}
-	d.p("**Hardware** (stated once; every table below ran on it): %s, %d physical cores, %d logical CPUs%s; %.1f GB RAM; %s; %s.\n\n",
-		m.CPU, len(m.Cores), m.Logical, l3, float64(m.RAMBytes)/(1<<30), m.OS, r.GoVersion)
-
-	d.p("**Power:**")
+	// One line with everything a reader needs to judge the numbers (PRD
+	// 7.8): every part comes from the result files, except what the
+	// harness can't measure, which is labelled as stated by the operator.
+	parts := []string{fmt.Sprintf("%s, %d cores / %d threads%s, %.1f GB RAM", m.CPU, len(m.Cores), m.Logical, l3, float64(m.RAMBytes)/(1<<30)),
+		m.OS, r.GoVersion}
+	power := func(s string) string {
+		f := d.first(s)
+		if f == nil {
+			return ""
+		}
+		ac := "on AC"
+		if !f.PowerBefore.AC {
+			ac = "**on battery**"
+		}
+		mode := ""
+		if f.PowerBefore.Overlay != "" && f.PowerBefore.Overlay != "none" {
+			mode = ", power mode " + f.PowerBefore.Overlay
+		}
+		return fmt.Sprintf("%s plan%s %s", f.PowerBefore.SchemeName, mode, ac)
+	}
+	pw := power(main)
 	for _, s := range d.suites {
-		if f := d.first(s); f != nil {
-			ac := "AC power"
-			if !f.PowerBefore.AC {
-				ac = "battery"
-			}
-			d.p(" %s suite: %s, %s.", s, ac, planLabel(f.PowerBefore))
+		if s != main {
+			pw += fmt.Sprintf(" (the %s suite: %s)", s, power(s))
 		}
 	}
-	d.p("\n\n")
+	parts = append(parts, pw)
+	var pinning string
+	if lr := d.firstLoadRun(main); lr != nil && lr.Pinning.EngineMask != 0 {
+		p := lr.Pinning
+		shared := "no shared physical core, verified from the OS's processor topology"
+		if len(p.SharedCores) > 0 {
+			shared = fmt.Sprintf("**sharing physical cores %v**", p.SharedCores)
+		}
+		pinning = fmt.Sprintf("engine pinned to CPUs %s and load generator to %s (%s; they share the L3)",
+			cpuRange(sysinfo.MaskCPUs(p.EngineMask)), cpuRange(sysinfo.MaskCPUs(p.LoadgenMask)), shared)
+		parts = append(parts, pinning)
+	}
+	for _, a := range d.asserted {
+		parts = append(parts, a+" (stated by the operator; the harness can't check it)")
+	}
+	parts = append(parts, "nothing else running (measured: see below)")
+	d.p("**Hardware and environment** (stated once; every table below ran on it): %s.\n\n", strings.Join(parts, "; "))
 
 	// Nothing else running: measured, not asserted.
 	var others []float64
@@ -352,19 +382,13 @@ func (d *doc) hardware(main string) {
 		d.p("**Nothing else running,** as measured: other processes used %.2f logical CPUs on average per measured window (median across runs), %.2f at most (%s); a run over %.2f is excluded as disturbed.\n\n",
 			s.med, s.hi, worst, result.MaxOtherCPU)
 	}
+	if pinning != "" {
+		d.p("**Pinning** with the process affinity mask (as `start /affinity` sets it), read back after setting.\n\n")
+	}
 
 	lr := d.firstLoadRun(main)
 	if lr == nil {
 		return
-	}
-	p := lr.Pinning
-	if p.EngineMask != 0 {
-		shared := "no physical core is shared (verified from the OS's processor topology)"
-		if len(p.SharedCores) > 0 {
-			shared = fmt.Sprintf("**physical cores %v are shared**", p.SharedCores)
-		}
-		d.p("**Pinning:** engine on logical CPUs %s (physical cores %s), load generator on %s (cores %s), with the process affinity mask (as `start /affinity` sets it), read back after setting; %s. Both share the L3 cache and memory bandwidth.\n\n",
-			cpuRange(sysinfo.MaskCPUs(p.EngineMask)), coresOf(m, p.EngineMask), cpuRange(sysinfo.MaskCPUs(p.LoadgenMask)), coresOf(m, p.LoadgenMask), shared)
 	}
 	if t := lr; t.Load != nil {
 		d.p("**Protocol** (PRD 7): a fresh engine per run; %v warmup discarded, %v measured; each configuration run %s times, interleaved round by round with the other configurations, with a cooldown between runs. Cells are the **median (min–max) across runs**, never the best run. Commit `%s`.\n\n",
@@ -406,19 +430,6 @@ func cpuRange(cpus []int) string {
 		s[i] = fmt.Sprint(c)
 	}
 	return strings.Join(s, ", ")
-}
-
-func coresOf(m sysinfo.Machine, mask uint64) string {
-	var cores []int
-	for i, c := range m.Cores {
-		for _, l := range c.Logical {
-			if mask&(1<<l) != 0 {
-				cores = append(cores, i)
-				break
-			}
-		}
-	}
-	return cpuRange(cores)
 }
 
 func (d *doc) clockTable() {
@@ -551,8 +562,11 @@ func (d *doc) fsyncTable(main string) {
 			return r.Load.Engine.Commands / r.Load.Engine.Fsyncs
 		})
 		pf := perFsync.num("%.0f")
-		if perFsync.hi == 0 {
-			pf = "no fsync"
+		fps := over(g.Runs, perSec).num("%.0f")
+		if g.Config == "never" {
+			// No fsync on the commit path; the few left are a segment
+			// roll's, which says nothing per command.
+			pf, fps = "– (segment rolls only)", over(g.Runs, perSec).num("%.2f")
 		}
 		d.p("| `%s` | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", g.Config,
 			over(g.Runs, func(r *result.Run) float64 { return r.Load.ThroughputPerSec }).big(),
@@ -560,7 +574,7 @@ func (d *doc) fsyncTable(main string) {
 			lat(func(x result.Latency) float64 { return float64(x.P99NS) }).us(),
 			lat(func(x result.Latency) float64 { return float64(x.P999NS) }).us(),
 			lat(func(x result.Latency) float64 { return float64(x.MaxNS) }).us(),
-			over(g.Runs, perSec).num("%.0f"), pf,
+			fps, pf,
 			over(g.Runs, func(r *result.Run) float64 { return r.Load.Engine.FsyncMeanNS / 1e3 }).num("%.0f"),
 			over(g.Runs, func(r *result.Run) float64 { return r.Load.CPU.Engine }).num("%.2f"),
 			over(g.Runs, func(r *result.Run) float64 { return r.Load.CPU.Loadgen }).num("%.2f"), runsCell(g))
