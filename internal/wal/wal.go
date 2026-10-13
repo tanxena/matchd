@@ -30,6 +30,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/tanxena/matchd/internal/clock"
 	"github.com/tanxena/matchd/internal/fsutil"
@@ -84,6 +85,11 @@ type Options struct {
 	Log *slog.Logger
 	// FsyncLatency, if set, records every fsync's duration (decision 017).
 	FsyncLatency *metrics.Histogram
+	// StallThreshold: an fsync taking longer than this is a durability
+	// stall: counted in FsyncStalls and logged (decision 022). 0 = 25 ms.
+	StallThreshold time.Duration
+	// FsyncStalls, if set, counts fsyncs slower than StallThreshold.
+	FsyncStalls *metrics.Counter
 }
 
 // Record is one log entry as seen by a replay callback. Payload aliases an
@@ -128,6 +134,10 @@ type Log struct {
 	appended atomic.Uint64 // last seq whose bytes have been written to the OS
 	synced   atomic.Uint64 // last seq covered by a successful fsync
 	written  atomic.Uint64 // bytes written to segments since Open (metrics)
+	// syncStart is when the fsync in progress began (clock.Now), 0 when
+	// none is. Written by whichever goroutine fsyncs (under syncMu); read
+	// by /metrics, so a stuck fsync is visible while it is still stuck.
+	syncStart atomic.Int64
 
 	pending      []byte // records appended but not yet flushed (appender only)
 	pendingLast  uint64 // seq of the last record in pending
@@ -464,7 +474,7 @@ func (l *Log) roll(first uint64) error {
 	defer l.syncMu.Unlock()
 
 	if l.cur != nil {
-		if err := l.cur.Sync(); err != nil {
+		if err := l.fsync(l.cur); err != nil {
 			return fmt.Errorf("wal: sync before roll: %w", err)
 		}
 		l.synced.Store(l.appended.Load())
@@ -503,14 +513,46 @@ func (l *Log) Sync() (uint64, error) {
 	if f == nil || upto <= l.synced.Load() {
 		return l.synced.Load(), nil
 	}
-	start := clock.Now()
-	err := f.Sync()
-	l.opts.FsyncLatency.Observe(clock.Now() - start)
-	if err != nil {
+	if err := l.fsync(f); err != nil {
 		return l.synced.Load(), fmt.Errorf("wal: fsync: %w", err)
 	}
 	l.synced.Store(upto)
 	return upto, nil
+}
+
+// fsync syncs f, timing it: every fsync goes into FsyncLatency, and one
+// slower than StallThreshold is counted and logged as a durability stall
+// (decision 022). Call with syncMu held.
+func (l *Log) fsync(f File) error {
+	start := clock.Now()
+	l.syncStart.Store(start)
+	err := f.Sync()
+	took := clock.Now() - start
+	l.syncStart.Store(0)
+	l.opts.FsyncLatency.Observe(took)
+	threshold := l.opts.StallThreshold
+	if threshold <= 0 {
+		threshold = DefaultStallThreshold
+	}
+	if time.Duration(took) > threshold {
+		l.opts.FsyncStalls.Inc()
+		l.log.Warn("durability stall: slow fsync", "took", time.Duration(took), "threshold", threshold)
+	}
+	return err
+}
+
+// DefaultStallThreshold is the fsync duration above which a sync counts as
+// a durability stall. This laptop's SSD averages 1.4-2.4 ms per fsync.
+const DefaultStallThreshold = 25 * time.Millisecond
+
+// SyncInProgress is how long the fsync now running has taken so far, or 0
+// if none is running. Safe from any goroutine.
+func (l *Log) SyncInProgress() time.Duration {
+	start := l.syncStart.Load()
+	if start == 0 {
+		return 0
+	}
+	return time.Duration(clock.Now() - start)
 }
 
 // Written is the number of bytes written to segments since Open. Safe from

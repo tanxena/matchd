@@ -371,7 +371,7 @@ func TestSlowConsumerDisconnected(t *testing.T) {
 	s := start(t, func(c *Config) {
 		c.Gateway.OutQueue = 64
 		c.Gateway.SocketWriteBuffer = 4 << 10
-		c.Gateway.WriteTimeout = 0 // rely on the queue limit alone
+		c.Gateway.WriteTimeout = 300 * time.Millisecond // how long it may stay behind (decision 022)
 		c.Gateway.IdleTimeout = 0
 	})
 	healthy := dial(t, s, 2)
@@ -407,9 +407,9 @@ func TestSlowConsumerDisconnected(t *testing.T) {
 	// Meanwhile the healthy client keeps trading; time each round trip.
 	var worst time.Duration
 	deadline := time.Now().Add(20 * time.Second)
-	for i := 0; s.Publisher().Stats().SlowConsumers == 0; i++ {
+	for i := 0; slowConsumers(s) == 0; i++ {
 		if time.Now().After(deadline) {
-			t.Fatalf("slow client never disconnected; publisher stats %+v", s.Publisher().Stats())
+			t.Fatalf("slow client never disconnected; stats %+v %+v", s.Publisher().Stats(), s.Gateway().Stats())
 		}
 		t0 := time.Now()
 		_ = healthy.NewOrder(limit(2, uint64(i+1), proto.SideBuy, 10, 1))

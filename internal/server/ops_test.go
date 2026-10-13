@@ -31,6 +31,13 @@ import (
 
 func withHTTP(c *Config) { c.HTTPAddr = "127.0.0.1:0" }
 
+// slowConsumers counts slow-consumer disconnects however they were caught:
+// by the publisher (queue over its limits) or by a session's writer (a
+// socket write past WriteTimeout). Decision 022.
+func slowConsumers(s *testServer) uint64 {
+	return s.Publisher().Stats().SlowConsumers + s.Gateway().Stats().SlowWrites
+}
+
 func httpDo(t *testing.T, method, url, body string, out any) int {
 	t.Helper()
 	req, err := http.NewRequest(method, url, strings.NewReader(body))
@@ -431,7 +438,7 @@ func TestSlowConsumerDoesNotMoveEngineLatency(t *testing.T) {
 	s := start(t, func(c *Config) {
 		c.Gateway.OutQueue = 256
 		c.Gateway.SocketWriteBuffer = 4 << 10
-		c.Gateway.WriteTimeout = 0 // only the full queue may disconnect it
+		c.Gateway.WriteTimeout = 300 * time.Millisecond // how long it may stay behind (decision 022)
 	})
 	run := func() metrics.HistogramSnapshot {
 		before := s.latency.Snapshot()
@@ -451,8 +458,8 @@ func TestSlowConsumerDoesNotMoveEngineLatency(t *testing.T) {
 	}
 	// ...and never reads.
 	slow := run()
-	if st := s.Publisher().Stats(); st.SlowConsumers == 0 {
-		t.Fatalf("the stalled subscriber was never disconnected: %+v", st)
+	if slowConsumers(s) == 0 {
+		t.Fatalf("the stalled subscriber was never disconnected: %+v %+v", s.Publisher().Stats(), s.Gateway().Stats())
 	}
 
 	describe := func(h metrics.HistogramSnapshot) string {

@@ -43,10 +43,14 @@ type session struct {
 	// goroutine; read by close (any goroutine) under closeMu.
 	client book.ClientID
 
-	// out is the bounded outbound queue: the publisher offers engine events
-	// here without blocking (Deliver), the writer drains it. Its capacity is
-	// the slow-consumer threshold.
-	out chan engine.Event
+	// out is the outbound queue: the publisher offers engine events here
+	// without blocking (Deliver), the writer drains it. A client that stays
+	// over its soft limit longer than WriteTimeout, or reaches its hard
+	// limit, is a slow consumer (decision 022).
+	out *outQueue
+	// slowWhy is why Deliver last refused an event, for SlowConsumer's log
+	// line. Both run on the publisher goroutine, one right after the other.
+	slowWhy string
 	// snaps holds market-data snapshots waiting to be streamed, in the order
 	// of their EvSnapshot markers in out (decision 016).
 	snaps chan *publisher.Snapshot
@@ -66,21 +70,21 @@ func newSession(g *Gateway, conn net.Conn) *session {
 		g:      g,
 		conn:   conn,
 		remote: conn.RemoteAddr().String(),
-		out:    make(chan engine.Event, g.cfg.OutQueue),
+		out:    newOutQueue(g.cfg.OutQueue, g.cfg.OutQueue+publisher.MaxPending, &g.peakQueued),
 		snaps:  make(chan *publisher.Snapshot, maxPendingSnapshots),
 		ctrl:   make(chan control, 16),
 		done:   make(chan struct{}),
 	}
 }
 
-// Deliver implements publisher.Subscriber: a non-blocking offer.
+// Deliver implements publisher.Subscriber: a non-blocking offer, refused
+// only if the client is a slow consumer (decision 022).
 func (s *session) Deliver(ev engine.Event) bool {
-	select {
-	case s.out <- ev:
-		return true
-	default:
-		return false
+	ok, why := s.out.push(ev, s.g.cfg.WriteTimeout, time.Now)
+	if !ok {
+		s.slowWhy = why
 	}
+	return ok
 }
 
 // DeliverSnapshot implements publisher.Subscriber without blocking: the
@@ -92,6 +96,7 @@ func (s *session) DeliverSnapshot(snap *publisher.Snapshot) bool {
 	select {
 	case s.snaps <- snap:
 	default:
+		s.slowWhy = fmt.Sprintf("%d market-data snapshots already waiting to be sent", maxPendingSnapshots)
 		return false
 	}
 	return s.Deliver(engine.Event{Kind: engine.EvSnapshot, Instrument: snap.Instrument, MDSeq: snap.MDSeq})
@@ -109,7 +114,7 @@ func (s *session) Closed() bool {
 
 // SlowConsumer implements publisher.Subscriber.
 func (s *session) SlowConsumer() {
-	s.close(fmt.Sprintf("slow consumer: outbound queue full (%d events)", cap(s.out)))
+	s.close("slow consumer: " + s.slowWhy)
 }
 
 // close tears the session down once, from any goroutine: it records why,
@@ -332,58 +337,100 @@ func readErrorReason(err error) string {
 func (s *session) writeLoop() {
 	defer s.g.wg.Done()
 	bw := bufio.NewWriterSize(s.conn, 32<<10)
-	buf := make([]byte, 0, 128) // one encoded frame at a time, reused
-	finishing := s.g.finishing  // closed by FinishWriters; nil once seen
+	buf := make([]byte, 0, 128)           // one encoded frame at a time, reused
+	batch := make([]engine.Event, 0, 256) // events taken from out, written in order
+	next := 0                             // batch[next:] are still to write
+	finishing := s.g.finishing            // closed by FinishWriters; nil once seen
 	draining := false
+	idle := func() bool { return next == len(batch) && s.out.len() == 0 && len(s.ctrl) == 0 }
 	for {
-		if draining && len(s.out) == 0 && len(s.ctrl) == 0 {
+		if draining && idle() {
 			// Graceful shutdown: everything queued has been written.
 			if err := s.flush(bw); err != nil {
-				s.close("write error: " + err.Error())
+				s.writeFailed(err, "")
 				return
 			}
 			s.lingerClose()
 			s.close("server shutting down")
 			return
 		}
+		if next == len(batch) {
+			batch, next = s.out.pop(batch[:0], cap(batch)), 0
+		}
+		// Control replies first, without waiting: a closeAfter or a
+		// heartbeat answer isn't stuck behind a long run of events.
+		var ctrl *control
 		select {
-		case <-finishing:
-			draining, finishing = true, nil
-			continue
-		case ev := <-s.out:
+		case c := <-s.ctrl:
+			ctrl = &c
+		case <-s.done:
+			return
+		default:
+		}
+		if ctrl == nil && next == len(batch) {
+			// Nothing to write: wait for an event, a reply, shutdown.
+			select {
+			case <-finishing:
+				draining, finishing = true, nil
+				continue
+			case <-s.out.ready:
+				continue
+			case c := <-s.ctrl:
+				ctrl = &c
+			case <-s.done:
+				return
+			}
+		}
+		switch {
+		case ctrl != nil:
+			buf = appendControl(buf[:0], ctrl)
+			if ctrl.closeAfter {
+				_, _ = bw.Write(buf)
+				_ = s.flush(bw)
+				s.close(ctrl.reason)
+				return
+			}
+		default:
+			ev := &batch[next]
+			next++
+			buf = appendEvent(buf[:0], ev)
 			if ev.Kind == engine.EvSnapshot {
 				if err := s.streamSnapshot(bw); err != nil {
-					s.close("write error during snapshot: " + err.Error())
+					s.writeFailed(err, "during snapshot")
 					return
 				}
 				buf = buf[:0]
-				break
 			}
-			buf = appendEvent(buf[:0], &ev)
-		case c := <-s.ctrl:
-			buf = appendControl(buf[:0], &c)
-			if c.closeAfter {
-				_, _ = bw.Write(buf)
-				_ = s.flush(bw)
-				s.close(c.reason)
-				return
-			}
-		case <-s.done:
-			return
 		}
 		if len(buf) > 0 {
 			if _, err := bw.Write(buf); err != nil {
-				s.close("write error: " + err.Error())
+				s.writeFailed(err, "")
 				return
 			}
 		}
-		if len(s.out) == 0 && len(s.ctrl) == 0 {
+		if idle() {
 			if err := s.flush(bw); err != nil {
-				s.close("write error: " + err.Error())
+				s.writeFailed(err, "")
 				return
 			}
 		}
 	}
+}
+
+// writeFailed closes the session after a failed write. A write that hit
+// the WriteTimeout deadline means the client didn't drain in time: a slow
+// consumer, counted as one (decision 022). Anything else is a write error.
+func (s *session) writeFailed(err error, during string) {
+	if during != "" {
+		during = " " + during
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		s.g.slowWrites.Add(1)
+		s.close(fmt.Sprintf("slow consumer: socket write%s blocked for longer than WriteTimeout (%v)", during, s.g.cfg.WriteTimeout))
+		return
+	}
+	s.close("write error" + during + ": " + err.Error())
 }
 
 // streamSnapshot writes the next pending snapshot: its header, then one

@@ -319,7 +319,10 @@ func TestSlowMarketDataSubscriber(t *testing.T) {
 	s := start(t, func(c *Config) {
 		c.Gateway.OutQueue = 64
 		c.Gateway.SocketWriteBuffer = 4 << 10
-		c.Gateway.WriteTimeout = 0
+		// The client may stay behind for this long (decision 022): then
+		// either its queue has been over 64 events too long, or the
+		// writer's blocked socket write hits the deadline.
+		c.Gateway.WriteTimeout = 300 * time.Millisecond
 	})
 	nc, err := net.DialTimeout("tcp", s.Addr(), wait)
 	if err != nil {
@@ -333,16 +336,16 @@ func TestSlowMarketDataSubscriber(t *testing.T) {
 	// ...and never reads. Meanwhile a trader generates plenty of market data.
 	deadline := time.Now().Add(20 * time.Second)
 	trader := dial(t, s, 2)
-	for i := 0; s.Publisher().Stats().SlowConsumers == 0; i++ {
+	for i := 0; slowConsumers(s) == 0; i++ {
 		if time.Now().After(deadline) {
-			t.Fatalf("slow subscriber never disconnected: %+v", s.Publisher().Stats())
+			t.Fatalf("slow subscriber never disconnected: %+v %+v", s.Publisher().Stats(), s.Gateway().Stats())
 		}
 		_ = trader.NewOrder(limit(1, uint64(i+1), proto.SideBuy, int64(10+i%50), 1))
 		if m := recv(t, trader, 1)[0]; m.Type != proto.TypeAck {
 			t.Fatalf("trader got %v", m)
 		}
 	}
-	waitForLog(t, s, "slow market-data consumer disconnected")
+	waitForLog(t, s, "reason=\"slow consumer: ")
 	_ = nc.SetDeadline(time.Now().Add(wait))
 	buf := make([]byte, 64<<10)
 	for {

@@ -37,15 +37,19 @@ type Config struct {
 	// Addr is the TCP listen address, e.g. "127.0.0.1:9000" (":0" picks a
 	// free port).
 	Addr string
-	// OutQueue is each session's outbound queue length in events. A client
-	// whose queue fills up is disconnected as a slow consumer.
+	// OutQueue is each session's outbound queue's soft limit, in events. A
+	// client whose queue stays above it for longer than WriteTimeout, or
+	// reaches OutQueue + publisher.MaxPending, is disconnected as a slow
+	// consumer (decision 022). A burst may exceed it briefly.
 	OutQueue int
 	// IdleTimeout disconnects a client that sends nothing (not even a
 	// Heartbeat) for this long. 0 disables it.
 	IdleTimeout time.Duration
-	// WriteTimeout bounds a single flush to the socket. A client that stops
-	// reading eventually makes a flush block; after this long the session
-	// is closed. 0 disables it.
+	// WriteTimeout bounds a single flush to the socket, and how long a
+	// client's queue may stay above OutQueue (decision 022). A client that
+	// stops reading eventually makes a flush block; after this long the
+	// session is closed as a slow consumer. 0 disables both, leaving only
+	// the hard limit.
 	WriteTimeout time.Duration
 	// SocketWriteBuffer, if > 0, sets the kernel send buffer (SO_SNDBUF) of
 	// accepted connections. Only tests need it: a small buffer makes a
@@ -92,6 +96,11 @@ type Gateway struct {
 
 	accepted atomic.Uint64 // counters for tests now, /metrics in milestone 7
 	active   atomic.Int64
+	// slowWrites: sessions closed because a socket write blocked for longer
+	// than WriteTimeout: slow consumers caught by the writer rather than by
+	// the publisher (decision 022).
+	slowWrites atomic.Uint64
+	peakQueued atomic.Int64 // the most events any session's outbound queue has held
 }
 
 // New returns a gateway that will send commands on cmds and register
@@ -245,11 +254,13 @@ func (g *Gateway) FinishWriters(timeout time.Duration) int {
 
 // Stats is a snapshot of the gateway's counters.
 type Stats struct {
-	Accepted uint64 // connections accepted since start
-	Active   int64  // connections currently open
+	Accepted   uint64 // connections accepted since start
+	Active     int64  // connections currently open
+	SlowWrites uint64 // sessions closed because a write blocked longer than WriteTimeout
+	PeakQueued int64  // the most events any session's outbound queue has held at once
 }
 
 // Stats returns the current counters. Safe from any goroutine.
 func (g *Gateway) Stats() Stats {
-	return Stats{Accepted: g.accepted.Load(), Active: g.active.Load()}
+	return Stats{Accepted: g.accepted.Load(), Active: g.active.Load(), SlowWrites: g.slowWrites.Load(), PeakQueued: g.peakQueued.Load()}
 }

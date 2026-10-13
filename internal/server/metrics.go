@@ -48,6 +48,9 @@ func (s *Server) registerMetrics() {
 
 	// WAL (matchd_wal_fsync_seconds is registered in Start, before recovery
 	// opens the WAL).
+	r.GaugeFunc("matchd_wal_fsync_in_progress_seconds",
+		"How long the fsync now running has taken so far; 0 when none is. A stuck disk shows here before the fsync returns.",
+		func() float64 { return s.wal.SyncInProgress().Seconds() })
 	r.CounterFunc("matchd_wal_written_bytes_total", "Bytes written to WAL segments since start.", s.wal.Written)
 	r.GaugeFunc("matchd_durable_seq", "Highest command seq known to be on stable storage.",
 		func() float64 { return float64(s.durable.Load()) })
@@ -62,7 +65,8 @@ func (s *Server) registerMetrics() {
 	r.GaugeFunc("matchd_connections", "Client connections open now.", func() float64 { return float64(s.gw.Stats().Active) })
 	r.CounterFunc("matchd_connections_accepted_total", "Client connections accepted since start.", func() uint64 { return s.gw.Stats().Accepted })
 	r.CounterFunc("matchd_slow_consumer_disconnects_total",
-		"Sessions disconnected because their outbound queue was full.", func() uint64 { return s.pub.Stats().SlowConsumers })
+		"Sessions disconnected as slow consumers: outbound queue over its soft limit for longer than the write timeout, at its hard limit, or a socket write blocked longer than the write timeout (decision 022).",
+		func() uint64 { return s.pub.Stats().SlowConsumers + s.gw.Stats().SlowWrites })
 	r.GaugeFunc("matchd_events_held", "Events waiting for their command's fsync.", func() float64 { return float64(s.pub.Stats().Held) })
 
 	// Market data.

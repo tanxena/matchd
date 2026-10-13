@@ -72,7 +72,7 @@ func main() {
 	gw := gateway.DefaultConfig()
 	var instruments instrumentFlags
 	flag.StringVar(&gw.Addr, "listen", gw.Addr, "TCP address for client connections")
-	flag.IntVar(&gw.OutQueue, "out-queue", gw.OutQueue, "per-client outbound queue (events); a client that fills it is disconnected")
+	flag.IntVar(&gw.OutQueue, "out-queue", gw.OutQueue, "per-client outbound queue soft limit (events); a client above it for longer than -write-timeout is disconnected")
 	flag.DurationVar(&gw.IdleTimeout, "idle-timeout", gw.IdleTimeout, "disconnect clients silent this long (0 = never)")
 	flag.DurationVar(&gw.WriteTimeout, "write-timeout", gw.WriteTimeout, "disconnect clients whose socket won't accept data this long (0 = never)")
 	flag.Var(&instruments, "instrument", "SYMBOL:TICK:LOT to register (repeatable; ids from 1 in order)")
@@ -80,6 +80,7 @@ func main() {
 	fsync := flag.String("fsync", "always", "fsync policy: always, group:<duration> (e.g. group:1ms), or never (tests only)")
 	snapEvery := flag.Uint64("snapshot-every", 1_000_000, "snapshot after this many commands (0 = no command trigger)")
 	snapInterval := flag.Duration("snapshot-interval", 10*time.Second, "snapshot at least this often while commands arrive (0 = no time trigger)")
+	fsyncStall := flag.Duration("fsync-stall", wal.DefaultStallThreshold, "an fsync slower than this counts as a durability stall (metric and warning)")
 	segBytes := flag.Int64("wal-segment-bytes", 64<<20, "start a new WAL segment after this many bytes")
 	httpAddr := flag.String("http", "127.0.0.1:9100", `HTTP address for /metrics, /healthz and /instruments ("" = off)`)
 	shutdownTimeout := flag.Duration("shutdown-timeout", 5*time.Second, "on shutdown, how long clients get to receive what is queued for them")
@@ -106,7 +107,7 @@ func main() {
 	srv, err := server.Start(server.Config{
 		DataDir: *dataDir, Fsync: policy, Gateway: gw, Instruments: instruments, Log: log,
 		SnapshotEvery: *snapEvery, SnapshotInterval: *snapInterval,
-		WAL:      wal.Options{SegmentSize: *segBytes},
+		WAL:      wal.Options{SegmentSize: *segBytes, StallThreshold: *fsyncStall},
 		HTTPAddr: *httpAddr, ShutdownTimeout: *shutdownTimeout,
 	})
 	if err != nil {

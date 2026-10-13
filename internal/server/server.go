@@ -159,6 +159,8 @@ func Start(cfg Config) (*Server, error) {
 	reg := metrics.NewRegistry()
 	fsyncLatency := reg.Histogram("matchd_wal_fsync_seconds", "Duration of each WAL fsync.", metrics.FsyncBuckets)
 	cfg.WAL.FsyncLatency = fsyncLatency
+	cfg.WAL.FsyncStalls = reg.Counter("matchd_wal_fsync_stalls_total",
+		"Durability stalls: fsyncs slower than the stall threshold (-fsync-stall, default 25ms).")
 
 	// Recovery (PRD 5.4): manifest -> latest snapshot -> replay the WAL
 	// records after it. The engine is deterministic, so this rebuilds

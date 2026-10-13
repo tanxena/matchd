@@ -91,7 +91,7 @@ func TestDeepSnapshotUnreadDisconnects(t *testing.T) {
 		t.Fatal(err)
 	}
 	// ...and never reads.
-	waitForLog(t, s, "write error during snapshot")
+	waitForLog(t, s, "slow consumer: socket write during snapshot blocked")
 
 	trader := dial(t, s, 51)
 	if err := trader.NewOrder(limit(1, 1, proto.SideBuy, 50000, 1)); err != nil {
