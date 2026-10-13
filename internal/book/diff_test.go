@@ -197,12 +197,23 @@ func (g *generator) next() command {
 	case r < 50: // limit, placed per the current regime
 		o := g.newOrder(g.client())
 		o.Side, o.Type = g.side(), book.Limit
-		o.TIF = book.GTC
-		if g.rng.IntN(10) == 0 {
+		switch t := g.rng.IntN(100); {
+		case t < 70:
+			o.TIF = book.GTC
+		case t < 78:
 			o.TIF = book.Day
+		case t < 89:
+			o.TIF = book.IOC
+		default:
+			o.TIF = book.FOK
 		}
 		o.Price = g.limitPrice(o.Side)
 		o.Qty = book.Qty(1 + g.rng.IntN(20))
+		if o.TIF == book.FOK && g.rng.IntN(3) == 0 {
+			// Large enough to need several levels, so both outcomes (and
+			// the walk across levels) are common.
+			o.Qty = book.Qty(10 + g.rng.IntN(60))
+		}
 		c = command{kind: cmdSubmit, order: o}
 	case r < 58: // market
 		o := g.newOrder(g.client())
@@ -267,7 +278,7 @@ func (g *generator) invalid() command {
 	o := g.newOrder(g.client())
 	o.Side, o.Type, o.TIF = g.side(), book.Limit, book.GTC
 	o.Price, o.Qty = book.Price(g.mid), 1
-	switch g.rng.IntN(7) {
+	switch g.rng.IntN(9) {
 	case 0:
 		o.Qty = 0
 	case 1:
@@ -282,6 +293,12 @@ func (g *generator) invalid() command {
 		o.TIF = 9
 	case 6:
 		o.Type, o.TIF = book.Market, 0 // market with a price
+	case 7, 8:
+		o.Type, o.Price = book.Market, 0 // market IOC or FOK: limit-only TIFs
+		o.TIF = book.IOC
+		if g.rng.IntN(2) == 0 {
+			o.TIF = book.FOK
+		}
 	}
 	return command{kind: cmdSubmit, order: o}
 }
@@ -487,8 +504,10 @@ type coverage struct {
 	commands, fills, multiFill int
 	rested, partialRest        int
 	marketExpired              int
+	iocUnfilled, iocFilled     int // IOC orders with a remainder cancelled; fully filled ones
+	fokFilled, fokMultiLevel   int // FOK orders filled in full; ...across more than one level
 	cancelsOK                  int
-	rejects                    [book.RejectUnknownOrder + 1]int
+	rejects                    [book.RejectFOKNoLiquidity + 1]int
 	reusedClOrdOK              int // accepted orders whose (client, clOrdID) had been used before
 	depth                      int // max resting orders seen
 	freezes, cowCopies         int // snapshots taken mid-stream; chunks copied because of them
@@ -507,8 +526,25 @@ func (c *coverage) submit(cmd command, r book.Result, fills []book.Fill) {
 			c.partialRest++
 		}
 	}
-	if r.Expired > 0 {
+	if r.Expired > 0 && cmd.order.Type == book.Market {
 		c.marketExpired++
+	}
+	if r.Reject == book.RejectNone {
+		switch cmd.order.TIF {
+		case book.IOC:
+			if cmd.order.Type == book.Limit && r.Expired > 0 {
+				c.iocUnfilled++
+			} else if r.Filled == cmd.order.Qty {
+				c.iocFilled++
+			}
+		case book.FOK:
+			if r.Filled == cmd.order.Qty && r.Rested == 0 && r.Expired == 0 {
+				c.fokFilled++
+				if len(fills) > 0 && fills[0].Price != fills[len(fills)-1].Price {
+					c.fokMultiLevel++
+				}
+			}
+		}
 	}
 	if cmd.reuse && r.Reject == book.RejectNone {
 		c.reusedClOrdOK++
@@ -531,6 +567,10 @@ func (c *coverage) add(o coverage) {
 	c.rested += o.rested
 	c.partialRest += o.partialRest
 	c.marketExpired += o.marketExpired
+	c.iocUnfilled += o.iocUnfilled
+	c.iocFilled += o.iocFilled
+	c.fokFilled += o.fokFilled
+	c.fokMultiLevel += o.fokMultiLevel
 	c.cancelsOK += o.cancelsOK
 	c.reusedClOrdOK += o.reusedClOrdOK
 	c.freezes += o.freezes
@@ -542,12 +582,20 @@ func (c *coverage) add(o coverage) {
 }
 
 func (c coverage) String() string {
-	s := fmt.Sprintf("commands=%d fills=%d multi-fill-orders=%d rested=%d partial-then-rest=%d market-expired=%d cancels-ok=%d clordid-reused=%d max-depth=%d snapshots=%d cow-copies=%d rejects:",
-		c.commands, c.fills, c.multiFill, c.rested, c.partialRest, c.marketExpired, c.cancelsOK, c.reusedClOrdOK, c.depth, c.freezes, c.cowCopies)
-	for r := book.RejectInvalidSide; r <= book.RejectUnknownOrder; r++ {
+	s := fmt.Sprintf("commands=%d fills=%d multi-fill-orders=%d rested=%d partial-then-rest=%d market-expired=%d ioc-unfilled=%d ioc-filled=%d fok-filled=%d fok-multi-level=%d cancels-ok=%d clordid-reused=%d max-depth=%d snapshots=%d cow-copies=%d rejects:",
+		c.commands, c.fills, c.multiFill, c.rested, c.partialRest, c.marketExpired, c.iocUnfilled, c.iocFilled, c.fokFilled, c.fokMultiLevel,
+		c.cancelsOK, c.reusedClOrdOK, c.depth, c.freezes, c.cowCopies)
+	for _, r := range bookRejects {
 		s += fmt.Sprintf(" %s=%d", r, c.rejects[r])
 	}
 	return s
+}
+
+// bookRejects are the reasons a Book itself returns (the engine-level ones
+// in between never come from a book).
+var bookRejects = []book.RejectReason{
+	book.RejectInvalidSide, book.RejectInvalidType, book.RejectInvalidQty, book.RejectInvalidPrice,
+	book.RejectInvalidTIF, book.RejectDuplicateClientOrderID, book.RejectUnknownOrder, book.RejectFOKNoLiquidity,
 }
 
 func (c coverage) requireCoverage(t *testing.T, n int) {
@@ -562,10 +610,14 @@ func (c coverage) requireCoverage(t *testing.T, n int) {
 		{"orders resting", c.rested},
 		{"partial fill then rest", c.partialRest},
 		{"market remainders expired", c.marketExpired},
+		{"IOC remainders cancelled", c.iocUnfilled},
+		{"IOC orders filled in full", c.iocFilled},
+		{"FOK orders filled in full", c.fokFilled},
+		{"FOK orders filled across levels", c.fokMultiLevel},
 		{"successful cancels", c.cancelsOK},
 		{"client order id reused after its order died", c.reusedClOrdOK},
 	}
-	for r := book.RejectInvalidSide; r <= book.RejectUnknownOrder; r++ {
+	for _, r := range bookRejects {
 		checks = append(checks, struct {
 			name string
 			got  int

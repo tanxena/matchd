@@ -63,13 +63,31 @@ func validate(o book.Order) book.RejectReason {
 		if o.Price <= 0 {
 			return book.RejectInvalidPrice
 		}
-		if o.TIF != book.GTC && o.TIF != book.Day {
+		if o.TIF != book.GTC && o.TIF != book.Day && o.TIF != book.IOC && o.TIF != book.FOK {
 			return book.RejectInvalidTIF
 		}
-	} else if o.Price != 0 {
-		return book.RejectInvalidPrice
+	} else {
+		if o.Price != 0 {
+			return book.RejectInvalidPrice
+		}
+		if o.TIF == book.IOC || o.TIF == book.FOK { // limit-only
+			return book.RejectInvalidTIF
+		}
 	}
 	return book.RejectNone
+}
+
+// acceptable reports whether o would trade at price px: always for a market
+// order; for a limit order, only at its price or better.
+func acceptable(o book.Order, px book.Price) bool {
+	switch {
+	case o.Type == book.Market:
+		return true
+	case o.Side == book.Buy:
+		return px <= o.Price
+	default:
+		return px >= o.Price
+	}
 }
 
 // Submit processes a new order, appending fills to fills.
@@ -85,8 +103,24 @@ func (b *Book) Submit(o book.Order, fills []book.Fill) (book.Result, []book.Fill
 		}
 	}
 
-	remaining := o.Qty
 	opp := b.side(o.Side.Opposite())
+	if o.TIF == book.FOK {
+		// Fill or kill: add up the resting orders it would trade with, in
+		// priority order, stopping once they cover it. (Order by order here,
+		// where the real book adds whole levels; the rule is the same.)
+		var avail book.Qty
+		for _, m := range *opp {
+			if !acceptable(o, m.Price) || avail >= o.Qty {
+				break
+			}
+			avail += m.Qty
+		}
+		if avail < o.Qty {
+			return book.Result{Reject: book.RejectFOKNoLiquidity}, fills
+		}
+	}
+
+	remaining := o.Qty
 	for remaining > 0 && len(*opp) > 0 {
 		m := &(*opp)[0] // the single highest-priority resting order
 		if o.Type == book.Limit {
@@ -120,8 +154,8 @@ func (b *Book) Submit(o book.Order, fills []book.Fill) (book.Result, []book.Fill
 	if remaining == 0 {
 		return res, fills
 	}
-	if o.Type == book.Market {
-		res.Expired = remaining
+	if o.Type == book.Market || o.TIF == book.IOC {
+		res.Expired = remaining // cancelled on arrival, never rests
 		return res, fills
 	}
 

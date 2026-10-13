@@ -175,6 +175,9 @@ func (b *Book) Submit(o Order, fills []Fill) (Result, []Fill) {
 	if _, dup := b.byClOrd.get(clientOrderKey{o.Client, o.ClOrdID}); dup {
 		return Result{Reject: RejectDuplicateClientOrderID}, fills
 	}
+	if o.TIF == FOK && !b.canFill(&o) {
+		return Result{Reject: RejectFOKNoLiquidity}, fills // nothing touched
+	}
 
 	remaining := o.Qty
 	opp := b.ladderFor(o.Side.Opposite())
@@ -224,13 +227,44 @@ func (b *Book) Submit(o Order, fills []Fill) (Result, []Fill) {
 	if remaining == 0 {
 		return res, fills
 	}
-	if o.Type == Market {
+	if o.Type == Market || o.TIF == IOC {
 		res.Expired = remaining
 		return res, fills
+	}
+	if o.TIF == FOK { // canFill said the book holds enough
+		panic(fmt.Sprintf("book: FOK order %d passed the liquidity check but left %d unfilled", o.ID, remaining))
 	}
 	b.rest(&o, remaining)
 	res.Rested = remaining
 	return res, fills
+}
+
+// canFill reports whether the opposite side holds at least o.Qty at prices
+// o accepts, without changing anything: the fill-or-kill pre-check
+// (decision 020). It walks levels from the best, adding each level's total,
+// and stops as soon as the sum covers the order, so its cost is the number
+// of levels the order would trade through, not the depth of the book.
+func (b *Book) canFill(o *Order) bool {
+	ok, _ := b.fillCheck(o)
+	return ok
+}
+
+// fillCheck is canFill, also reporting how many levels it looked at (the
+// bound is tested).
+func (b *Book) fillCheck(o *Order) (ok bool, visited int) {
+	opp := b.ladderFor(o.Side.Opposite())
+	var sum Qty
+	for i := len(opp.levels) - 1; i >= 0; i-- { // best level is last
+		lv := opp.levels[i]
+		visited++
+		if !crosses(o.Side, o.Price, lv.price) {
+			return false, visited
+		}
+		if sum += lv.total; sum >= o.Qty {
+			return true, visited
+		}
+	}
+	return false, visited
 }
 
 // rest places the unfilled remainder of a limit order at the tail of its

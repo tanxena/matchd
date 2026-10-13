@@ -174,3 +174,39 @@ func TestCheckInvariantsDetectsCorruption(t *testing.T) {
 		})
 	}
 }
+
+// The fill-or-kill check stops as soon as the levels it has seen cover the
+// order (decision 020): its cost is the levels the order needs, not the
+// depth of the book.
+func TestFOKCheckVisitsOnlyLevelsNeeded(t *testing.T) {
+	b := mustNew(t)
+	const depth = 10_000
+	for i := range depth { // asks at 101, 102, ...: 5 lots each
+		o := Order{ID: OrderID(i + 1), Client: 1, ClOrdID: ClientOrderID(i + 1), Side: Sell, Type: Limit, TIF: GTC,
+			Price: Price(101 + i), Qty: 5}
+		if res, _ := b.Submit(o, nil); res.Rested != 5 {
+			t.Fatalf("seeding: %+v", res)
+		}
+	}
+	for _, c := range []struct {
+		qty     Qty
+		limit   Price
+		ok      bool
+		visited int
+	}{
+		{5, 101, true, 1},                    // the best level covers it
+		{12, 200, true, 3},                   // 5+5+5 >= 12: three levels, then stop
+		{50, 200, true, 10},                  // exactly ten levels
+		{6, 101, false, 2},                   // the second level is past its limit
+		{depth*5 + 1, 1 << 40, false, depth}, // the whole book isn't enough
+	} {
+		o := Order{ID: 99999, Client: 2, ClOrdID: 1, Side: Buy, Type: Limit, TIF: FOK, Price: c.limit, Qty: c.qty}
+		ok, visited := b.fillCheck(&o)
+		if ok != c.ok || visited != c.visited {
+			t.Errorf("FOK %d @ %d: ok=%v after %d levels, want ok=%v after %d", c.qty, c.limit, ok, visited, c.ok, c.visited)
+		}
+	}
+	if b.Len() != depth {
+		t.Fatalf("the check changed the book: %d orders", b.Len())
+	}
+}

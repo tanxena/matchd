@@ -90,6 +90,12 @@ const (
 	// Day is accepted and treated exactly like GTC in v1: there is no session
 	// end, so nothing expires it. See docs/decisions/003.
 	Day TIF = 2
+	// IOC (immediate or cancel) trades what it can on arrival; the rest is
+	// cancelled instead of resting (decision 020).
+	IOC TIF = 3
+	// FOK (fill or kill) trades its whole quantity on arrival or not at all:
+	// if the book can't fill it completely it is rejected, untouched.
+	FOK TIF = 4
 )
 
 func (t TIF) String() string {
@@ -98,6 +104,10 @@ func (t TIF) String() string {
 		return "gtc"
 	case Day:
 		return "day"
+	case IOC:
+		return "ioc"
+	case FOK:
+		return "fok"
 	}
 	return fmt.Sprintf("tif(%d)", uint8(t))
 }
@@ -120,6 +130,11 @@ const (
 	RejectUnknownInstrument
 	RejectInvalidInstrument
 	RejectDuplicateSymbol
+
+	// RejectFOKNoLiquidity: a fill-or-kill order the book can't fill
+	// completely. A book reason, numbered after the engine's so that every
+	// existing value keeps its meaning in logs and on the wire.
+	RejectFOKNoLiquidity
 )
 
 func (r RejectReason) String() string {
@@ -146,6 +161,8 @@ func (r RejectReason) String() string {
 		return "InvalidInstrument"
 	case RejectDuplicateSymbol:
 		return "DuplicateSymbol"
+	case RejectFOKNoLiquidity:
+		return "FOKNoLiquidity"
 	}
 	return fmt.Sprintf("reject(%d)", uint8(r))
 }
@@ -157,7 +174,7 @@ type Order struct {
 	ClOrdID ClientOrderID
 	Side    Side
 	Type    OrderType
-	TIF     TIF   // limit only; ignored for market orders
+	TIF     TIF   // limit only; a market order ignores it, except that IOC and FOK are refused
 	Price   Price // limit only; must be 0 for market orders
 	Qty     Qty
 }
@@ -169,7 +186,7 @@ type Result struct {
 	Reject  RejectReason // RejectNone if the order was accepted
 	Filled  Qty          // quantity traded immediately
 	Rested  Qty          // quantity now resting on the book (limit only)
-	Expired Qty          // unfilled quantity cancelled on arrival (market only)
+	Expired Qty          // unfilled quantity cancelled on arrival (market, or limit IOC)
 }
 
 // CancelResult describes the outcome of a cancel. On success it also echoes
@@ -275,12 +292,18 @@ func (o *Order) Validate() RejectReason {
 		if o.Price <= 0 {
 			return RejectInvalidPrice
 		}
-		if o.TIF != GTC && o.TIF != Day {
+		if o.TIF != GTC && o.TIF != Day && o.TIF != IOC && o.TIF != FOK {
 			return RejectInvalidTIF
 		}
 	case Market:
 		if o.Price != 0 {
 			return RejectInvalidPrice
+		}
+		// IOC and FOK are limit-only (decision 020): a market order already
+		// behaves like IOC, and "market FOK" is out of scope. Any other TIF
+		// on a market order is ignored, as before.
+		if o.TIF == IOC || o.TIF == FOK {
+			return RejectInvalidTIF
 		}
 	}
 	return RejectNone
