@@ -86,6 +86,16 @@ func (c *Conn) send(enc func([]byte) []byte) error {
 	return err
 }
 
+// WriteFrames writes already-encoded frames (proto.Append*) in a single
+// write: a sender batching several commands per syscall, like the
+// benchmark's load generator, encodes them itself and hands them over here.
+func (c *Conn) WriteFrames(b []byte) error {
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	_, err := c.conn.Write(b)
+	return err
+}
+
 // NewOrder sends a NewOrder.
 func (c *Conn) NewOrder(m proto.NewOrder) error {
 	return c.send(func(b []byte) []byte { return proto.AppendNewOrder(b, &m) })
