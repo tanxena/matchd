@@ -91,7 +91,7 @@ restart:  manifest ─▶ newest snapshot ─▶ WAL records after its seq ─�
   - `group:1ms`: commands reach the engine at once, a syncer fsyncs at most every millisecond, and answers are held until their fsync;
   - `never`: tests only; acknowledged work can be lost on power failure.
 
-  **Under every policy, no answer leaves the process before its command is on disk.** The benchmark measures what each policy costs.
+  **Under `always` and `group`, no answer leaves the process before its command is fsynced to disk. Under `never`, before it is written to the operating system**, which a power failure can lose. The benchmark measures what each policy costs.
 - **Snapshots** ([decision 013](docs/decisions/013-copy-on-write-snapshots.md)): every 10 s (and on shutdown), the engine freezes its books between two commands and hands a copy-on-write view to a writer goroutine. The engine carries on, copying only the parts it changes. Two snapshots are kept; older WAL segments are deleted.
 - **Replay check** ([decision 014](docs/decisions/014-fill-log-and-replay-check.md)): `engctl replay-check --data DIR` rebuilds the newest snapshot independently, from the older one plus the WAL, and checks every logged fill against the replay.
 
