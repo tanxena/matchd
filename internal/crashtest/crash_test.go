@@ -172,7 +172,26 @@ var listenRe = regexp.MustCompile(`msg="gateway listening" addr=(\S+)`)
 
 // startEngine runs the engine binary on dir and returns it once it accepts
 // connections, with its address and a buffer collecting its log.
-func startEngine(t *testing.T, dir, archive, policy string, segBytes int) (*exec.Cmd, string, *strings.Builder) {
+// engineLog is the engine's stderr as collected so far. The scanner
+// goroutine appends to it while the test reads it, so both lock.
+type engineLog struct {
+	mu sync.Mutex // guards b
+	b  strings.Builder
+}
+
+func (l *engineLog) add(line string) {
+	l.mu.Lock()
+	l.b.WriteString(line + "\n")
+	l.mu.Unlock()
+}
+
+func (l *engineLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+func startEngine(t *testing.T, dir, archive, policy string, segBytes int) (*exec.Cmd, string, *engineLog) {
 	t.Helper()
 	cmd := exec.Command(engineBin, "-data", dir, "-archive", archive, "-listen", "127.0.0.1:0", "-http", "", "-fsync", policy,
 		"-snapshot-every", "200", "-snapshot-interval", "20ms", "-idle-timeout", "0",
@@ -186,16 +205,13 @@ func startEngine(t *testing.T, dir, archive, policy string, segBytes int) (*exec
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	logs := &strings.Builder{}
-	var logMu sync.Mutex // guards logs (written by the scanner goroutine)
+	logs := &engineLog{}
 	addrCh := make(chan string, 1)
 	go func() { // scanner: forwards the address, keeps the log
 		sc := bufio.NewScanner(stderr)
 		sent := false
 		for sc.Scan() {
-			logMu.Lock()
-			logs.WriteString(sc.Text() + "\n")
-			logMu.Unlock()
+			logs.add(sc.Text())
 			if m := listenRe.FindStringSubmatch(sc.Text()); m != nil && !sent {
 				addrCh <- m[1]
 				sent = true
