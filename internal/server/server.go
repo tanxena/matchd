@@ -8,7 +8,7 @@
 // tests exercise exactly the wiring that ships.
 //
 // Beside the TCP gateway there is a small HTTP listener (decision 018):
-// /metrics, /healthz, and GET/POST /instruments. Nothing on it touches the
+// /metrics, /healthz, GET/POST /instruments, and GET /debug/latency. Nothing on it touches the
 // order path: admin commands go through the sequencer like any other, and
 // reads are answered from the publisher's view.
 package server
@@ -108,7 +108,8 @@ type Server struct {
 
 	cfg       Config
 	reg       *metrics.Registry
-	latency   *metrics.Histogram // the engine's per-command latency
+	latency   *metrics.Histogram    // the engine's per-command latency
+	fine      *metrics.LogHistogram // the same span, precise to 3.1%, for GET /debug/latency
 	httpSrv   *http.Server
 	httpLn    net.Listener
 	admin     *admin

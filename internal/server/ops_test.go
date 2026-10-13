@@ -226,6 +226,19 @@ func TestMetricsEndpoint(t *testing.T) {
 	if age := m[`matchd_snapshot_age_seconds`]; !(age >= 0 && age < 60) { // SnapshotEvery 3: one was taken
 		t.Errorf("snapshot age %v", age)
 	}
+
+	// GET /debug/latency (decision 021): the same 6 spans, precise to 3.1%.
+	var lat latencyResponse
+	if code := httpDo(t, "GET", "http://"+s.HTTPAddr()+"/debug/latency", "", &lat); code != http.StatusOK {
+		t.Fatalf("GET /debug/latency: %d", code)
+	}
+	if lat.Matching.SubBits != 5 || lat.Matching.Count() != 6 {
+		t.Errorf("/debug/latency: sub_bits %d, count %d; want 5 and 6", lat.Matching.SubBits, lat.Matching.Count())
+	}
+	// Recorded from the same reading as the /metrics histogram: same sum.
+	if got, want := float64(lat.Matching.SumNS)/1e9, m[`matchd_matching_latency_seconds_sum`]; math.Abs(got-want) > 1e-12 {
+		t.Errorf("/debug/latency sum %vs, /metrics sum %vs", got, want)
+	}
 }
 
 // Metrics count only what has been released, i.e. durable.

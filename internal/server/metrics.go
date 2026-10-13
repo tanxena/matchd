@@ -25,6 +25,11 @@ func (s *Server) registerMetrics() {
 		"Time for the matching step alone (engine.Step), without handing the events on.",
 		metrics.MatchingBuckets)
 	s.eng.SetLatency(s.latency, step)
+	// The same span in a log-linear histogram, served as JSON at
+	// GET /debug/latency rather than in /metrics: the benchmark reads its
+	// quantiles and maximum to within 3.1% (decision 021).
+	s.fine = metrics.NewLogHistogram()
+	s.eng.SetFineLatency(s.fine)
 
 	// Commands and fills: counted by the publisher on release, so only
 	// durable commands are ever counted.

@@ -24,6 +24,7 @@ func (s *Server) listenHTTP(addr string) error {
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /instruments", s.handleListInstruments)
 	mux.HandleFunc("POST /instruments", s.handleAddInstrument)
+	mux.HandleFunc("GET /debug/latency", s.handleLatency)
 	s.httpLn = ln
 	s.httpSrv = &http.Server{
 		Handler:           mux,
@@ -41,6 +42,20 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	if err := s.reg.WriteText(w); err != nil {
 		s.log.Debug("metrics write", "err", err) // the scraper went away
 	}
+}
+
+// latencyResponse is GET /debug/latency's body.
+type latencyResponse struct {
+	// Matching: matchd_matching_latency_seconds' span (dequeue to last
+	// event sent), in log-linear buckets (metrics.LogSnapshot).
+	Matching metrics.LogSnapshot `json:"matching"`
+}
+
+// handleLatency serves the engine's fine-grained latency histogram, counts
+// since start. The benchmark reads it at the start and end of its window
+// and subtracts (decision 021).
+func (s *Server) handleLatency(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, latencyResponse{Matching: s.fine.Snapshot()})
 }
 
 // handleHealth: 200 while serving; 503 while shutting down, or for good

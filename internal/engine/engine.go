@@ -29,6 +29,9 @@ type Engine struct {
 	// (decision 017).
 	latency *metrics.Histogram
 	step    *metrics.Histogram
+	// fine records the same span as latency, to within 3.1%, for the
+	// benchmark (GET /debug/latency, decision 021).
+	fine *metrics.LogHistogram
 }
 
 // SetLatency makes Run record, for every command:
@@ -41,6 +44,13 @@ type Engine struct {
 //
 // Either may be nil. Call before Run.
 func (e *Engine) SetLatency(latency, step *metrics.Histogram) { e.latency, e.step = latency, step }
+
+// SetFineLatency makes Run also record latency's span in h, a log-linear
+// histogram precise to 3.1% at any scale (the benchmark's source for
+// core-latency quantiles and the maximum, decision 021). It is recorded
+// after the span's closing clock read, so it isn't part of what it
+// measures. nil turns it off. Call before Run.
+func (e *Engine) SetFineLatency(h *metrics.LogHistogram) { e.fine = h }
 
 // New returns an engine with no instruments.
 func New() *Engine {
@@ -140,7 +150,9 @@ func (e *Engine) Run(in <-chan Command, out chan<- Event, snap *SnapshotHooks) {
 				out <- buf[i]
 			}
 			e.step.Observe(stepped - start)
-			e.latency.Observe(clock.Now() - start)
+			took := clock.Now() - start
+			e.latency.Observe(took)
+			e.fine.Observe(took)
 			since++
 			if snap != nil && snap.Every > 0 && since >= snap.Every {
 				trigger()

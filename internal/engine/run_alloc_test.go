@@ -9,8 +9,8 @@ import (
 	"github.com/tanxena/matchd/internal/metrics"
 )
 
-// Run's per-command path, with latency recording on (two histograms, three
-// clock reads), allocates nothing: acceptance 3 covers the goroutine form,
+// Run's per-command path, with latency recording on (three histograms,
+// three clock reads), allocates nothing: acceptance 3 covers the goroutine form,
 // not only Step. Counted across the whole process with MemStats, since
 // AllocsPerRun can't see into another goroutine.
 func TestRunRecordsLatencyWithoutAllocating(t *testing.T) {
@@ -19,6 +19,8 @@ func TestRunRecordsLatencyWithoutAllocating(t *testing.T) {
 	e.Step(&engine.Command{Seq: 1, Kind: engine.CmdAddInstrument, Spec: book.Instrument{Symbol: "XYZ", TickSize: 1, LotSize: 1}}, out)
 	lat, step := metrics.NewHistogram(metrics.MatchingBuckets), metrics.NewHistogram(metrics.MatchingBuckets)
 	e.SetLatency(lat, step)
+	fine := metrics.NewLogHistogram()
+	e.SetFineLatency(fine)
 
 	in := make(chan engine.Command, 4096)
 	events := make(chan engine.Event, 1<<16)
@@ -61,7 +63,7 @@ func TestRunRecordsLatencyWithoutAllocating(t *testing.T) {
 	close(in)
 
 	allocs := after.Mallocs - before.Mallocs
-	if got := lat.Snapshot().Count(); got != 2*(warm+measured) || step.Snapshot().Count() != got {
+	if got := lat.Snapshot().Count(); got != 2*(warm+measured) || step.Snapshot().Count() != got || fine.Snapshot().Count() != got {
 		t.Fatalf("recorded %d latencies, want %d", got, 2*(warm+measured))
 	}
 	t.Logf("%d heap allocations over %d commands", allocs, 2*measured)
