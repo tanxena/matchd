@@ -11,7 +11,7 @@ EXE  := $(if $(filter Windows_NT,$(OS)),.exe,)
 # The race detector needs cgo.
 export CGO_ENABLED := 1
 
-.PHONY: build test test-long lint run bench ci fmt-check clean
+.PHONY: build test test-long test-race-loop lint run bench ci fmt-check clean
 
 ## build: engine and engctl into bin/
 build:
@@ -28,6 +28,15 @@ test:
 test-long:
 	$(GO) test -count=1 -timeout 60m ./internal/book/ -run TestDifferential -long
 	$(GO) test -count=1 -timeout 60m ./internal/crashtest/ -run TestCrashRecovery -crash
+
+## test-race-loop: run one package under -race N times, every run's -v
+## output appended to a log, to catch a failure that happens rarely.
+##   make test-race-loop N=50 PKG=./internal/server/
+N   ?= 50
+PKG ?= ./internal/server/
+RACE_LOG ?= $(BIN)/race-loop.log
+test-race-loop:
+	@mkdir -p $(BIN); : > $(RACE_LOG); fails=0; 	for i in $$(seq 1 $(N)); do 		echo "=== run $$i of $(N): go test -race -count=1 -v $(PKG)" >> $(RACE_LOG); 		if $(GO) test -race -count=1 -v -timeout 10m $(PKG) >> $(RACE_LOG) 2>&1; then 			echo "run $$i: ok"; 		else 			echo "run $$i: FAIL"; echo "=== run $$i FAILED" >> $(RACE_LOG); fails=$$((fails+1)); 		fi; 	done; 	echo "$$fails of $(N) runs failed; output in $(RACE_LOG)"; [ $$fails -eq 0 ]
 
 ## lint: golangci-lint with its default linters
 lint:

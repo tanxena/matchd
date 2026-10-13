@@ -48,6 +48,7 @@ Go 1.27 ([decision 004](docs/decisions/004-toolchain.md)). The race detector nee
 | `make build` | `bin/engine`, `bin/engctl` |
 | `make test` | the suite with `-race`, including 5 kill-and-recover crash runs |
 | `make test-long` | the 1M-command differential test (acceptance 1) and 50 crash runs (acceptance 2) |
+| `make test-race-loop N=50` | one package (`PKG`, default `./internal/server/`) under `-race` N times, every run's output kept in `bin/race-loop.log` ([open observation 001](docs/bugs/001-unreproduced-server-race-failure.md)) |
 | `make lint` | `golangci-lint` |
 | `make run` | an engine on `./data` with one instrument |
 | `make bench` | every benchmark, with allocation counts |
