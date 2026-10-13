@@ -118,7 +118,7 @@ When a network packet or disk completion arrives, the CPU runs an **interrupt** 
   6. **Window end, in reverse:** flip the phase (stop counting), take `end`, CPU times, read the engine. The engine's window therefore *encloses* the load generator's, by the time an HTTP read takes.
   7. `halt` stops the senders. **Drain:** wait until every command has its answer, so no connection closes with answers still queued at the engine. Then close.
   8. Assemble: sum the connections, merge their histograms (`LogSnapshot.Add`), subtract the engine's before from its after.
-- **`pace`** ([run.go:271](../../bench/internal/load/run.go#L271)), the open-loop sender. One goroutine, staggered schedules per connection (`interval × i / n`), and a loop:
+- **`pace`** ([run.go:276](../../bench/internal/load/run.go#L276)), the open-loop sender. One goroutine, staggered schedules per connection (`interval × i / n`), and a loop:
 
   ```go
   now := clock.Now()
@@ -126,7 +126,7 @@ When a network packet or disk completion arrives, the CPU runs an **interrupt** 
   ```
 
   Every due command is sent in one write. It **spins** rather than sleeps (a sleep wakes late by the timer's granularity), and calls `runtime.Gosched` every 1,024 spins so the readers aren't starved of a P.
-- **`cpuUse`** ([run.go:357](../../bench/internal/load/run.go#L357)) turns two CPU samples into cores used: engine, load generator, machine busy, interrupts + DPCs, and **every other process**, from the OS's process list, with the top five named.
+- **`cpuUse`** ([run.go:362](../../bench/internal/load/run.go#L362)) turns two CPU samples into cores used: engine, load generator, machine busy, interrupts + DPCs, and **every other process**, from the OS's process list, with the top five named.
 
 **`scrape.go`.** **`parseMetrics`** ([scrape.go:111](../../bench/internal/load/scrape.go#L111)) reads `series value` lines into a map. **`counters`** ([scrape.go:172](../../bench/internal/load/scrape.go#L172)) subtracts before from after for commands, trades, fsyncs (count and sum, giving the mean), WAL bytes, snapshots and slow consumers, and reads the clock's source and cost.
 

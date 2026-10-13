@@ -167,11 +167,16 @@ func Run(cfg Config) (*result.Load, error) {
 
 	t0 := clock.Now()
 	sleepUnlessStopped(r, cfg.Warmup)
-	// Window start: the engine's counters, then CPU times, then the flip;
-	// at the end the same in reverse, so the engine's window encloses ours
-	// by the time a scrape takes (about a millisecond).
-	before, errBefore := eng.read()
+	// Window start: CPU times, then the engine's counters, then the flip,
+	// at once. Window end: stop counting and sending at once, then CPU
+	// times and the engine's counters. The engine's window then encloses
+	// ours by one HTTP scrape (about a millisecond) at the start, and at
+	// the end by the commands still in flight when sending stopped. Until
+	// review F-018 a full process-list query sat between the first scrape
+	// and the flip, and sending went on until after the second scrape: the
+	// engine counted 100-220 more commands per run, 5-18 ms of traffic.
 	cpu0, errCPU := readCPU(cfg.EnginePID)
+	before, errBefore := eng.read()
 	r.phase.CompareAndSwap(phaseWarmup, phaseMeasure)
 	start := clock.Now()
 	out.WarmupNS = start - t0
@@ -179,10 +184,10 @@ func Run(cfg Config) (*result.Load, error) {
 	sleepUnlessStopped(r, cfg.Duration)
 	r.phase.CompareAndSwap(phaseMeasure, phaseDone) // stop counting...
 	end := clock.Now()
+	r.halt() // ...and stop sending
 	cpu1, errCPU2 := readCPU(cfg.EnginePID)
 	after, errAfter := eng.read()
 	out.MeasuredNS = end - start
-	r.halt() // ...and stop sending
 
 	// Drain: wait for every answer, so the engine has nothing queued for
 	// connections about to close.

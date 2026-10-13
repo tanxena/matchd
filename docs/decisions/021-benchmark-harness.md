@@ -172,7 +172,7 @@ That work runs during measured windows: snapshots in the snapshot row, a fresh d
 - **Loopback TCP is not a network.** End-to-end latency includes two kernel network stacks on one machine and the L3 the two processes share. It's an upper bound on what the engine adds, not a network figure.
 - **End-to-end latency includes the WAL fsync** (`group:1ms` in the latency tables). In the smoke runs the fsync itself averaged 1.4–2.4 ms on this laptop's SSD, which dominates end-to-end p50 (3–4 ms). That's what the durability contract costs here, and the fsync table shows it per policy.
 - **Quantiles are up to 3.1% high** (Decision 3). The tables say so.
-- **The window edges are scraped over HTTP.** The engine's counters cover a window about a millisecond wider than the load generator's, 0.002% of 60 s.
+- **The window edges are scraped over HTTP.** The engine's counters cover a slightly wider window than the load generator's. *(Review F-018: in the committed results it was 100–220 commands per open-loop run wider, 5–18 ms of traffic, not about a millisecond as first written. A process-list query sat between the first scrape and the start of the window, and sending continued until after the second scrape. That is about 0.02% of samples, negligible for the quantiles, though a core-latency maximum could come from those edges. Runs from the fix on read CPU times before the first scrape and stop sending before the second, leaving one scrape at the start and the in-flight commands at the end.)*
 - **The open-loop pacer always costs one busy CPU** in the load generator.
 - **Synthetic mixes, one instrument, one machine.** The numbers describe this engine under this protocol, nothing more (PRD 7.7: no comparisons).
 
