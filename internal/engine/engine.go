@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/tanxena/matchd/internal/book"
+	"github.com/tanxena/matchd/internal/clock"
+	"github.com/tanxena/matchd/internal/metrics"
 )
 
 // Engine owns every order book and applies commands to them one at a time.
@@ -22,7 +24,23 @@ type Engine struct {
 	lastMatchID uint64       // last match id given to a fill pair
 
 	fills []book.Fill // scratch buffer reused across commands
+
+	// latency and step, if set, record each command's time in Run
+	// (decision 017).
+	latency *metrics.Histogram
+	step    *metrics.Histogram
 }
+
+// SetLatency makes Run record, for every command:
+//   - in latency: from taking it off the input channel to sending its last
+//     event (PRD 5.8's "engine in -> events emitted"). This includes
+//     handing the events over: waking an idle publisher, and any time the
+//     engine is blocked on a full output channel, which is what a slow
+//     consumer would show up as;
+//   - in step: Step alone, the matching work itself.
+//
+// Either may be nil. Call before Run.
+func (e *Engine) SetLatency(latency, step *metrics.Histogram) { e.latency, e.step = latency, step }
 
 // New returns an engine with no instruments.
 func New() *Engine {
@@ -46,17 +64,23 @@ func (e *Engine) Step(c *Command, out []Event) []Event {
 	}
 	e.lastSeq = c.Seq
 
+	first := len(out)
 	switch c.Kind {
 	case CmdNewOrder:
-		return e.newOrder(c, out)
+		out = e.newOrder(c, out)
 	case CmdCancel:
-		return e.cancel(c, out)
+		out = e.cancel(c, out)
 	case CmdAddInstrument:
-		return e.addInstrument(c, out)
+		out = e.addInstrument(c, out)
+	default:
+		// The gateway only builds known kinds and the WAL checksums records,
+		// so an unknown kind here is a bug, not client input.
+		panic(fmt.Sprintf("engine: command seq %d has unknown kind %v", c.Seq, c.Kind))
 	}
-	// The gateway only builds known kinds and the WAL checksums records, so an
-	// unknown kind here is a bug, not client input.
-	panic(fmt.Sprintf("engine: command seq %d has unknown kind %v", c.Seq, c.Kind))
+	for i := first; i < len(out); i++ {
+		out[i].Cmd = c.Kind
+	}
+	return out
 }
 
 // Run is the body of the engine goroutine. It applies commands from in, in
@@ -107,10 +131,16 @@ func (e *Engine) Run(in <-chan Command, out chan<- Event, snap *SnapshotHooks) {
 			if !ok {
 				return // a snapshot still in flight is the writer's to finish
 			}
+			// internal/clock, never time.Now: time.Now can't resolve a
+			// sub-microsecond step on Windows (decision 017).
+			start := clock.Now()
 			buf = e.Step(&c, buf[:0])
+			stepped := clock.Now()
 			for i := range buf {
 				out <- buf[i]
 			}
+			e.step.Observe(stepped - start)
+			e.latency.Observe(clock.Now() - start)
 			since++
 			if snap != nil && snap.Every > 0 && since >= snap.Every {
 				trigger()
@@ -155,6 +185,7 @@ func (e *Engine) delta(c *Command, side book.Side, px book.Price, qty book.Qty) 
 	return Event{
 		Seq: c.Seq, Time: c.Time, Kind: EvBookDelta, Instrument: c.Instrument,
 		Side: side, Price: px, Qty: qty, MDSeq: e.nextMD(c.Instrument),
+		Orders: uint32(e.books[c.Instrument].Len()),
 	}
 }
 
@@ -281,7 +312,7 @@ func (e *Engine) addInstrument(c *Command, out []Event) []Event {
 	e.symbols[c.Spec.Symbol] = id
 	return append(out, Event{
 		Seq: c.Seq, Time: c.Time, Kind: EvInstrumentAdded, Instrument: id,
-		Client: c.Client,
+		Client: c.Client, ClOrdID: c.ClOrdID, // the admin endpoint matches its answer by these
 	})
 }
 

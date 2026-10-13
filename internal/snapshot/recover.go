@@ -3,7 +3,9 @@ package snapshot
 import (
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/tanxena/matchd/internal/engine"
 	"github.com/tanxena/matchd/internal/wal"
@@ -13,7 +15,8 @@ func walDir(dataDir string) string { return filepath.Join(dataDir, "wal") }
 
 // Recovered describes how the engine was rebuilt.
 type Recovered struct {
-	SnapshotSeq uint64 // 0 if no snapshot was used
+	SnapshotSeq uint64    // 0 if no snapshot was used
+	SnapshotAt  time.Time // when that snapshot file was written (its modification time)
 	WAL         wal.RecoveryInfo
 	Replayed    int // WAL records applied after the snapshot
 }
@@ -59,6 +62,9 @@ func Recover(dataDir string, walOpts wal.Options, log *slog.Logger) (*engine.Eng
 			return nil, nil, rec, fmt.Errorf("snapshot %s: %w", entry.File, err)
 		}
 		rec.SnapshotSeq = entry.Seq
+		if fi, err := os.Stat(filepath.Join(snapshotDir(dataDir), entry.File)); err == nil {
+			rec.SnapshotAt = fi.ModTime()
+		}
 	}
 
 	var cmd engine.Command

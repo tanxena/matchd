@@ -35,6 +35,7 @@ type Writer struct {
 	failed       atomic.Uint64
 	lastSeq      atomic.Uint64
 	lastDuration atomic.Int64 // nanoseconds for the last successful write
+	lastAt       atomic.Int64 // wall time of the last successful write, Unix ns
 }
 
 // Run writes every snapshot from in and returns it on done. It returns when
@@ -42,18 +43,27 @@ type Writer struct {
 // durability comes from the WAL; a snapshot only shortens recovery.
 func (w *Writer) Run(in <-chan *engine.Snapshot, done chan<- *engine.Snapshot) {
 	for s := range in {
-		start := time.Now()
-		if err := w.write(s); err != nil {
-			w.failed.Add(1)
-			w.Log.Error("snapshot failed", "seq", s.Seq, "err", err)
-		} else {
-			w.written.Add(1)
-			w.lastSeq.Store(uint64(s.Seq))
-			w.lastDuration.Store(int64(time.Since(start)))
-			w.Log.Info("snapshot written", "seq", s.Seq, "took", time.Since(start))
-		}
-		done <- s // always: the engine must thaw it either way
+		_ = w.WriteNow(s) // logged and counted there
+		done <- s         // always: the engine must thaw it either way
 	}
+}
+
+// WriteNow writes one snapshot on the caller's goroutine, logging and
+// counting the result as Run does. The server uses it for the shutdown
+// snapshot, after Run has finished.
+func (w *Writer) WriteNow(s *engine.Snapshot) error {
+	start := time.Now()
+	if err := w.write(s); err != nil {
+		w.failed.Add(1)
+		w.Log.Error("snapshot failed", "seq", s.Seq, "err", err)
+		return err
+	}
+	w.written.Add(1)
+	w.lastSeq.Store(uint64(s.Seq))
+	w.lastDuration.Store(int64(time.Since(start)))
+	w.lastAt.Store(time.Now().UnixNano())
+	w.Log.Info("snapshot written", "seq", s.Seq, "took", time.Since(start))
+	return nil
 }
 
 // errDurabilityFailed: the WAL can no longer make the snapshot's commands
@@ -151,6 +161,7 @@ type Stats struct {
 	Failed       uint64
 	LastSeq      uint64
 	LastDuration time.Duration
+	LastAt       time.Time // zero if none written by this process
 }
 
 // Stats returns the current counters. Safe from any goroutine.
@@ -158,5 +169,13 @@ func (w *Writer) Stats() Stats {
 	return Stats{
 		Written: w.written.Load(), Failed: w.failed.Load(),
 		LastSeq: w.lastSeq.Load(), LastDuration: time.Duration(w.lastDuration.Load()),
+		LastAt: lastAt(w.lastAt.Load()),
 	}
+}
+
+func lastAt(ns int64) time.Time {
+	if ns == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns)
 }

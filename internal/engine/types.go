@@ -191,4 +191,12 @@ type Event struct {
 
 	Reason       book.RejectReason // Reject
 	CancelReason CancelReason      // Cancelled
+	// Cmd is the kind of command that caused the event, so consumers can
+	// tell a rejected cancel from a rejected order (metrics, admin).
+	Cmd CommandKind
+	// Orders is the instrument's resting order count after the command
+	// (BookDelta only). Never sent on the wire: the publisher keeps the
+	// latest released value for GET /instruments (milestone 7). It sits in
+	// what was padding, so Event stays 112 bytes.
+	Orders uint32
 }

@@ -104,6 +104,12 @@ func (v *views) apply(c engine.Command, evs []engine.Event, lastOrderID *book.Or
 		if e.Seq != c.Seq || e.Time != c.Time {
 			return fmt.Errorf("event %d (%v) carries seq=%d time=%d, command has %d/%d", i, e.Kind, e.Seq, e.Time, c.Seq, c.Time)
 		}
+		if e.Cmd != c.Kind {
+			return fmt.Errorf("event %d (%v) carries command kind %v, command is %v", i, e.Kind, e.Cmd, c.Kind)
+		}
+		if e.Kind != engine.EvBookDelta && e.Orders != 0 {
+			return fmt.Errorf("%v carries an order count (%d); only deltas do", e.Kind, e.Orders)
+		}
 		// Market-data events are numbered per instrument, gap-free.
 		if e.Kind == engine.EvBookDelta || e.Kind == engine.EvTrade {
 			if e.MDSeq != v.md[e.Instrument]+1 {
@@ -181,6 +187,22 @@ func (v *views) apply(c engine.Command, evs []engine.Event, lastOrderID *book.Or
 			}
 		default:
 			return fmt.Errorf("unexpected event kind %v", e.Kind)
+		}
+	}
+	// Every delta carries its instrument's resting order count after the
+	// whole command, which the client view now holds too.
+	for _, e := range evs {
+		if e.Kind != engine.EvBookDelta {
+			continue
+		}
+		n := 0
+		for id := range v.open {
+			if v.inst[id] == e.Instrument {
+				n++
+			}
+		}
+		if int(e.Orders) != n {
+			return fmt.Errorf("delta says instrument %d has %d resting orders, the client view has %d", e.Instrument, e.Orders, n)
 		}
 	}
 	return nil

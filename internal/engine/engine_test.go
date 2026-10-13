@@ -208,9 +208,17 @@ func TestRegistry(t *testing.T) {
 	if d.e.NumInstruments() != 2 {
 		t.Fatalf("NumInstruments = %d after rejected adds, want 2", d.e.NumInstruments())
 	}
+	// The admin endpoint (milestone 7) matches its answer by client and
+	// request id, so InstrumentAdded echoes them, and every event names its
+	// command's kind.
+	added := d.step(engine.Command{Kind: engine.CmdAddInstrument, Client: 9, ClOrdID: 77, Spec: book.Instrument{Symbol: "DDD", TickSize: 1, LotSize: 1}})
+	if len(added) != 1 || added[0].Kind != engine.EvInstrumentAdded || added[0].Client != 9 || added[0].ClOrdID != 77 ||
+		added[0].Instrument != 3 || added[0].Cmd != engine.CmdAddInstrument {
+		t.Fatalf("add DDD: %+v", added)
+	}
 
 	// Orders and cancels for ids that don't exist.
-	for _, bad := range []engine.InstrumentID{0, 3, 1 << 31} {
+	for _, bad := range []engine.InstrumentID{0, 4, 1 << 31} {
 		expect(t, d.step(limit(bad, 1, 1, buy, 10, 1)), ev{kind: engine.EvReject, client: 1, clOrd: 1, reason: book.RejectUnknownInstrument})
 		expect(t, d.step(cancel(bad, 1, 1)), ev{kind: engine.EvReject, client: 1, order: 1, reason: book.RejectUnknownInstrument})
 	}

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tanxena/matchd/internal/clock"
 	"github.com/tanxena/matchd/internal/durable"
 	"github.com/tanxena/matchd/internal/engine"
 	"github.com/tanxena/matchd/internal/wal"
@@ -21,8 +22,10 @@ import (
 // Clock returns the current time in nanoseconds since the Unix epoch.
 type Clock func() engine.Timestamp
 
-// WallClock reads the system clock.
-func WallClock() engine.Timestamp { return engine.Timestamp(time.Now().UnixNano()) }
+// WallClock reads the wall clock at internal/clock's resolution: on
+// Windows, time.Now only advances every timer tick (about 0.5 ms), which
+// would give a whole burst of commands the same timestamp (decision 017).
+func WallClock() engine.Timestamp { return engine.Timestamp(clock.WallNanos()) }
 
 // Mode is an fsync policy.
 type Mode uint8

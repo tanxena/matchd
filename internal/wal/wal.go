@@ -31,7 +31,9 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/tanxena/matchd/internal/clock"
 	"github.com/tanxena/matchd/internal/fsutil"
+	"github.com/tanxena/matchd/internal/metrics"
 )
 
 const (
@@ -80,6 +82,8 @@ type Options struct {
 	ReadOnly bool
 	// Log receives recovery messages (torn tails). nil = discard.
 	Log *slog.Logger
+	// FsyncLatency, if set, records every fsync's duration (decision 017).
+	FsyncLatency *metrics.Histogram
 }
 
 // Record is one log entry as seen by a replay callback. Payload aliases an
@@ -123,6 +127,7 @@ type Log struct {
 
 	appended atomic.Uint64 // last seq whose bytes have been written to the OS
 	synced   atomic.Uint64 // last seq covered by a successful fsync
+	written  atomic.Uint64 // bytes written to segments since Open (metrics)
 
 	pending      []byte // records appended but not yet flushed (appender only)
 	pendingLast  uint64 // seq of the last record in pending
@@ -442,6 +447,7 @@ func (l *Log) Flush() error {
 	n, err := l.cur.Write(l.pending)
 	l.curSize += int64(n)
 	l.mu.Unlock()
+	l.written.Add(uint64(n))
 	if err != nil {
 		return fmt.Errorf("wal: write: %w", err)
 	}
@@ -497,12 +503,19 @@ func (l *Log) Sync() (uint64, error) {
 	if f == nil || upto <= l.synced.Load() {
 		return l.synced.Load(), nil
 	}
-	if err := f.Sync(); err != nil {
+	start := clock.Now()
+	err := f.Sync()
+	l.opts.FsyncLatency.Observe(clock.Now() - start)
+	if err != nil {
 		return l.synced.Load(), fmt.Errorf("wal: fsync: %w", err)
 	}
 	l.synced.Store(upto)
 	return upto, nil
 }
+
+// Written is the number of bytes written to segments since Open. Safe from
+// any goroutine.
+func (l *Log) Written() uint64 { return l.written.Load() }
 
 // LastAppended is the seq of the last record written to the OS.
 func (l *Log) LastAppended() uint64 { return l.appended.Load() }
