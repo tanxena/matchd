@@ -1,5 +1,5 @@
 // Package client is a minimal Go client for the engine's wire protocol. It is
-// used by engctl, the end-to-end tests, and (milestone 9) the load generator.
+// used by engctl, the end-to-end tests, and the load generator.
 package client
 
 import (

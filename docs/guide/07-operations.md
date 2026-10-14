@@ -51,7 +51,7 @@ An **invariant TSC** fixes both. It ticks at a constant rate, regardless of freq
 2. Sleep 100 ms.
 3. Do step 1 again.
 
-The rate is ΔTSC ÷ Δtime(QPC). Each end is uncertain by about one QPC tick (100 ns) plus the bracket's width, so over 100 ms the rate is off by roughly a few parts per million (ppm). Nanoseconds are then `(tsc − base) × mult >> 32`, with `mult` a 32.32 fixed-point "ns per tick" and a 128-bit multiply (`math/bits.Mul64`), so it never overflows. The TSC timeline is anchored to QPC's, so switching between the two can't make time jump.
+The rate is ΔTSC ÷ Δtime(QPC). Each end is uncertain by about one QPC tick (100 ns) plus the bracket's width, so over 100 ms the rate is off by roughly a few parts per million (ppm). Nanoseconds are then `(tsc − base) × mult >> 32`, with `mult` a 32.32 fixed-point "ns per tick" and a 128-bit multiply (`math/bits.Mul64`), so it never overflows. A reading below the base (another core's counter a few ticks behind) converts to a time just before the base, not one about 2^64 ticks in the future, as an unsigned difference would (`calibration.ns`, review F-020). The TSC timeline is anchored to QPC's, so switching between the two can't make time jump.
 
 **How much drift?** `TestCalibrationDriftAgainstQPC` compares 3 s of TSC-derived time with QPC:
 - measured −0.02, 1.02 and 3.62 ppm, and −9.85 ppm under the race detector;
@@ -67,7 +67,7 @@ For durations of microseconds the calibration error is irrelevant. It would only
 - With clients sending one order at a time, the engine idles between commands, and each command runs on a cold core (cold caches, clocked-down CPU): `Step` lands in the 2–10 µs buckets.
 - Under a sustained burst it's under 1 µs at the median.
 
-Milestone 2's 0.3 µs was a hot loop of `Step` with nothing else running. A latency number is meaningless without saying which regime it came from, and the benchmark (milestone 9) will.
+Milestone 2's 0.3 µs was a hot loop of `Step` with nothing else running. A latency number is meaningless without saying which regime it came from, and the benchmark (milestone 9) states it for every table.
 
 ### 1.4 Shutting down a server without losing answers
 
@@ -98,7 +98,7 @@ Adding an instrument could be a direct call into the engine's registry. But then
 
 - **`Now`** ([clock.go:71](../../internal/clock/clock.go#L71)): if a calibration is stored, read the TSC and convert (`calibration.ns`); otherwise the fallback source. One atomic load, no allocation.
 - **`WallNanos`** ([clock.go:83](../../internal/clock/clock.go#L83)): wall time at `Init`, plus elapsed `Now`.
-- **`Init`** ([clock.go:92](../../internal/clock/clock.go#L92)) and **`setup`** ([clock.go:92](../../internal/clock/clock.go#L92)): choose and calibrate once (`sync.Once`), then measure the chosen source (`describe`: resolution, and read cost as the best of three passes). Takes about 0.1 s on Windows.
+- **`Init`** ([clock.go:92](../../internal/clock/clock.go#L92)) and **`setup`** ([clock.go:99](../../internal/clock/clock.go#L99)): choose and calibrate once (`sync.Once`), then measure the chosen source (`describe`: resolution, and read cost as the best of three passes). Takes about 0.1 s on Windows.
 - **`calibrate`** ([clock_windows.go:51](../../internal/clock/clock_windows.go#L51)) and **`pair`** ([clock_windows.go:76](../../internal/clock/clock_windows.go#L76)): the 100 ms comparison against QPC described in §1.3, rejecting implausible rates (under 100 MHz or over 20 GHz).
 - **`qpc`** ([clock_windows.go:29](../../internal/clock/clock_windows.go#L29)): `syscall.SyscallN` into `kernel32.dll`. **`qpcNS`** ([clock_windows.go:37](../../internal/clock/clock_windows.go#L37)) converts ticks to nanoseconds without overflowing: `ticks × 1e9` would overflow after about ten days of uptime.
 - **`invariantTSC`** ([tsc_amd64.go:13](../../internal/clock/tsc_amd64.go#L13)), with `rdtsc` and `cpuid` in `tsc_amd64.s`. On other architectures, `tsc_noasm.go` reports no TSC; on other OSes, `clock_other.go` uses Go's monotonic clock.
@@ -112,7 +112,7 @@ Adding an instrument could be a direct call into the engine's registry. But then
 
 ### Where it's recorded
 
-- **`Engine.Run`** ([engine.go:127](../../internal/engine/engine.go#L127)): `start := clock.Now()`, `Step`, `stepped := clock.Now()`, the sends, then `step.Observe(stepped-start)` and `latency.Observe(clock.Now()-start)`. **`SetLatency`** ([engine.go:56](../../internal/engine/engine.go#L56)) wires the two histograms. `Step` now also stamps each event with its command's kind (`Event.Cmd`), and every delta carries the instrument's resting order count (`Event.Orders`, from `Book.Len`, O(1)), both in what was padding.
+- **`Engine.Run`** ([engine.go:127](../../internal/engine/engine.go#L127)): `start := clock.Now()`, `Step`, `stepped := clock.Now()`, the sends (counting any that found the output channel full, `Engine.OutputBlocked`, since review F-008), then `step.Observe(stepped-start)` and `latency.Observe(clock.Now()-start)`. **`SetLatency`** ([engine.go:56](../../internal/engine/engine.go#L56)) wires the two histograms. `Step` now also stamps each event with its command's kind (`Event.Cmd`), and every delta carries the instrument's resting order count (`Event.Orders`, from `Book.Len`, O(1)), both in what was padding.
 - **`Log.Sync`** ([wal.go:518](../../internal/wal/wal.go#L518)): times every fsync; `Flush` counts bytes written.
 - **`Publisher.count`** ([publisher.go:143](../../internal/publisher/publisher.go#L143)): called for each **released** event. It counts the command decided by `Ack`, `Reject`, `Cancelled(requested)` or `InstrumentAdded`, plus fills and trades, and logs the debug line per command. The **`Metrics`** struct ([publisher.go:128](../../internal/publisher/publisher.go#L128)) holds the counters.
 - **`registerMetrics`** ([metrics.go:16](../../internal/server/metrics.go#L16), server package) creates every series and wires the hot-path ones. **`snapshotAge`** ([metrics.go:87](../../internal/server/metrics.go#L87)) reports +Inf when no snapshot exists.

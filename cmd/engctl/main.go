@@ -218,7 +218,7 @@ func cmdOrder(args []string) error {
 	case "market":
 		m.Type, m.Price = proto.TypeMarket, 0
 		// Passed through only if asked for, so the engine's answer (a
-		// reject: IOC and FOK are limit-only) is what the user sees.
+		// reject: IOC and FOK are limit-only) is what gets printed.
 		if t := strings.ToLower(*tif); t == "ioc" || t == "fok" {
 			m.TIF, _ = parseTIF(t)
 		}

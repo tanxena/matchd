@@ -101,14 +101,14 @@ Three things make this trustworthy rather than theatrical:
 
 - **`Price`, `Qty`, `OrderID`, `ClientID`, `ClientOrderID`** ([types.go:18–33](../../internal/book/types.go#L18)). Each is a distinct named integer type, so the compiler refuses to mix them: a `Qty` can't be passed where a `Price` is expected.
 - **`Side`, `OrderType`, `TIF`** ([types.go:38–104](../../internal/book/types.go#L38)). Small enums whose **zero value is invalid** (`Buy = 1`, `Sell = 2`), so an order with a forgotten field is rejected instead of quietly becoming a buy. Each has a `String()` method for readable test output. `Side.Opposite()` gives the side an order trades against.
-- **`RejectReason`** ([types.go:116](../../internal/book/types.go#L116)). `RejectNone` (0) means accepted. The book's reasons are `InvalidSide`, `InvalidType`, `InvalidQty`, `InvalidPrice`, `InvalidTIF`, `DuplicateClientOrderID` and `UnknownOrder`. Since milestone 2 the enum also holds three engine-level reasons that a `Book` never returns (`UnknownInstrument`, `InvalidInstrument`, `DuplicateSymbol`), so the engine, wire protocol and books share one list.
+- **`RejectReason`** ([types.go:116](../../internal/book/types.go#L116)). `RejectNone` (0) means accepted. The book's reasons are `InvalidSide`, `InvalidType`, `InvalidQty`, `InvalidPrice`, `InvalidTIF`, `DuplicateClientOrderID` and `UnknownOrder`. Since milestone 2 the enum also holds three engine-level reasons that a `Book` never returns (`UnknownInstrument`, `InvalidInstrument`, `DuplicateSymbol`), so the engine, wire protocol and books share one list. Milestone 8 appended one more book reason, `FOKNoLiquidity`, numbered after the engine's so every existing value keeps its meaning.
 - **`Order`** ([types.go:171](../../internal/book/types.go#L171)). The new-order command.
 - **`Result`** ([types.go:185](../../internal/book/types.go#L185)). The outcome of `Submit`: `Reject`, `Filled`, `Rested`, `Expired`. For an accepted order, Filled + Rested + Expired = Qty.
 - **`CancelResult`** ([types.go:195](../../internal/book/types.go#L195)). `Reject` and `Cancelled` (the quantity removed). Since milestone 2 it also echoes the removed order's `Side`, `Price` and `ClOrdID`, so the engine can build the cancel acknowledgement and the book delta without a second lookup.
 - **`Fill`** ([types.go:205](../../internal/book/types.go#L205)). One match. It records the price (always the maker's), the quantity, the taker's side, id and client, and the maker's id, client and client order id. **`MakerLeft`** is the maker's quantity after this fill, so 0 means the maker left the book. Milestone 2 uses it to emit the right book delta without asking the book again.
 - **`RestingOrder`** ([types.go:219](../../internal/book/types.go#L219)). A read-only view of an order on the book. The two books are compared using it.
 - **`Instrument` and `Instrument.Validate`** ([types.go:255](../../internal/book/types.go#L255)). Symbol, tick size and lot size. The book checks them once at construction and never uses them in matching.
-- **`Order.Validate`** ([types.go:255](../../internal/book/types.go#L255)). Field checks in a fixed order (side, type, qty, price, tif), so an order with several problems always gets the same reason. Limit orders need price > 0 and TIF GTC or Day; market orders need price == 0. *(Since review F-002, quantity is also bounded by `MaxQty` = 2^30 and a limit price by `MaxPrice` = 2^53, so no level total can overflow; decision 003.)*
+- **`Order.Validate`** ([types.go:292](../../internal/book/types.go#L292)). Field checks in a fixed order (side, type, qty, price, tif), so an order with several problems always gets the same reason. Limit orders need price > 0 and TIF GTC or Day (or, since milestone 8, IOC or FOK); market orders need price == 0, and refuse IOC and FOK (decision 020). *(Since review F-002, quantity is also bounded by `MaxQty` = 2^30 and a limit price by `MaxPrice` = 2^53, so no level total can overflow; decision 003.)*
 
 ### `internal/book/book.go`: the real book
 
@@ -131,7 +131,9 @@ Three things make this trustworthy rather than theatrical:
 - the order slab: `chunks` (fixed-size blocks of 4,096 slots since milestone 5), `nslots` and the free-list head `freeNode`;
 - `freeLevels`, a stack of reusable `*level`;
 - `byID`, an `index[OrderID]` from order id to slot (for cancel);
-- `byClOrd`, an `index[clientOrderKey]` from `(client, clOrdID)` to slot (for the duplicate check).
+- `byClOrd`, an `index[clientOrderKey]` from `(client, clOrdID)` to slot (for the duplicate check);
+- `shared`, since review F-003: the engine's `*ClOrdIDs` ([clord.go](../../internal/book/clord.go)), the live `(client, clOrdID)` pairs across every book of one engine, attached by `Book.Share`. nil for a book on its own;
+- the copy-on-write state of milestone 5 (`epoch`, `frozen`, `spare`, `cowCopies`).
 
 *Revised in milestone 2:* these two were Go maps in milestone 1. They are now the book's own open-addressing hash table (`internal/book/index.go`), because Go maps were measured allocating in steady state. See [02-engine.md](02-engine.md) and [decision 002, revision 2](../decisions/002-order-storage-and-cancel.md).
 
@@ -142,7 +144,8 @@ Three things make this trustworthy rather than theatrical:
 **`Submit(o, fills)`** ([book.go:189](../../internal/book/book.go#L189)) is the main path:
 
 1. `o.Validate()`. If it fails, return the reject with no fills and the book untouched.
-2. Look up `(client, clOrdID)` in `byClOrd`. If the pair is live, reject with `DuplicateClientOrderID`.
+2. `duplicate` looks up `(client, clOrdID)` in `byClOrd` and, if the book shares a `ClOrdIDs`, in that set too, so the pair is checked across every instrument (review F-003). If the pair is live, reject with `DuplicateClientOrderID`.
+   - *Since milestone 8:* a FOK order is then checked by `canFill`, a read-only walk of the opposite side, and rejected with `FOKNoLiquidity`, the book untouched, if it can't fill in full ([08-ioc-fok.md](08-ioc-fok.md)).
 3. **The match loop.** While quantity remains, take the opposite ladder's best level. Stop if there is none, or if this is a limit order and the level doesn't cross. Inner loop, while quantity remains and the level has orders:
    - take the **head** (oldest);
    - trade `min(remaining, maker.qty)`;
@@ -151,16 +154,16 @@ Three things make this trustworthy rather than theatrical:
    - if the maker reached zero, `unlink` it and `release` its slot.
 
    A partially filled maker isn't touched further: it stays at the head with less quantity. When a level empties, it is removed from the end of the ladder (it was the best level, the last element) and its struct goes on the free list.
-4. Build the `Result`. If everything filled, return. A market order's leftover goes into `Expired`. A limit order's leftover is passed to `rest` and goes into `Rested`.
+4. Build the `Result`. If everything filled, return. A market order's leftover, or an IOC limit order's (milestone 8), goes into `Expired`. Any other limit order's leftover is passed to `rest` and goes into `Rested`.
 
 `m := b.nodeW(mi)` returns a writable pointer to the maker. Since milestone 5 it is always safe to hold across the loop: chunks never move when the slab grows, and `nodeW` copies a shared chunk (during a snapshot) at most once, before handing out the pointer. In milestone 1 the slab was one slice, and this pointer was only safe because nothing in the loop grew it; see "What breaks if" #5.
 
-**`rest(o, qty)`** ([book.go:272](../../internal/book/book.go#L272)):
+**`rest(o, qty)`** ([book.go:290](../../internal/book/book.go#L290)):
 
 - Panics if `o.ID` is already resting. That is a caller bug: the engine guarantees unique ids, and continuing would corrupt `byID`.
 - Finds or creates the level, inserting it into the ladder if it is new.
 - `alloc`s a slot, fills it in, and links it at the **tail**, which is what gives time priority.
-- Updates `count` and `total`, then records the order in `byID` and `byClOrd`.
+- Updates `count` and `total`, then records the order in `byID` and `byClOrd`, and in the shared `ClOrdIDs` if there is one.
 
 **`Cancel(client, id)`** ([book.go:339](../../internal/book/book.go#L339)):
 
@@ -176,7 +179,7 @@ Cost: O(1) for the order plus O(log L) to find the level (decision 002).
 **`alloc`** ([cow.go:78](../../internal/book/cow.go#L78)) and **`release`** ([book.go:380](../../internal/book/book.go#L380)) manage the slab.
 
 - `alloc` pops a slot from the free list, or hands out the next one, adding a chunk when the last is full. It panics at 2³²−1 slots.
-- `release` deletes the order from both indexes, **zeroes** the slot (so a stale index reads as an obviously empty order), and pushes it on the free list through `next`.
+- `release` deletes the order from both indexes (and from the shared `ClOrdIDs`, if any), **zeroes** the slot (so a stale index reads as an obviously empty order), and pushes it on the free list through `next`.
 
 **`newLevel` and `freeLevel`** ([book.go:391, 402](../../internal/book/book.go#L391)) do the same for level structs.
 
@@ -202,7 +205,7 @@ Cost: O(1) for the order plus O(log L) to find the level (decision 002).
 - **`Book`** ([ref.go:22](../../internal/book/ref/ref.go#L22)) is just `bids` and `asks` as `[]book.RestingOrder`, each **in priority order, best first**.
 - **`validate`** is the oracle's *own* copy of the validation rules. It doesn't call `book.Order.Validate`, so a validation bug in the real book can't hide by also being in the oracle.
 - **`Submit`** ([ref.go:107](../../internal/book/ref/ref.go#L107)):
-  - scans both slices for a live `(client, clOrdID)`;
+  - scans both slices for a live `(client, clOrdID)`, and, since review F-003, the orders of every book joined to it by `ref.Link`;
   - repeatedly trades with element `[0]` of the opposite slice, stopping when a buy meets an ask above its limit or a sell meets a bid below its limit;
   - deletes makers that reach zero;
   - rests the remainder by inserting it **before the first order with a strictly worse price**, which puts it after every order at an equal price. That is time priority, expressed in one loop.
@@ -227,13 +230,13 @@ Cost: O(1) for the order plus O(log L) to find the level (decision 002).
     - `observe` keeps the generator's live set in step with the **oracle's** results.
   - **`runPair`** ([diff_test.go:400](../../internal/book/diff_test.go#L400)) runs each command through both books. It compares result, fills, resting state (both sides, order by order), best price and quantity, and length. It then runs both invariant checkers and asserts that every maker that just left, and every just-cancelled id, is gone from both books. On the first difference it calls `fail`, which prints the seed, the command number, the command, both sides of the difference, and a replay command line.
   - **`coverage`** counts fills, multi-fill orders, partial-then-rest, market expiries, successful cancels, successful reuse of a dead client order id, and every reject reason. **`requireCoverage`** fails the test if any count is below 0.1% of commands.
-  - **Since review F-004, deep books and edge values.** The "deep" regime above still peaks at a few hundred orders (177 in the 1.2M-command run). So the slab never left its first 4,096-order chunk under the oracle, and the indexes never grew past their initial 1,024 slots. Two additions:
+  - **Since review F-004, deep books and edge values.** The "deep" regime above still peaks below 200 resting orders (177 in the 1.2M-command run). So the slab never left its first 4,096-order chunk under the oracle, and the indexes never grew past their initial size (room for 1,024 orders, 2,048 slots). Two additions:
     - **Edge values in every seed:** about 1 limit order in 400 has quantity `MaxQty`, and 1 in 400 is an IOC at price 1 or `MaxPrice`; invalid orders include `MaxQty + 1` and `MaxPrice + 1`. Floors require each.
-    - **`TestDifferentialDeepBook`** (1 seed, 3 with `-long`): a build-up of 13,000 mostly resting orders, then 7,000 normal commands, with freezes throughout. It requires more than 10,000 resting orders, at least 3 chunks, a grown order index, and copy-on-write copying more than one chunk per snapshot. It measured 11,473–11,615 orders, 3 chunks and 32,768 index slots. The full resting state is compared every 50 commands there (results and fills every command), since comparing 11,000 orders each time made the test 20 times slower.
+    - **`TestDifferentialDeepBook`** (1 seed, 3 with `-long`): a build-up of 13,000 mostly resting orders, then 7,000 normal commands, with freezes throughout. It requires more than 10,000 resting orders (which an ungrown index can't hold, so the order index has grown), at least 3 chunks, and copy-on-write copying more than one chunk per snapshot. It measured 11,473–11,615 orders, 3 chunks and 32,768 index slots. The full resting state is compared every 50 commands there (results and fills every command), since comparing 11,000 orders each time made the test 20 times slower.
   - **`TestDifferentialAcrossInstruments`** (review F-003): the stream spread over two instruments whose books share client order ids.
   - **Flags.** `-long` runs 20 seeds × 60k = 1.2M commands. `-seed N` runs one seed, and `-cmds K` limits it to K commands. `-diffstats` prints per-seed coverage.
 
-**Measured on this machine** (`go test ./internal/book -run Differential -v`):
+**Measured on this machine when milestone 1 was built** (`go test ./internal/book -run Differential -v`). The generator has changed since (IOC and FOK in milestone 8, edge values in review F-004), so a run now gives different counts: the normal run reports 35,416 fills and a max depth of 179.
 
 | run | commands | fills | max resting orders | divergences | wall time |
 |-----|----------|-------|--------------------|-------------|-----------|
@@ -263,7 +266,7 @@ Each of these was either run for real against the harness (the "caught" results 
 
 4. **Cancel skips the ownership check.** Any client can cancel anyone's resting orders by guessing ids. They are small, sequential integers, so that is easy. Once the gateway exists, this is a remote "wipe the book" for any connected client. **Caught:** seed 9, command #31, `Cancel{client=3 id=15}` succeeded in the real book and was rejected by the reference.
 
-5. **Holding a pointer into the slab across a slab growth.** `m := &b.nodes[mi]` points into the slab's current backing array. If something inside the match loop called `alloc()` and the `append` had to grow the slab, Go would copy the slab to a new, larger array. `m` would still point into the *old* array, and every later write through `m` (reducing the maker's qty) would silently go to memory that is no longer the book. The book would then show a maker with its old quantity and fill it twice. **Avoided by construction:** `Submit` finishes the whole match loop, which never allocates a slot, before calling `rest`, which may. The comment on that line states the rule. If milestone 8's FOK pre-check or any future change adds an allocation inside the loop, the differential test is what would catch the double fill.
+5. **Holding a pointer into the slab across a slab growth.** In milestone 1 the slab was one slice, `b.nodes`, and `m := &b.nodes[mi]` pointed into the slab's current backing array. If something inside the match loop called `alloc()` and the `append` had to grow the slab, Go would copy the slab to a new, larger array. `m` would still point into the *old* array, and every later write through `m` (reducing the maker's qty) would silently go to memory that is no longer the book. The book would then show a maker with its old quantity and fill it twice. **Avoided by construction:** `Submit` finishes the whole match loop, which never allocates a slot, before calling `rest`, which may. The comment on that line stated the rule, and the differential test was what would have caught a change that allocated inside the loop.
 
    *Since milestone 5 this hazard is gone by construction:* the slab is a list of chunks that never move, so growing it can't invalidate a pointer. Writes go through `nodeW` for a different reason, copy-on-write during snapshots ([05-recovery.md](05-recovery.md#4-what-breaks-if), item 1).
 
@@ -285,7 +288,7 @@ Each of these was either run for real against the harness (the "caught" results 
 
 **Append to a caller-supplied buffer.** `Submit(o, fills []Fill) (Result, []Fill)` appends to `fills` and returns the possibly-reallocated slice. The caller passes `buf[:0]`, which keeps the backing array but sets the length to zero, and stores the result back. After a few calls the buffer is big enough and matching never allocates again. The same pattern is used by `strconv.AppendInt` and `Orders(s, dst)`. It works because a slice is a small `(pointer, len, cap)` header, not the data itself ([Go slices: usage and internals](https://go.dev/blog/slices-intro)).
 
-**Pointers into slices, and `append` moving the data.** `&b.nodes[i]` is a real pointer into the slice's backing array. `append` beyond capacity allocates a *new* array and copies, and old pointers keep pointing at the old one. Languages with managed arrays hide this; Go doesn't. See "What breaks if" #5. (The book itself avoids this since milestone 5 by storing orders in fixed chunks.)
+**Pointers into slices, and `append` moving the data.** `&b.nodes[i]` (milestone 1's single-slice slab) is a real pointer into the slice's backing array. `append` beyond capacity allocates a *new* array and copies, and old pointers keep pointing at the old one. Languages with managed arrays hide this; Go doesn't. See "What breaks if" #5. (The book itself avoids this since milestone 5 by storing orders in fixed chunks.)
 
 **`copy` for insert and remove, and clearing the vacated slot.** `insertAt` does `append(s, nil)`, then `copy(s[i+1:], s[i:])`, then `s[i] = x`. `removeAt` does the reverse, then sets the now-unused last element to nil. Without that, the backing array would keep a pointer to the removed level and the GC couldn't reclaim what it references. The `slices` package (`slices.Insert`, `slices.Delete`, which the reference book uses) does the same thing; the real book writes it out to keep control of the hot path.
 

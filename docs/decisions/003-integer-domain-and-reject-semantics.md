@@ -1,6 +1,9 @@
 # 003 — Integer prices, order identity, and reject semantics
 
 - **Status:** accepted (milestone 1)
+
+> **Superseded in part (2026-10-13, `dc42b11`, `fd338eb`):** quantity and limit price gained upper bounds (`MaxQty`, `MaxPrice`; review F-002), and a client order id became unique per client across every instrument rather than per book (review F-003). Both are described below, in "Upper bounds" and "Across instruments".
+
 - **Code:** `internal/book/types.go`, `internal/book/book.go` (`Submit`, `Cancel`)
 
 These are the book's externally visible rules that the PRD leaves open. The reference book (`internal/book/ref`) implements every one of them independently, and the differential test compares the results command by command.
@@ -85,4 +88,4 @@ A FOK the book can't fill in full at acceptable prices is **rejected** (`FOKNoLi
 
 ## Self-trade prevention
 
-None in v1 (PRD 5.2). A client's buy can match its own resting sell. This is a known limitation, to be listed in the README.
+None in v1 (PRD 5.2). A client's buy can match its own resting sell. This is a known limitation, listed in the README.

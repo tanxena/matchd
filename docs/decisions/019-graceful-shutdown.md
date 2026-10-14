@@ -1,6 +1,6 @@
 # 019 — Graceful shutdown: stop, drain, fsync, deliver, snapshot
 
-- **Status:** accepted (milestone 7). Chosen with the user: the WAL is flushed and fsynced before the shutdown snapshot ("the snapshot is an optimisation for restart time, never a durability requirement"), and clients get 5 s by default (`-shutdown-timeout`) to receive their answers.
+- **Status:** accepted (milestone 7). Chosen with the author: the WAL is flushed and fsynced before the shutdown snapshot ("the snapshot is an optimisation for restart time, never a durability requirement"), and clients get 5 s by default (`-shutdown-timeout`) to receive their answers.
 - **Code:** `internal/server/server.go` (`Close`, `shutdownSnapshot`), `internal/gateway/gateway.go` (`StopReading`, `FinishWriters`), `internal/gateway/session.go` (`lingerClose`), `cmd/engine` (signals)
 
 ## Context
@@ -52,7 +52,7 @@ With no unread input left, the close is a normal close, and the client reads eve
 
 ## Costs
 
-- **Shutdown can take up to `ShutdownTimeout`** (default 5 s, the user's choice), plus up to 1 s of lingering per session in parallel, plus the snapshot write. A deployment's kill timeout must be longer than that, or the second-signal path applies.
+- **Shutdown can take up to `ShutdownTimeout`** (default 5 s, the author's choice), plus up to 1 s of lingering per session in parallel, plus the snapshot write. A deployment's kill timeout must be longer than that, or the second-signal path applies.
 - **Commands still in a socket buffer when the readers stop are dropped unanswered.** The alternative, reading until clients go quiet, has no bound.
 - **Tests that count snapshots** must opt out of the shutdown snapshot (`noShutdownSnapshot`, test-only); one did.
 

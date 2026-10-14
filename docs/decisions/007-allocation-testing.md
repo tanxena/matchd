@@ -1,6 +1,9 @@
 # 007 — Proving "zero allocations": what to count and how
 
 - **Status:** accepted (milestone 2)
+
+> **Superseded in part (2026-10-13, `7da7c30`):** `TestZeroAllocSteadyState` now runs eight workloads; milestone 8 added an IOC cycle and a FOK cycle ([decision 020](020-ioc-and-fok.md)). The method is unchanged.
+
 - **Code:** `internal/testutil/allocs.go` (`OwnAllocations`, `CountOwnAllocations`, `ownedByModule`), `internal/engine/alloc_test.go`
 
 ## Context

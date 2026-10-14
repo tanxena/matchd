@@ -225,9 +225,9 @@ func (e *Engine) delta(c *Command, side book.Side, px book.Price, qty book.Qty) 
 //
 //	Ack
 //	for each opposite-side level traded, best first:
-//	    Fill(taker), Fill(maker) for each match at that level
+//	    Fill(taker), Fill(maker), Trade for each match at that level
 //	    BookDelta for that level
-//	Cancelled(expired)           if a market order has an unfilled remainder
+//	Cancelled(expired or IOC)    if a market or IOC order has an unfilled remainder
 //	BookDelta for the own level  if a limit remainder rested
 //
 // The order id is only consumed if the book accepts the order, so accepted
@@ -370,8 +370,8 @@ func (e *Engine) Lookup(symbol string) (InstrumentID, bool) {
 }
 
 // Book returns the book for id, or nil. The book belongs to the engine
-// goroutine; callers may only use it from that goroutine (tests, and later
-// snapshotting under the copy-on-write scheme of milestone 5).
+// goroutine; callers may only use it from that goroutine (tests, and the
+// snapshot code under the copy-on-write scheme of decision 013).
 func (e *Engine) Book(id InstrumentID) *book.Book { return e.book(id) }
 
 // NumInstruments returns how many instruments are registered.

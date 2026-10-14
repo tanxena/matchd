@@ -60,7 +60,7 @@ The new TIFs are 3 and 4, not 2 and 3. **2 is `Day`**, and has been in every log
 ### Types: `internal/book/types.go`
 
 - **`TIF`** ([types.go:85](../../internal/book/types.go#L85)) gains `IOC` (3) and `FOK` (4). `RejectFOKNoLiquidity` is appended after `RejectDuplicateSymbol`.
-- **`Order.Validate`** ([types.go:255](../../internal/book/types.go#L255)): a limit order's TIF may be GTC, Day, IOC or FOK. A market order with IOC or FOK is `InvalidTIF`, checked after its price, keeping the fixed order side, type, qty, price, tif. Any other TIF on a market order is still ignored.
+- **`Order.Validate`** ([types.go:292](../../internal/book/types.go#L292)): a limit order's TIF may be GTC, Day, IOC or FOK. A market order with IOC or FOK is `InvalidTIF`, checked after its price, keeping the fixed order side, type, qty, price, tif. Any other TIF on a market order is still ignored.
 - **`Result`** ([types.go:185](../../internal/book/types.go#L185)): `Expired` now means "cancelled on arrival", for a market order's remainder or an IOC's.
 
 ### The book: `internal/book/book.go`
@@ -88,14 +88,14 @@ The new TIFs are 3 and 4, not 2 and 3. **2 is `Day`**, and has been in every log
 |---|---|
 | `TestIOCAndFOK` (book and ref) | IOC partial / full / nothing to trade; FOK exact across 3 levels; FOK 1 lot short (rejected, book unchanged); FOK beyond its limit; duplicate check first; market IOC/FOK rejected; market GTC accepted |
 | **`TestFOKCheckVisitsOnlyLevelsNeeded`** ([book_internal_test.go:181](../../internal/book/book_internal_test.go#L181)) | on 10,000 levels: 1, 3 and 10 levels visited when that's what's needed; 2 when the second is past the limit; all 10,000 only when the side isn't enough |
-| `TestDifferential`, same seeds | 100,000 commands: 4,539 IOC remainders cancelled, 1,013 IOCs filled in full, 751 FOKs filled (277 across levels), 4,653 `FOKNoLiquidity`, 2,226 `InvalidTIF`; no divergence. The long run (20 seeds × 60,000) is in decision 020 |
+| `TestDifferential`, same seeds | 100,000 commands: 4,539 IOC remainders cancelled, 1,013 IOCs filled in full, 751 FOKs filled (277 across levels), 4,653 `FOKNoLiquidity`, 2,226 `InvalidTIF`; no divergence. Since the generator changes of review F-004 the same seeds give 4,463, 1,166, 862 (324), 4,628 and 1,934. The long run (20 seeds × 60,000) is in decision 020 |
 | **`TestIOCAndFOKEvents`** ([engine_test.go:177](../../internal/engine/engine_test.go#L177)) | exact event sequences; a rejected FOK uses no order id |
 | event-stream test | IOC/FOK in the random stream; none ever rests; no accepted FOK is partly cancelled |
-| `TestZeroAllocSteadyState` | IOC cycle and FOK cycle: 0 allocations (~1.0 µs and ~2.1 µs per cycle on this laptop today) |
+| `TestZeroAllocSteadyState` | IOC cycle and FOK cycle: 0 allocations (~1.0 µs and ~2.1 µs per cycle on this laptop at the time) |
 | **`TestIOCAndFOKOverTheWire`** ([server_test.go:557](../../internal/server/server_test.go#L557)) | the real messages over TCP |
 | crash harness | clients now send IOC and FOK; WAL replay still exact |
 
-**A measurement note.** The "full match" benchmark cycle measures 700–1,100 ns today; milestone 2's guide document recorded about 290 ns for the same cycle. Building milestone 2's own code today gives 830–880 ns, so this is the machine's state (power scheme, thermal), not a regression. It's a reminder for milestone 9 of why the benchmark protocol records power mode, interleaves runs and reports medians.
+**A measurement note.** At this milestone the "full match" benchmark cycle measured 700–1,100 ns; milestone 2's guide document recorded about 290 ns for the same cycle. Building milestone 2's own code on the same day gave 830–880 ns, so this was the machine's state (power scheme, thermal), not a regression. It is why milestone 9's benchmark protocol records the power mode, interleaves runs and reports medians.
 
 ---
 
@@ -150,6 +150,6 @@ The new TIFs are 3 and 4, not 2 and 3. **2 is `Day`**, and has been in every log
 
 4. `Ack` (order id assigned, qty 8); `Fill` for the taker (5 at 100, leaves 3); `Fill` for the maker (leaves 0); `Trade` (5 at 100, aggressor buy); `BookDelta` (sell 100 → 0); then `CancelAck` (reason `IOCUnfilled`, qty 3, price 100). A market order's remainder carries reason `Expired` (and price 0). The two reasons are distinct values, on the wire and in the events.
 
-5. 2 already meant `Day`, in the book's enum, on the wire and in every WAL record since milestone 1. Reassigning it would make an old log replay every `Day` order as an IOC, cancelling its unfilled part on arrival instead of resting it. Replay would be deterministic and wrong: the recovered book would silently lack every resting day order. Enum values are only ever appended. (I proposed 2 and 3 without checking, and caught it before writing code.)
+5. 2 already meant `Day`, in the book's enum, on the wire and in every WAL record since milestone 1. Reassigning it would make an old log replay every `Day` order as an IOC, cancelling its unfilled part on arrival instead of resting it. Replay would be deterministic and wrong: the recovered book would silently lack every resting day order. Enum values are only ever appended. (The first proposal was 2 and 3, made without checking; it was caught before any code was written.)
 
 </details>

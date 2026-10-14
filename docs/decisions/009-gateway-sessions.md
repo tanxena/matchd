@@ -1,6 +1,9 @@
 # 009 — Gateway, sessions, and the publisher's slow-consumer policy
 
 - **Status:** accepted (milestone 3)
+
+> **Superseded in part (2026-10-13, `b500b1e`, `15cf825`):** a full queue no longer disconnects at once. `session.out` is now an `outQueue` with a soft limit (`OutQueue`) and a hard limit (`OutQueue` + `publisher.MaxPending`), and a client is a slow consumer only by time ([decision 022](022-slow-consumers-and-durability-stalls.md)). Since review F-001 every socket write, including `bufio`'s implicit flushes, sets a fresh `WriteTimeout` deadline first (`deadlineWriter` in `internal/gateway/session.go`).
+
 - **Code:** `internal/gateway/` (`Gateway`, `session`), `internal/publisher/publisher.go`, `internal/sequencer/sequencer.go`, `internal/server/server.go`
 
 ## Context
@@ -37,7 +40,7 @@ Each stage closes its output channel when its input closes, so `server.Close` sh
 
 ### Two goroutines per connection
 
-- **Reader:** reads frames, handles `Login`, `Heartbeat` and `Subscribe` locally, and turns `NewOrder` and `Cancel` into commands on the shared channel.
+- **Reader:** reads frames, handles `Login`, `Heartbeat` and `Subscribe` (since milestone 6 also `Resend`) locally, and turns `NewOrder` and `Cancel` into commands on the shared channel.
 - **Writer:** the **only** goroutine that writes to the socket. It takes engine events from the session's queue and gateway replies from a small control channel. Two goroutines writing to one socket could interleave the bytes of two frames.
 
 The writer **flushes only when both of its queues are empty**. Under load, many frames leave in one system call; when idle, each frame is sent immediately. `TCP_NODELAY` is set so the kernel doesn't add Nagle's delay on top.
@@ -89,7 +92,7 @@ The registry (client id to session) is read for every event by the publisher gor
 
 ### Events for disconnected clients are dropped
 
-If a client isn't connected when its event is routed, for example a maker fill after a one-shot `engctl order` has exited, the event is counted (`Dropped`) and lost to that client. Its orders stay on the book. **v1 has no order-status query**, so a reconnecting client can't learn what it missed. This is a known limitation for the README. A real exchange would let the client replay its own events from a sequence number; milestone 6's resend mechanism could be extended to do this later.
+If a client isn't connected when its event is routed, for example a maker fill after a one-shot `engctl order` has exited, the event is counted (`Dropped`) and lost to that client. Its orders stay on the book. **v1 has no order-status query**, so a reconnecting client can't learn what it missed. This is a known limitation, listed in the README. A real exchange would let the client replay its own events from a sequence number; milestone 6's resend mechanism could be extended to do this later.
 
 ### Gateway replies are not ordered with engine events
 

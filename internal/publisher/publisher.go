@@ -49,7 +49,7 @@ const MaxPending = 1 << 16
 // Subscriber is a client session as the publisher sees it.
 type Subscriber interface {
 	// Deliver offers ev to the session's outbound queue. It must not block:
-	// it returns false at once if the queue is full.
+	// it returns false at once if the session refuses ev as a slow consumer.
 	Deliver(ev engine.Event) bool
 	// DeliverSnapshot hands the session a market-data snapshot to stream to
 	// its client, in order with Deliver: after every event delivered before
@@ -95,7 +95,7 @@ type Publisher struct {
 	pending []engine.Event
 	head    int
 
-	// Counters, read by tests now and by /metrics in milestone 7. Written
+	// Counters, read by tests and by /metrics. Written
 	// only by the Run goroutine; atomics so other goroutines can read them.
 	delivered     atomic.Uint64
 	dropped       atomic.Uint64 // events for clients not connected

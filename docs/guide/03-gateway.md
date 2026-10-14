@@ -70,7 +70,7 @@ A connection becomes a **session** when it logs in. The client id is taken from 
 
 **Nagle's algorithm** ([RFC 896](https://www.rfc-editor.org/rfc/rfc896)) makes the kernel hold back small writes while earlier data is unacknowledged, in order to merge them into bigger packets. That is good for bulk transfer and bad for a 59-byte order acknowledgement, which could wait tens of milliseconds. Both sides set `TCP_NODELAY` to turn it off.
 
-The writer still batches, but on its own terms: it writes frames into a buffer and **flushes only when it has nothing else queued**. Under load, many frames leave in one system call; when idle, each frame leaves immediately.
+The writer still batches, but on its own terms: it writes frames into a buffer and **flushes only when it has nothing else queued** (or when the 32 KiB buffer fills, which `bufio` flushes by itself). Under load, many frames leave in one system call; when idle, each frame leaves immediately.
 
 ### 1.7 Fuzzing
 
@@ -120,17 +120,17 @@ Arrival order on the one shared `cmds` channel *is* the global order of all clie
 - **`Publisher`** ([publisher.go:74](../../internal/publisher/publisher.go#L74)):
   - `clients` is an `atomic.Pointer` to an immutable map, so reads take no lock;
   - `mu` serialises the rare writers;
-  - three atomic counters: delivered, dropped, slow consumers.
+  - three atomic counters: delivered, dropped, slow consumers (later milestones added the durability gate's and market data's own).
 - **`Register`** ([publisher.go:197](../../internal/publisher/publisher.go#L197)) copies the map, adds the session, and swaps the pointer. It refuses if the id is taken.
 - **`Unregister`** removes the entry only if it is *this* session.
 - **`route`** ([publisher.go:320](../../internal/publisher/publisher.go#L320)):
-  - skip client 0 (book deltas, startup commands);
+  - skip client 0 (startup commands); since milestone 6, book deltas and trades go to the market-data fan-out first instead;
   - look up the session; if it's missing, count the event as dropped;
   - otherwise `Deliver`; if that fails, unregister, count, log, and call `SlowConsumer()`.
 
 ### `internal/gateway`: connections and sessions
 
-- **`Config`** ([gateway.go:36](../../internal/gateway/gateway.go#L36)): listen address, `OutQueue` (the slow-consumer threshold), `IdleTimeout`, `WriteTimeout`, and `SocketWriteBuffer` (used by tests). **`DefaultConfig`** gives 4,096 events, 60 s and 10 s.
+- **`Config`** ([gateway.go:36](../../internal/gateway/gateway.go#L36)): listen address, `OutQueue` (the slow-consumer threshold; since decision 022 a soft limit, with a hard limit of `OutQueue + publisher.MaxPending`), `IdleTimeout`, `WriteTimeout` (each socket write's bound, and since decision 022 also how long a queue may stay above `OutQueue`), and `SocketWriteBuffer` (used by tests). **`DefaultConfig`** gives 4,096 events, 60 s and 10 s.
 - **`Gateway`** ([gateway.go:73](../../internal/gateway/gateway.go#L73)):
   - the shared `cmds` channel;
   - the publisher;
@@ -144,36 +144,38 @@ Arrival order on the one shared `cmds` channel *is* the global order of all clie
   4. starts `readLoop` and `writeLoop`.
 - **`Close`** ([gateway.go:190](../../internal/gateway/gateway.go#L190)) is, since milestone 7, the forced end of a graceful shutdown that `StopReading` and `FinishWriters` begin (readers stop first, writers deliver what's queued, then a lingering close; [decision 019](../decisions/019-graceful-shutdown.md)). It marks the gateway closed, closes the listener, closes every session, and waits for `wg`. After it returns, nothing will send on `cmds`, so the server can close that channel safely.
 - **`session`** ([session.go:37](../../internal/gateway/session.go#L37)) holds:
-  - `out`, the bounded event queue fed by the publisher;
+  - `out`, the bounded event queue fed by the publisher (a buffered channel in milestone 3; since decision 022 an `outQueue`, `outqueue.go`, with a soft and a hard limit);
   - `ctrl`, the reader's replies to the writer;
   - `done`, closed once to release both goroutines;
   - `client`, which is 0 until login.
-- **`Deliver`** ([session.go:86](../../internal/gateway/session.go#L86)) is a `select` with a `default` case: a send that gives up instead of waiting.
+
+  Later milestones added `snaps` (market-data snapshots waiting to be streamed, milestone 6) and `mdTokens`/`mdRefill` (the market-data rate limit, review F-005).
+- **`Deliver`** ([session.go:86](../../internal/gateway/session.go#L86)) never waits. In milestone 3 it was a `select` with a `default` case: a send that gives up instead of waiting, so a full queue meant a slow consumer. Since decision 022 it calls `outQueue.push`, which refuses only when the queue has stayed above its soft limit for longer than `WriteTimeout`, or has reached its hard limit; a burst alone is accepted.
 - **`close`** ([session.go:128](../../internal/gateway/session.go#L128)) runs once, through `sync.Once`. It records `closed`, closes `done` and the socket, unregisters the client, and logs the reason.
 - **`readLoop`** ([session.go:164](../../internal/gateway/session.go#L164)) sets the idle deadline, calls `Next`, then switches on the type:
   - `Login` → `handleLogin`;
   - `NewOrder` and `Cancel` → refuse if not logged in, otherwise build an `engine.Command` with **`Client: s.client`** and `submit` it;
-  - `Subscribe` → `Reject(Unsupported)` in milestone 3; since milestone 6 it subscribes to market data, with no login needed ([06-market-data.md](06-market-data.md));
+  - `Subscribe` → `Reject(Unsupported)` in milestone 3; since milestone 6 it subscribes to market data, with no login needed, and `Resend` is handled too ([06-market-data.md](06-market-data.md)). Since review F-005 both pass a per-connection token bucket (`mdAllowed`: a burst of 32, then 16 per second); beyond it the reply is `Reject(TooManyRequests)`, reason 106;
   - `Heartbeat` → echo it;
   - anything else → close with a protocol error.
-- **`handleLogin`** ([session.go:289](../../internal/gateway/session.go#L289)) refuses a second login, client 0, and a client id already in use. It sets `client` and registers with the publisher under `closeMu`, so a concurrent `close` either sees the id and unregisters it, or the login notices the session is closed.
+- **`handleLogin`** ([session.go:289](../../internal/gateway/session.go#L289)) refuses a second login, client 0, the admin endpoint's reserved id (milestone 7), and a client id already in use. It sets `client` and registers with the publisher under `closeMu`, so a concurrent `close` either sees the id and unregisters it, or the login notices the session is closed.
 - **`submit`** ([session.go:350](../../internal/gateway/session.go#L350)) sends on `cmds`, or gives up if the session closes. Blocking here is the inbound backpressure.
 - **`readErrorReason`** ([session.go:359](../../internal/gateway/session.go#L359)) turns read errors into log reasons: EOF, idle timeout, protocol error, reset. **`isConnReset`** has a Windows version and an other-platforms version ([decision 010](../decisions/010-windows-gotchas.md)).
-- **`writeLoop`** ([session.go:380](../../internal/gateway/session.go#L380)) selects on `out`, `ctrl` and `done`, encodes into a reused buffer, writes to a 32 KB `bufio.Writer`, and **flushes when both queues are empty**. A `control` with `closeAfter` (a fatal reject) is written and flushed, and then the session is closed.
+- **`writeLoop`** ([session.go:380](../../internal/gateway/session.go#L380)) takes events from `out` (since decision 022, in batches popped from the `outQueue`, waking on its `ready` signal) and replies from `ctrl`, and watches `done`. It encodes into a reused buffer, writes to a 32 KiB `bufio.Writer`, and **flushes when both queues are empty**. A `control` with `closeAfter` (a fatal reject) is written and flushed, and then the session is closed. The `bufio.Writer` writes through `deadlineWriter`, which sets a fresh write deadline before every socket write, including the ones `bufio` makes by itself when its buffer fills (review F-001; originally the deadline was set only at explicit flushes, so a burst after an idle spell could fail at once against a stale deadline). A write that times out closes the session as a slow consumer (`writeFailed`).
 - **`appendEvent`** ([session.go:568](../../internal/gateway/session.go#L568)) maps engine events to wire messages, converting enums by casting, which `wire_test.go` makes safe. **`appendControl`** encodes the gateway's own replies.
 
 ### `internal/server/server.go`: the wiring
 
 **`Start`** ([server.go:132](../../internal/server/server.go#L132)):
-1. applies the configured instruments **synchronously**, through `Stamp` and `Step` before any goroutine starts, so a bad config fails startup;
+1. applies the configured instruments **synchronously**, through the sequencer and `Step` before any goroutine starts, so a bad config fails startup (in milestone 3 through `Stamp`; since milestone 4 through `LogNow`, which also writes them to the WAL, after recovery: [04-wal.md](04-wal.md#2-code-walkthrough));
 2. creates the three channels;
 3. starts the sequencer, engine and publisher goroutines and the accept loop.
 
-**`Close`** ([server.go:360](../../internal/server/server.go#L360)) closes the gateway, then closes `cmds`. The sequencer, engine and publisher then each drain their input and close their output in turn, and `Close` waits for the publisher to finish.
+**`Close`** ([server.go:360](../../internal/server/server.go#L360)) in milestone 3 closed the gateway, then closed `cmds`. The sequencer, engine and publisher then each drain their input and close their output in turn, and `Close` waits for the publisher to finish. Since milestone 7 it is a graceful shutdown: `StopReading` stops the readers first, `cmds` is closed and the pipeline drains, then `FinishWriters` lets each writer deliver what is queued before `Gateway.Close` ([07-operations.md](07-operations.md), [decision 019](../decisions/019-graceful-shutdown.md)).
 
 ### `internal/client` and the binaries
 
-- **`client.Dial`** ([client.go:48](../../internal/client/client.go#L48)) connects, sends `Login`, and waits for `LoginAck`; a `Reject` becomes `ErrLoginRejected`. **`Next`** decodes into a `Msg` union. Sends hold a mutex, so several goroutines may send.
+- **`client.Dial`** ([client.go:48](../../internal/client/client.go#L48)) connects, sends `Login`, and waits for `LoginAck`; a `Reject` becomes `ErrLoginRejected`. (Since milestone 6, client id 0 skips the login, which is enough for market data.) **`Next`** decodes into a `Msg` union. Sends hold a mutex, so several goroutines may send.
 - **`cmd/engine`** has flags for the gateway config and repeatable `-instrument SYMBOL:TICK:LOT`. It runs `server.Start` and shuts down on Ctrl-C or SIGTERM.
 - **`cmd/engctl`**:
   - `order` and `cancel` connect, send, and print messages until none arrives for `--wait` (300 ms). A one-shot command can't know how many fills are coming.
@@ -192,7 +194,7 @@ Arrival order on the one shared `cmds` channel *is* the global order of all clie
   - a stale `Unregister` can't remove a live session;
   - a slow consumer is disconnected once, without blocking, while a healthy subscriber keeps receiving;
   - concurrent registration during routing, under `-race`.
-- **`gateway`:** `TestEnumsMatchWire` (engine and wire numbering agree, names included); `TestAppendEvent` (every event kind maps field by field).
+- **`gateway`:** `TestEnumsMatchWire` (engine and wire numbering agree, names included); `TestAppendEvent` (every event kind maps field by field). Since decision 022, `TestOutQueuePolicy` and `TestOutQueueOrderAndReuse` cover the outbound queue's limits and ordering.
 - **`server`:** end to end over loopback.
   - Fills reach both parties with matching `MatchID`s.
   - Owner-only cancel; engine rejects carry a `seq`; market orders expire.
@@ -241,7 +243,7 @@ The fifth row is why golden-bytes tests exist. A round trip only proves the enco
 ## 3. Design decisions
 
 - [008: Wire protocol](../decisions/008-wire-protocol.md). A u32 length prefix, a version byte in every frame, `MaxPayload`; fixed little-endian layouts with exact sizes; the message table (including the added `LoginAck`); enum values owned by the wire; reject reasons 1–99 from the engine and 100+ from the gateway; a hand-written codec; no frame checksum and no resynchronisation.
-- [009: Gateway, sessions, and the slow-consumer policy](../decisions/009-gateway-sessions.md). The pipeline; two goroutines per connection with a single writer; flush when idle; login first, one session per client, client id from the session; protocol validation in the gateway and business validation in the engine; a non-blocking publisher with disconnect on a full queue; inbound backpressure through TCP; a copy-on-write registry; events dropped for disconnected clients; gateway replies not ordered with engine events; the minimal sequencer.
+- [009: Gateway, sessions, and the slow-consumer policy](../decisions/009-gateway-sessions.md). The pipeline; two goroutines per connection with a single writer; flush when idle; login first, one session per client, client id from the session; protocol validation in the gateway and business validation in the engine; a non-blocking publisher with disconnect on a full queue (judged by time since [decision 022](../decisions/022-slow-consumers-and-durability-stalls.md)); inbound backpressure through TCP; a copy-on-write registry; events dropped for disconnected clients; gateway replies not ordered with engine events; the minimal sequencer.
 - [010: Windows gotchas](../decisions/010-windows-gotchas.md). Winsock reset and abort codes; why tests shouldn't match OS error text; stopping processes from scripts; loopback socket buffers. Started this milestone, and extended later.
 
 ---
@@ -272,11 +274,11 @@ The fifth row is why golden-bytes tests exist. A round trip only proves the enco
 
 **`encoding/binary` append functions.** `binary.LittleEndian.AppendUint64(dst, v)` appends 8 bytes and returns the slice: the same append-to-a-buffer idiom as `Submit` in milestone 1. `binary.LittleEndian.Uint64(b[off:])` reads 8 bytes at any offset ([package binary](https://pkg.go.dev/encoding/binary)).
 
-**Deadlines and `net.Error`.** `conn.SetReadDeadline(t)` makes a blocked `Read` fail at time `t`. You then check the error with `errors.As(err, &ne)` and `ne.Timeout()`. A deadline is an absolute time, so it is set again before every read for the idle timeout, and before every flush for the write timeout.
+**Deadlines and `net.Error`.** `conn.SetReadDeadline(t)` makes a blocked `Read` fail at time `t`. You then check the error with `errors.As(err, &ne)` and `ne.Timeout()`. A deadline is an absolute time, so it is set again before every read for the idle timeout, and before every socket write for the write timeout (`deadlineWriter`; until review F-001 it was set only before each explicit flush, which left `bufio`'s own flushes under a stale deadline).
 
 **Sentinel errors, `%w`, `errors.Is` and `errors.As`.** `var ErrVersion = errors.New(...)` declares a value callers can compare with. `fmt.Errorf("%w: %d", ErrVersion, v)` wraps it with detail while keeping it detectable: `errors.Is(err, ErrVersion)` looks through the wrapping. `errors.As` looks for an error of a *type*, for example `net.Error`.
 
-**`select` with `default`: a non-blocking send.** `select { case ch <- v: ...; default: ... }` takes the `default` branch at once if the send can't proceed. That one construct is the slow-consumer policy (`session.Deliver`). Without `default`, the `select` would wait.
+**`select` with `default`: a non-blocking send.** `select { case ch <- v: ...; default: ... }` takes the `default` branch at once if the send can't proceed. In milestone 3 that one construct was the slow-consumer policy (`session.Deliver`); since decision 022 `Deliver` pushes onto the `outQueue` instead, and the construct remains in `session.DeliverSnapshot` and in `Engine.Run`'s first attempt at each send. Without `default`, the `select` would wait.
 
 **`sync.Once`, `sync.WaitGroup`, `sync.Mutex`.**
 - `once.Do(f)` runs `f` exactly once even if many goroutines call it; `session.close` relies on this.
@@ -316,7 +318,7 @@ The fifth row is why golden-bytes tests exist. A round trip only proves the enco
 
 1. `Next` calls `io.ReadFull` for the 6-byte header. The `bufio.Reader` underneath already holds the 20 bytes, so the header comes from there. It checks the length (33 means a 31-byte payload, under `MaxPayload`) and the version. Then `io.ReadFull` for 31 payload bytes takes the remaining 14 buffered bytes and keeps calling `Read` on the socket until the other 17 arrive. Only then does it return the frame. A one-`Read`-per-frame reader would try to decode a 20-byte fragment, failing the size check or misreading fields, and then treat the next 17 bytes as the start of a new frame. Its framing would be wrong forever after, because there is no way to resynchronise.
 
-2. The publisher is one goroutine serving **every** client. If it blocked on one client's full queue, the engine's sends to the publisher would block, matching would stop for everyone, and readers would back up behind it, freezing the whole exchange. So a full session queue disconnects that one client instead. A reader blocking on `cmds` only stops reading **its own** socket. TCP flow control then slows that client, and its own goroutine is the only thing waiting. That is ordinary, fair backpressure when the engine is overloaded.
+2. The publisher is one goroutine serving **every** client. If it blocked on one client's full queue, the engine's sends to the publisher would block, matching would stop for everyone, and readers would back up behind it, freezing the whole exchange. So a session queue that can't take more disconnects that one client instead: since decision 022, one that has stayed above its soft limit for longer than `WriteTimeout`, or has reached its hard limit. A reader blocking on `cmds` only stops reading **its own** socket. TCP flow control then slows that client, and its own goroutine is the only thing waiting. That is ordinary, fair backpressure when the engine is overloaded.
 
 3. Because a reject the gateway produces isn't sequenced or written to the log. The engine's output must be a pure function of the logged commands, so that replay after a crash reproduces exactly the same events. If the gateway rejected some commands itself, those rejects would exist in the client's history but not in the log, and replay couldn't reproduce them. The gateway only handles protocol problems, where the stream itself can't be trusted.
 

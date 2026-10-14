@@ -11,7 +11,7 @@ import (
 )
 
 // driver feeds commands to an engine with consecutive sequence numbers and
-// deterministic timestamps, the way the sequencer will from milestone 4.
+// deterministic timestamps, the way the sequencer does.
 type driver struct {
 	t   *testing.T
 	e   *engine.Engine

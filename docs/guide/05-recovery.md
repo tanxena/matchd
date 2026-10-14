@@ -7,7 +7,7 @@ The hard part is the PRD's rule that **taking a snapshot must not pause the engi
 This milestone also builds:
 - a **fill log** (what the engine told clients about trades);
 - **`replay-check`**, an independent checker that rebuilds the state from the log and compares;
-- a **crash harness** that kills the real engine binary at random moments, more than 50 times in a row, and verifies recovery each time.
+- a **crash harness** that kills the real engine binary at random moments, 50 times in a row, and verifies recovery each time.
 
 ---
 
@@ -114,7 +114,8 @@ A **crash harness** starts the real program, drives load, kills it, and checks w
 - **`filllog.go`:**
   - **`Match`** ([filllog.go:23](../../internal/snapshot/filllog.go#L23)) holds both sides of one trade.
   - **`FillLog.Released`** ([filllog.go:161](../../internal/snapshot/filllog.go#L161)) keeps the taker half, and on the maker half appends one record with the match id as its seq.
-  - The log is a `wal.Log` with `AllowGaps`, and isn't fsynced.
+  - The log is a `wal.Log` with `AllowGaps`, and is never fsynced, not even when a segment rolls (`NoSyncOnRoll`, review F-006).
+  - **`OpenFillLog`** moves a fill log damaged beyond a torn tail aside, to `fills.damaged-<ns>`, with a warning, and starts a fresh one instead of failing startup (review F-006).
 - **`recover.go`:**
   - **`LoadLatest`** ([recover.go:31](../../internal/snapshot/recover.go#L31)) picks the newest listed snapshot that decodes, falling back to an older one, and finally to none.
   - **`Recover`** ([recover.go:53](../../internal/snapshot/recover.go#L53)) restores it and opens the WAL, replaying records after the snapshot's seq, each required to be exactly the next. It refuses a WAL that ends before the snapshot.
@@ -139,12 +140,12 @@ A **crash harness** starts the real program, drives load, kills it, and checks w
 
 - **`server.Start`:**
   - recovers through `snapshot.Recover`;
-  - opens the fill log, and refuses to start if it is ahead of the recovered engine;
+  - opens the fill log (moving a damaged one aside), and refuses to start if it is ahead of the recovered engine;
   - creates the snapshot writer goroutine and a ticker;
   - runs the engine with hooks.
 
   **`Close`** waits for an in-flight snapshot.
-- **`cmd/engine`** gained `-snapshot-every` (1,000,000), `-snapshot-interval` (10 s) and `-wal-segment-bytes`.
+- **`cmd/engine`** gained `-snapshot-every` (1,000,000), `-snapshot-interval` (10 s) and `-wal-segment-bytes`. Later, `-archive DIR` (review F-007) made pruning move WAL and fill-log segments into `DIR` instead of deleting them; the crash harness uses it.
 - **`engctl replay-check --data DIR`** prints the report, and exits 1 on a mismatch.
 
 ### `internal/crashtest`: the harness
@@ -189,8 +190,9 @@ A **crash harness** starts the real program, drives load, kills it, and checks w
 
 | what | result |
 |---|---|
-| crash harness, 50 consecutive runs, three separate executions | all passed: 1,074,705 acknowledged commands in total; no ack beyond the WAL; no fill delivered twice; every snapshot rebuilt from the WAL matched |
-| differential suite with mid-stream snapshots | 100,000 commands, 210 snapshots, 209 chunk copies, 0 divergences; the fill count is identical to milestone 4 |
+| crash harness, 50 consecutive runs, three separate executions (at this milestone, before the whole-history check) | all passed: 1,074,705 acknowledged commands in total; no ack beyond the WAL; no fill delivered twice; every snapshot rebuilt from the WAL matched |
+| crash harness, 50 runs, with the whole-history check and injected torn tails (review F-007) | measured for the fix: all 447,645 acknowledged commands and all 401,510 received fills checked against a replay from seq 1; 9 of 9 injected torn tails recovered |
+| differential suite with mid-stream snapshots | 100,000 commands, 210 snapshots, 209 chunk copies, 0 divergences; the fill count was identical to milestone 4's. Since the generator changes of review F-004 the same seeds give 210 snapshots and 210 chunk copies |
 | snapshot write time (server test, about 900 commands) | about 13–20 ms, mostly fsync |
 
 ---

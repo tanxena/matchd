@@ -1,6 +1,6 @@
 # 020 — IOC and FOK: trade now, or not at all
 
-- **Status:** accepted (milestone 8). Chosen with the user:
+- **Status:** accepted (milestone 8). Chosen with the author:
   - a FOK that can't fill is a `Reject` (`FOKNoLiquidity`);
   - an IOC's remainder is a `CancelAck` with a new reason, `IOCUnfilled`;
   - both TIFs are limit-only;
@@ -19,7 +19,7 @@ Both are limit orders: they trade only at their price or better.
 
 ## Decisions
 
-### A FOK that can't fill is rejected, as if it never existed (chosen with the user)
+### A FOK that can't fill is rejected, as if it never existed (chosen with the author)
 
 If the book can't fill a FOK completely at acceptable prices, `Submit` returns `Reject: FOKNoLiquidity`:
 - no `Ack`, no cancel;
@@ -30,21 +30,21 @@ The client sees one `Reject`, exactly like an order with a bad price. The altern
 
 **Precedence:** validation, then the duplicate client-order-id check, then the liquidity check. A FOK reusing a live order's client order id is `DuplicateClientOrderID` whatever the book holds. Both books apply the same order, and a scenario test pins it.
 
-### An IOC's remainder is cancelled with its own reason (chosen with the user)
+### An IOC's remainder is cancelled with its own reason (chosen with the author)
 
 An accepted IOC gets the usual `Ack`, its fills, the deltas, and then, if anything is left, a `CancelAck` with reason **`IOCUnfilled`** (3), carrying the order's price and the cancelled quantity. That's the event sequence OUCH uses for immediate-or-cancel orders ([decision 003](003-integer-domain-and-reject-semantics.md)). It isn't `Expired`, the market-order remainder, so any consumer of the events can tell the two apart.
 
-*Note on the fill log:* the user's reason for a distinct value was "so the fill log distinguishes the two". The fill log ([decision 014](014-fill-log-and-replay-check.md)) records **matches only**, one record per taker–maker pair, and no cancels of any kind. So the distinction lives in the event stream, the wire `CancelAck` and the WAL replay, not in the fill log. Adding cancel records to the fill log would change its format. *(Settled with the user after the milestone: the event stream is enough for v1; decision 014 records why, and that cancel-on-arrival records are a possible v2 addition.)*
+*Note on the fill log:* the author's reason for a distinct value was "so the fill log distinguishes the two". The fill log ([decision 014](014-fill-log-and-replay-check.md)) records **matches only**, one record per taker–maker pair, and no cancels of any kind. So the distinction lives in the event stream, the wire `CancelAck` and the WAL replay, not in the fill log. Adding cancel records to the fill log would change its format. *(Settled with the author after the milestone: the event stream is enough for v1; decision 014 records why, and that cancel-on-arrival records are a possible v2 addition.)*
 
 Inside the book, an IOC remainder uses `Result.Expired`, the same field as a market remainder ("unfilled quantity cancelled on arrival"). The engine chooses the reason by order type.
 
-### Limit-only (chosen with the user)
+### Limit-only (chosen with the author)
 
 A market order with TIF IOC or FOK is rejected with `InvalidTIF`. A market order already behaves like an IOC with no price limit. "Market FOK" (fill the whole quantity at any price, or nothing) exists on some venues, but it's **out of scope for v1** and listed as a known limitation. Any other TIF on a market order is still ignored, as before, so existing clients are unaffected.
 
 ### Wire values: IOC = 3, FOK = 4 (additive; corrected from the approved 2 and 3)
 
-The user approved "IOC = 2, FOK = 3" as I had proposed it. But **2 was already `Day`**, in the book's enum and on the wire, since milestone 1. Reusing it would change the meaning of every `Day` order in existing logs and clients. The additive equivalent the user asked for is **IOC = 3, FOK = 4**:
+The author approved "IOC = 2, FOK = 3" as the builder had proposed it. But **2 was already `Day`**, in the book's enum and on the wire, since milestone 1. Reusing it would change the meaning of every `Day` order in existing logs and clients. The additive equivalent the author asked for is **IOC = 3, FOK = 4**:
 
 | enum | new value |
 |---|---|
@@ -54,7 +54,7 @@ The user approved "IOC = 2, FOK = 3" as I had proposed it. But **2 was already `
 
 There's no protocol version bump: no layout changed, and old clients never send the new values. `TestEnumsMatchWire` checks every value and name on both sides. `engctl order --tif gtc|day|ioc|fok`, and `buy QTY PX ioc` in `engctl connect`.
 
-### The FOK check: walk levels from the best, stop once covered (chosen with the user)
+### The FOK check: walk levels from the best, stop once covered (chosen with the author)
 
 `canFill` walks the opposite side from its best level, adding each level's **total** (kept on the level already, so it's O(1) per level). It stops at the first level past the order's limit (no), or as soon as the sum reaches the order's quantity (yes). It reads only; the book is untouched. **Its cost is proportional to the levels the order would trade through, not to the depth of the book.** `TestFOKCheckVisitsOnlyLevelsNeeded` shows it on a 10,000-level book: 1 level visited when the best covers the order, 3 for three levels' worth, 10,000 only when the whole side isn't enough.
 
@@ -88,7 +88,7 @@ Coverage floors require each of these to happen at least once per 1,000 commands
   - FOK: exact fit across three levels; one lot short (rejected, book unchanged); enough quantity but beyond its limit.
   - Precedence of the duplicate check; market IOC/FOK rejected; market GTC still accepted.
 - **`TestFOKCheckVisitsOnlyLevelsNeeded`:** the bound.
-- **`TestDifferential`:** 10 seeds × 10,000 commands. Among them, 4,539 IOC remainders cancelled, 1,013 IOCs filled in full, 751 FOKs filled (277 across levels), 4,653 `FOKNoLiquidity` rejects, 2,226 `InvalidTIF` rejects. With `-long` (acceptance 1): **1,200,000 commands over 20 seeds, zero divergence**, including 53,585 IOC remainders cancelled, 12,213 IOCs filled in full, 9,761 FOKs filled (3,600 across levels), 56,360 `FOKNoLiquidity` and 27,832 `InvalidTIF` rejects. *(That run was first attempted through `make test-long`, which turned out never to have worked: see [the guide](../guide/08-ioc-fok.md) §5, flag order.)*
+- **`TestDifferential`:** 10 seeds × 10,000 commands. Among them, 4,463 IOC remainders cancelled, 1,166 IOCs filled in full, 862 FOKs filled (324 across levels), 4,628 `FOKNoLiquidity` rejects, 1,934 `InvalidTIF` rejects. With `-long` (acceptance 1): **1,200,000 commands over 20 seeds, zero divergence**, including 53,323 IOC remainders cancelled, 14,170 IOCs filled in full, 10,530 FOKs filled (3,597 across levels), 55,877 `FOKNoLiquidity` and 23,063 `InvalidTIF` rejects. *(Counts from the test's log at `5772dbe` and later. The generator was changed by reviews F-002 and F-004 (edge quantities and prices, deeper books), so milestone 8's runs gave somewhat different counts.)* *(That run was first attempted through `make test-long`, which turned out never to have worked: see [the guide](../guide/08-ioc-fok.md) §5, flag order.)*
 - **`TestIOCAndFOKEvents`** (engine): the exact event sequences; the rejected FOK consumes no order id; market IOC → `InvalidTIF`.
 - **The event-stream test:** IOC/FOK in the generated stream; no IOC or FOK ever rests; an accepted FOK is never partly cancelled.
 - **`TestZeroAllocSteadyState`:** an IOC cycle and a FOK cycle (fill across two levels, then a rejected FOK), 0 allocations.

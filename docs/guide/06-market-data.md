@@ -69,7 +69,7 @@ Market data is subject to the same rule as everything else ([decision 012](../de
 | `Snapshot` | [messages.go:625](../../internal/proto/messages.go#L625) | instrument, `md_seq`, number of levels |
 | `SnapshotLevel` | [messages.go:655](../../internal/proto/messages.go#L655) | instrument, side, price, qty |
 
-There is also a new reject reason, `ResendUnavailable` (105). Each message is still one fixed size.
+There is also a new reject reason, `ResendUnavailable` (105), and, since review F-005, `TooManyRequests` (106) for market-data requests over the rate limit. Each message is still one fixed size.
 
 ### Publisher: `internal/publisher/marketdata.go`
 
@@ -78,7 +78,8 @@ There is also a new reject reason, `ResendUnavailable` (105). Each message is st
   - `bids`/`asks` maps from price to total;
   - `ring`, indexed by `md_seq % size`;
   - `ringFirst` (the first `md_seq` stored since this process started);
-  - `subs`.
+  - `subs`;
+  - since milestone 7, also the instrument's `spec` and resting `orders` count, for `GET /instruments`.
 
   **`oldestAvailable`** ([marketdata.go:47](../../internal/publisher/marketdata.go#L47)) is the oldest `md_seq` still resendable: the larger of `ringFirst` and `mdSeq − size + 1`.
 - **`InitMarketData`** ([marketdata.go:61](../../internal/publisher/marketdata.go#L61)) seeds an instrument's view at startup from the recovered engine.
@@ -102,7 +103,7 @@ The reader handles `Subscribe` by calling `pub.Subscribe(instrument, session)`, 
 **Snapshots are streamed by the writer, outside the queue.**
 - **`DeliverSnapshot`** ([session.go:99](../../internal/gateway/session.go#L99)) puts the snapshot on a small side channel `snaps` (at most 4 pending), then an `EvSnapshot` marker on `out`. It never blocks.
 - When the writer reaches the marker, **`streamSnapshot`** ([session.go:489](../../internal/gateway/session.go#L489)) takes the snapshot and writes the header and every level frame from it.
-- **`write`** ([session.go:517](../../internal/gateway/session.go#L517)) flushes under the write deadline whenever the buffer is full, so a client that stops reading is disconnected after `WriteTimeout`, while one that reads gets the whole book, however deep. Live events published meanwhile wait in `out`.
+- **`write`** ([session.go:517](../../internal/gateway/session.go#L517)) buffers one frame. Every socket write the buffer makes when it fills goes through `deadlineWriter`, which first sets the write deadline to now + `WriteTimeout` (review F-001), so a client that stops reading is disconnected after `WriteTimeout`, while one that reads gets the whole book, however deep. Live events published meanwhile wait in `out`.
 
 The first version queued one event per level, so a book deeper than the queue (4,096 by default) disconnected every subscriber, even fast ones. Streaming fixed that without making the queue grow.
 
@@ -120,7 +121,8 @@ At startup, for each recovered instrument, `Start` sums the resting orders per p
   - `Snapshot` resets the book (only while awaiting one);
   - `SnapshotLevel` fills it, and the Feed goes live after the last one;
   - `BookDelta`/`Trade` go to `sequenced`;
-  - `Reject(ResendUnavailable)` re-subscribes.
+  - `Reject(ResendUnavailable)` re-subscribes;
+  - `Reject(TooManyRequests)` (review F-005) asks again on the first message after `RetryDelay` (200 ms).
 - **`sequenced`** ([feed.go:153](../../internal/client/feed.go#L153)):
   - ignored before the snapshot is complete;
   - `md ≤ mdSeq`: a duplicate, ignored;
@@ -145,7 +147,7 @@ At startup, for each recovered instrument, `Start` sums the resting orders per p
 
   Result, in one run: final `md_seq` 4,424; B went through **59 gaps and 59 resends**; A, B and C have **identical books**, which also equal the engine's own book after shutdown. The final number varies a little from run to run with how the two traders interleave.
 
-  **A test flaw found by running it 20 times:** one run's final `md_seq` was 4,440 = 37 × 120, so B dropped the *last* message, and nothing after it ever revealed the gap. That's why the closing order exists. Real feeds send heartbeats carrying the latest `md_seq` to catch exactly this.
+  **A test flaw found by running it 20 times:** one run's final `md_seq` was 4,440 = 37 × 120, so B dropped the *last* message, and nothing after it ever revealed the gap. That's why the closing order exists. Real feeds send heartbeats carrying the latest `md_seq` to catch exactly this. matchd has no market-data heartbeat; the README lists that under known limitations (review F-017).
 - **`TestDeepSnapshotBeyondQueue`** ([deepsnapshot_test.go:41](../../internal/server/deepsnapshot_test.go#L41)): a 4,000-level book reaches a subscriber whose queue holds 64 events. It gets all levels, then the next trade and delta; nobody is disconnected.
 - **`TestDeepSnapshotUnreadDisconnects`** ([deepsnapshot_test.go:76](../../internal/server/deepsnapshot_test.go#L76)): a subscriber to an 8,000-level book that never reads is disconnected by the 300 ms write deadline; a trader keeps getting acks.
 - **`TestResendBeyondRingResnapshots`:** with `MDRing = 16`, B drops 40 consecutive messages. The resend is refused, B re-subscribes, and it still converges (1 re-snapshot).
@@ -224,7 +226,7 @@ BookDelta md=7 inst=1 sell 102 -> qty 2
 
 3. Two reasons. **Durability:** under group commit the engine's book is ahead of what's on disk, while the publisher's view contains only released, durable changes, so a snapshot never shows anything a crash could undo. **Isolation:** asking the engine would mean a request into the matching goroutine and a pause or a copy-on-write freeze for every subscriber who joins. The publisher's view costs the engine nothing.
 
-4. The oldest resendable `md_seq` is 90,000 − 65,536 + 1 = 24,465, and 100 is older, so the server answers **`Reject(ResendUnavailable)`** for that instrument. The Feed counts a re-snapshot, sends **`Subscribe`** again, waits for the new snapshot (ignoring deltas until then), loads it, and continues live from the snapshot's `md_seq`.
+4. The oldest resendable `md_seq` is 90,000 − 65,536 + 1 = 24,465, and 100 is older, so the server answers **`Reject(ResendUnavailable)`** for that instrument. (It is also far more than `MaxResend`, 4,096 events, behind the latest, which alone would get the same answer.) The Feed counts a re-snapshot, sends **`Subscribe`** again, waits for the new snapshot (ignoring deltas until then), loads it, and continues live from the snapshot's `md_seq`.
 
 5. Because the engine is deterministic and its state is what's persisted. Numbered by the engine, `md_seq` is in snapshots, recreated by replay, and checked by replay-check. If the publisher numbered it: (a) a server restart would reset `md_seq` to 0, so every subscriber would see numbers go *backwards*, and would have to re-snapshot even though the book hadn't changed; (b) replay-check and recovery couldn't verify the numbering, because it wouldn't be part of the recoverable state. Also, (c) two publishers (say, a future replica) could number the same events differently.
 

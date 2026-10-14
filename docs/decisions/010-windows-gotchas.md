@@ -57,11 +57,11 @@ That ratio of about 400 is why `fsync=always` batches the commands already waiti
 
 ## 8. Directories can't be fsynced (milestone 4)
 
-On Linux a new file's directory entry is only durable after fsyncing the directory. Windows has no equivalent reachable from Go: `os.File.Sync` on a directory handle fails, because `FlushFileBuffers` needs a handle opened for writing. `internal/wal/syncdir_windows.go` is therefore a documented no-op, relying on NTFS's metadata journal. **This guarantee is weaker than Linux's and can't be tested locally** ([decision 011](011-wal-format.md)).
+On Linux a new file's directory entry is only durable after fsyncing the directory. Windows has no equivalent reachable from Go: `os.File.Sync` on a directory handle fails, because `FlushFileBuffers` needs a handle opened for writing. `internal/fsutil/syncdir_windows.go` (in `internal/wal` until milestone 5) is therefore a documented no-op, relying on NTFS's metadata journal. **This guarantee is weaker than Linux's and can't be tested locally** ([decision 011](011-wal-format.md)).
 
 ## 9. A hard kill from a script (milestone 4)
 
-Manual crash checks in this milestone stopped `engine.exe` with `taskkill //F` (Git Bash needs the doubled slash, or it rewrites `/F` as a path). That is a `TerminateProcess` kill: no deferred code runs, and nothing is flushed. Restart then replayed the WAL correctly. The milestone 5 harness will do this programmatically (`os.Process.Kill`, which is `TerminateProcess` on Windows and `SIGKILL` on Linux).
+Manual crash checks in this milestone stopped `engine.exe` with `taskkill //F` (Git Bash needs the doubled slash, or it rewrites `/F` as a path). That is a `TerminateProcess` kill: no deferred code runs, and nothing is flushed. Restart then replayed the WAL correctly. The milestone 5 harness does this programmatically (`os.Process.Kill`, which is `TerminateProcess` on Windows and `SIGKILL` on Linux; §11).
 
 ## 10. `os.Rename` is not atomic on Windows (milestone 5)
 

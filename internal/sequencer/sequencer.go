@@ -55,7 +55,7 @@ type Policy struct {
 	MaxBatch int
 }
 
-// Defaults chosen with the user (decision 012).
+// Defaults chosen with the author (decision 012).
 const (
 	DefaultWindow   = time.Millisecond
 	DefaultMaxBatch = 4096

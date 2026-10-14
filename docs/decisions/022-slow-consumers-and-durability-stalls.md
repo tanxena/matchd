@@ -1,12 +1,14 @@
 # 022 — Slow consumers are judged by time, and a durability stall is visible
 
-- **Status:** accepted (milestone 9). Chosen with the user, after a benchmark smoke run lost a client to a stalled disk:
+- **Status:** accepted (milestone 9). Chosen with the author, after a benchmark smoke run lost a client to a stalled disk:
   - the durability gate stays;
   - the slow-consumer policy changes: a client is slow only if it fails to drain within `WriteTimeout`, never because a burst released after a durability stall made its queue long;
   - option (b) of the two offered;
   - durability stalls get a metric.
 - **Amends:** [decision 009](009-gateway-sessions.md)'s slow-consumer policy ("a full queue disconnects at once") and [decision 016](016-market-data.md)'s fan-out note.
-- **Code:** `internal/gateway/outqueue.go` (new), `internal/gateway/session.go` (`Deliver`, `SlowConsumer`, `writeLoop`, `writeFailed`), `internal/wal/wal.go` (`fsync`, `SyncInProgress`), `internal/server/metrics.go`, `cmd/engine` (`-fsync-stall`)
+- **Code:** `internal/gateway/outqueue.go` (new), `internal/gateway/session.go` (`Deliver`, `SlowConsumer`, `writeLoop`, `writeFailed`; `deadlineWriter` since review F-001), `internal/wal/wal.go` (`fsync`, `SyncInProgress`), `internal/server/metrics.go`, `cmd/engine` (`-fsync-stall`)
+
+> **Superseded in part (2026-10-13, `15cf825`):** rule 3's write deadline is no longer set only at the writer's explicit flushes: every socket write, including the write buffer's own flushes when it fills, sets a fresh `WriteTimeout` deadline (`deadlineWriter`; review F-001, under rule 3 below).
 
 ## What happened
 
@@ -66,7 +68,7 @@ The bounded channel the writer read from is replaced by `outQueue`: a slice unde
 
 | metric | meaning |
 |---|---|
-| `matchd_wal_fsync_stalls_total` | fsyncs slower than the stall threshold (`-fsync-stall`, default **25 ms**; this laptop's SSD averages 1.4–2.4 ms) |
+| `matchd_wal_fsync_stalls_total` | fsyncs slower than the stall threshold (`-fsync-stall`, default **25 ms**; this laptop's SSD averaged 1.4–2.4 ms in the smoke runs, and 1.33–1.66 ms in the committed order-mix runs, `bench/results/full`) |
 | `matchd_wal_fsync_in_progress_seconds` | how long the fsync now running has taken so far, 0 when none is: a stuck disk shows here **before** the fsync returns |
 
 Each stall is also logged at Warn (`durability stall: slow fsync took=… threshold=…`). All fsyncs, including the one before a segment roll, which wasn't timed before, now go through one function (`Log.fsync`) that times them.

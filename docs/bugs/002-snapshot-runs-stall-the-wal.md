@@ -8,13 +8,13 @@
 
 In the snapshot row, core latency is the same with snapshots on and off, so copy-on-write keeps the engine goroutine out of it. End-to-end latency isn't the same: from the result files' end-to-end histograms,
 
-| runs | commands answered in more than 50 ms |
+| runs | commands answered in more than 50 ms (histogram buckets from 50.3 ms up) |
 |---|---|
-| 5 × `snapshots-on` (6 snapshots per run) | 10,787–11,927 of about 1.2 million per run (about 0.9%) |
+| 5 × `snapshots-on` (6 snapshots per run) | 10,723–11,819 of about 1.2 million per run (about 0.9%) |
 | 5 × `snapshots-off` | 0 |
 | 5 × `mix-resting` (same configuration, snapshots off) | 0 |
 
-That's about 1,800 commands per snapshot, about 90 ms of traffic at 20,000/s. The WAL's *mean* fsync time is the same with and without snapshots (1.4–1.7 ms), so the cost is a few long stalls, not a general slowdown.
+That's 1,800–2,000 commands per snapshot, 90–100 ms of traffic at 20,000/s. The WAL's *mean* fsync time is about the same with and without snapshots (1.4–1.7 ms on, 1.3–1.8 ms off and in `mix-resting`), so the cost is a few long stalls, not a general slowdown.
 
 ## What a reproduction shows
 
@@ -40,7 +40,7 @@ The reproduction ran an engine with `-snapshot-interval 5s` and loadgen at 20,00
 - Stop the WAL append from waiting behind an fsync, e.g. by appending into a fresh segment while the old one syncs.
 - Spread snapshot I/O, or snapshot less often.
 
-Each changes the durability design (decisions 011–013) and is the user's call.
+Each changes the durability design (decisions 011–013) and is the author's call.
 
 ## Reproduce
 

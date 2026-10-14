@@ -29,7 +29,7 @@ type Writer struct {
 	Durable *durable.Seq // a snapshot is only published once its seq is durable
 	Log     *slog.Logger
 
-	// Counters for tests now and /metrics in milestone 7. Written by the
+	// Counters, read by tests and /metrics. Written by the
 	// writer goroutine; atomics so other goroutines can read them.
 	written      atomic.Uint64
 	failed       atomic.Uint64

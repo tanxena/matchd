@@ -1,7 +1,10 @@
 # 002 — Order storage and cancel lookup: indexed slab, uint32 links, tombstone-free hash index
 
-- **Status:** accepted. Revision 1 (milestone 1) used Go maps for the two lookups. **Revision 2 (milestone 2)** replaced them with the book's own hash index, after measurement showed Go maps allocating in steady state. Both revisions were approved by the user.
-- **Code:** `internal/book/book.go` (`orderNode`, `Book.nodes`, `Book.alloc`, `Book.release`, `Book.unlink`, `Book.Cancel`) and `internal/book/index.go` (`index`)
+- **Status:** accepted. Revision 1 (milestone 1) used Go maps for the two lookups. **Revision 2 (milestone 2)** replaced them with the book's own hash index, after measurement showed Go maps allocating in steady state. Both revisions were approved by the author.
+
+> **Superseded in part (2026-10-13, `fd338eb`):** the duplicate-client-order-id rule now spans every instrument of an engine: besides its own `byClOrd`, each book checks and updates a shared `book.ClOrdIDs` (`internal/book/clord.go`), described in [decision 003](003-integer-domain-and-reject-semantics.md#duplicate-client-order-id-prd-51).
+
+- **Code:** `internal/book/book.go` (`orderNode`, `Book.chunks`, `Book.release`, `Book.unlink`, `Book.Cancel`), `internal/book/cow.go` (`Book.alloc`, the chunked slab since milestone 5) and `internal/book/index.go` (`index`)
 - **Evidence:** `internal/book/mapchurn_test.go`; run `go test ./internal/book -run MapChurn -mapchurn -v`
 
 ## Context
@@ -70,11 +73,11 @@ Go 1.24+ maps (Swiss tables) mark a deleted slot with a **tombstone** so that la
   - `Book.byClOrd index[clientOrderKey]` enforces the duplicate-client-order-id rule.
   - A slot holding value 0 counts as empty. That works because slab slot 0 is reserved and never stored.
   - The table keeps its load at or below 1/2. It starts with room for 1,024 entries (2,048 slots).
-- **Hashing:** `hash/maphash.Comparable` with a **random per-index seed** (`maphash.MakeSeed()`), as the user chose over a fixed hash. The reasons:
+- **Hashing:** `hash/maphash.Comparable` with a **random per-index seed** (`maphash.MakeSeed()`), as the author chose over a fixed hash. The reasons:
   - Client order ids are chosen by clients. With a fixed, public hash function, a hostile client could pick ids that all land in one probe run and make every lookup on that book linear (**hash flooding**).
   - The seed decides only *where* an entry sits in memory. No code ever iterates an index, so iteration order can't leak into output. Lookups return the same answers for any seed. The book's state and events are therefore identical whatever the seed, and WAL replay (milestone 5) stays exact.
   - This is the engine's **one use of randomness**. PRD 5.4 forbids randomness because it would break deterministic replay, and this use can't, for the reasons just given. The differential and determinism tests run with a fresh seed every time and still produce identical results.
-  - Measured cost: about 8 ns per hash for an `OrderID` key and about 15 ns for the struct key, with zero allocations.
+  - Measured cost (milestone 2): about 8 ns per hash for an `OrderID` key and about 15 ns for the struct key, with zero allocations.
 
 **Cancel cost:**
 - O(1) expected for the index lookup and the unlink;
@@ -96,4 +99,4 @@ So cancel is **O(1) for the order plus O(log L) for the level** in the common ca
 - **The slab grows the same way.** *(Milestone 1–4 wording; since milestone 5 the slab grows by adding a chunk, and existing chunks never move, so the pointer hazard below no longer exists. Decision 013.)* `append` doubles the backing array when the book reaches a new peak. The pointer `m := &b.nodes[i]` is only valid until the next growth, so `Submit` finishes matching, which never grows the slab, before calling `rest`, which may. That rule is commented in the code and is a "what breaks if" scenario in `docs/guide/01-book-core.md`.
 - **2³²−1 resting orders at most per book.** `alloc` panics beyond that.
 - **No level pointer in the node.** This keeps `orderNode` pointer-free, so the GC never scans the slab. The price is the O(log L) level search on cancel.
-- **Two hash lookups per accepted order:** the duplicate check on arrival, and an insert when it rests. This is the price of the PRD 5.1 rule.
+- **Two hash lookups per accepted order:** the duplicate check on arrival, and an insert when it rests. This is the price of the PRD 5.1 rule. *(Since review F-003 each also touches the engine-wide `ClOrdIDs` set, so a check is up to two lookups and resting adds one more insert.)*

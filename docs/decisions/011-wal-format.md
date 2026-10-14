@@ -1,7 +1,10 @@
 # 011 — WAL format: segmented records with CRC32C, and the torn-tail rule
 
 - **Status:** accepted (milestone 4)
-- **Code:** `internal/wal/wal.go`, `internal/wal/syncdir_*.go`, `internal/engine/codec.go`
+
+> **Superseded in part (2026-10-14, `b1ad711`, `3852a5e`):** `wal.Options` gained `NoSyncOnRoll`, which finishes a segment without fsyncing it, set only by the fill log (review F-006, [decision 014](014-fill-log-and-replay-check.md)); the command WAL never sets it, so its finished segments are still always fsynced. It also gained `ArchiveDir` (the engine's `-archive` flag): segments a snapshot made unnecessary are moved there instead of deleted (review F-007). Earlier, in milestone 5, `AllowGaps` (the fill log: seq must only increase, not by exactly 1) and `ReadOnly` were added (`0fd95d0`), and the directory fsync moved to `internal/fsutil` (`c594772`).
+
+- **Code:** `internal/wal/wal.go`, `internal/fsutil/syncdir_*.go` (in `internal/wal` until milestone 5), `internal/engine/codec.go`
 
 ## Context
 

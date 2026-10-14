@@ -1,6 +1,9 @@
 # 006 — The event model: one flat struct, a fixed order per command
 
 - **Status:** accepted (milestone 2)
+
+> **Superseded in part (2026-10-12, `a9ad131`):** each fill pair is now followed by a public `EvTrade` print, and deltas and trades carry a per-instrument `MDSeq` ([decision 016](016-market-data.md)). The publisher also creates two kinds the engine never emits, `EvSnapshot` and `EvResendUnavailable`. The event order below shows the trade print.
+
 - **Code:** `internal/engine/types.go` (`Command`, `Event`, `EventKind`), `internal/engine/engine.go` (`newOrder`, `cancel`)
 
 ## Context
@@ -10,7 +13,7 @@ Each command produces events for two audiences:
 - **The client(s) involved:** an ack or reject, fills, and cancel confirmations.
 - **Market-data subscribers:** how each price level changed.
 
-Milestone 3 will encode events onto the wire, milestone 4 will hold them until their command is durable, and milestone 6 will sequence the market-data ones. The representation must not allocate (PRD 6), and the order of events must be fixed so that clients and the replay check can rely on it.
+Milestone 3 encodes events onto the wire, milestone 4 holds them until their command is durable, and milestone 6 sequences the market-data ones. The representation must not allocate (PRD 6), and the order of events must be fixed so that clients and the replay check can rely on it.
 
 ## Decision: one flat, pointer-free struct
 
@@ -27,7 +30,7 @@ The alternative was a Go interface with one concrete type per event (`type Ack s
 - **GC cost.** A slice of pointer-free structs is one block of memory that the GC never needs to scan.
 - **Simple copying.** Events can be passed by value, compared with `==` in tests, and written into ring buffers (milestone 6) without aliasing.
 
-**Cost:** a 96-byte (now 112-byte) event carries fields that its kind doesn't use. For a reject, most of it is zeros. This is the same trade NASDAQ's binary protocols make, with fixed layouts per message type. Here the in-memory struct is shared, while the wire format (milestone 3) will encode only the fields each kind needs.
+**Cost:** a 96-byte (now 112-byte) event carries fields that its kind doesn't use. For a reject, most of it is zeros. This is the same trade NASDAQ's binary protocols make, with fixed layouts per message type. Here the in-memory struct is shared, while the wire format (milestone 3) encodes only the fields each kind needs.
 
 `Command` is flat for the same reasons (104 bytes).
 
@@ -41,6 +44,7 @@ The alternative was a Go interface with one concrete type per event (`type Ack s
 Ack                                   order id assigned; echoes side, price, qty
 for each opposite-side level traded, best price first:
     Fill(taker), Fill(maker)          one pair per resting order matched, oldest first
+    Trade                             after each pair: the public print (milestone 6)
     ...
     BookDelta(level)                  the level's new total; 0 = level removed
 Cancelled(expired)                    if a market order had an unfilled remainder

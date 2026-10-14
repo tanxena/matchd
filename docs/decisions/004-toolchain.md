@@ -1,19 +1,22 @@
 # 004 — Toolchain, dependencies, and repository conventions
 
 - **Status:** accepted (milestone 1); race-detector item resolved before milestone 2
+
+> **Superseded in part (2026-10-09, `486f858`):** from milestone 2 the code needs Go 1.24: `hash/maphash.Comparable` in the book's index ([decision 002](002-order-storage-and-cancel.md)), `testing.B.Loop` in the benchmarks, and later `slog.DiscardHandler` in the server tests. The 1.22 floor below describes milestone 1.
+
 - **Files:** `go.mod`, `.gitattributes`, `.gitignore`
 
 ## Go version
 
 **Go 1.27.0** (windows/amd64) is installed on the development machine. `go.mod` declares `go 1.27.0`, as `go mod init` wrote it.
 
-PRD 6 asks for "Go 1.22+, use what's installed". The code currently needs nothing newer than 1.22:
+PRD 6 asks for "Go 1.22+, use what's installed". At milestone 1 the code needed nothing newer than 1.22:
 
 - `math/rand/v2`;
 - `for i := range n` over an integer;
 - the `slices` package and the `min`/`max` builtins (both 1.21).
 
-*(Milestone 7: the Linux pass cross-compiles every binary and test binary with this toolchain in `make ci`; running the suite on Linux is left to the CI workflow, decision 010.)* If the Linux pass has to run on an older toolchain, `go.mod` can be lowered to `go 1.22` with no code changes. We keep the installed version until something forces that.
+*(Milestone 7: the Linux pass cross-compiles every binary and test binary with this toolchain in `make ci`; running the suite on Linux is left to the CI workflow, decision 010.)* If the Linux pass has to run on an older toolchain, `go.mod` can be lowered to `go 1.24` with no code changes (`go vet` reports nothing newer than 1.24). We keep the installed version until something forces that.
 
 ## Dependencies
 
@@ -50,5 +53,5 @@ The choice was between this and running `-race` only in the Linux pass. We chose
 
 **Costs.**
 - `CGO_ENABLED=1` is set per command, not globally with `go env -w`, so other projects on the machine are unaffected. The Makefile (milestone 7) exports it for every target.
-- Race-enabled runs are slower: the book package's suite takes about 13–16 s under `-race`, against about 2.5 s without it.
+- Race-enabled runs are slower: when the race detector was set up, the book package's suite took about 13–16 s under `-race`, against about 2.5 s without it.
 - The race detector needs cgo, but the shipped binaries don't. `go build` with the default `CGO_ENABLED=0` still produces a pure-Go binary.

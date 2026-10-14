@@ -1,7 +1,9 @@
 # 016 — Market data: engine-assigned md_seq, snapshot then deltas, resend from a per-instrument ring
 
-- **Status:** accepted (milestone 6). Four choices were made with the user: the ring is per instrument, 65,536 events (the Section 10 question); `md_seq` is assigned by the engine; a resend that is too old gets a reject and the client re-subscribes; `engctl` names instruments by id until milestone 7.
+- **Status:** accepted (milestone 6). Four choices were made with the author: the ring is per instrument, 65,536 events (the Section 10 question); `md_seq` is assigned by the engine; a resend that is too old gets a reject and the client re-subscribes; `engctl` names instruments by id until milestone 7 (since milestone 7 it also takes symbols, [decision 018](018-http-admin-and-instruments.md)).
 - **Code:** `internal/engine/engine.go` (`nextMD`, `EvTrade`), `internal/engine/types.go`, `internal/publisher/marketdata.go`, `internal/gateway/session.go`, `internal/proto/messages.go`, `internal/client/feed.go`, `internal/server/server.go`, `cmd/engctl` (`book`, `subscribe`)
+
+> **Superseded in part (2026-10-14, `bf4c722`):** a Resend is no longer served from anywhere in the ring: one more than `publisher.MaxResend` (4,096) events back gets `ResendUnavailable` too, and each connection's Subscribe and Resend requests are rate-limited, with `Reject(TooManyRequests)` (reason 106) beyond the limit. Both are described under "Bounded work per request" below (review F-005).
 
 ## Context
 
@@ -19,7 +21,7 @@ Acceptance 4: a subscriber joining mid-stream gets a snapshot, detects an induce
 
 Market data is **market by price**: each `BookDelta` gives one price level's **new total**, with 0 meaning the level is gone (the engine already emitted these, decision 006). Milestone 6 adds a **`Trade`** event per match: anonymous, with price, quantity, the aggressor's side and the match id. It comes right after the match's two private fill events. Within a command, a level's trades come before that level's delta, so a consumer sees the prints, then the level's new size.
 
-### md_seq: assigned by the engine (chosen with the user)
+### md_seq: assigned by the engine (chosen with the author)
 
 `Engine.nextMD(instrument)` numbers each instrument's deltas and trades gap-free from 1. Because the engine assigns it, `md_seq` is part of the **deterministic state**:
 - replay reproduces it;
@@ -55,9 +57,9 @@ Snapshots are sent as a header plus **one fixed-size frame per level**, rather t
 
 A consumer that sees `md_seq` jump from N to N + k (k > 1) sends **`Resend(instrument, from = N+1)`**. The publisher answers from that instrument's ring with every event from N + 1 up to the latest, in order, before any later live event. The consumer ignores anything at or below what it has already applied.
 
-**The ring (chosen with the user):** per instrument, the last **65,536** market-data events, about 7.3 MB per instrument at 112 bytes per event. Per instrument rather than shared, so a busy instrument can't push a quiet one's history out. It is allocated on an instrument's first market-data event.
+**The ring (chosen with the author):** per instrument, the last **65,536** market-data events, about 7.3 MB per instrument at 112 bytes per event. Per instrument rather than shared, so a busy instrument can't push a quiet one's history out. It is allocated on an instrument's first market-data event.
 
-**A resend older than the ring** gets **`Reject(ResendUnavailable)`**, and the client subscribes again for a fresh snapshot (chosen with the user, matching the PRD's "the client must re-snapshot"). The alternative, the server pushing a snapshot unasked, would mean a client could receive a snapshot at any moment.
+**A resend older than the ring** gets **`Reject(ResendUnavailable)`**, and the client subscribes again for a fresh snapshot (chosen with the author, matching the PRD's "the client must re-snapshot"). The alternative, the server pushing a snapshot unasked, would mean a client could receive a snapshot at any moment.
 
 **Bounded work per request (review F-005).** Subscribe and Resend need no login and are answered on the publisher goroutine, which every client's answers wait behind. Unbounded, one 18-byte Resend made it push up to 65,536 events, and a few connections repeating it could keep the publisher busy, fill its queues and stall the engine. Two bounds:
 - **A Resend more than `publisher.MaxResend` (4,096) events back** gets `ResendUnavailable`, as if it were older than the ring. The client subscribes again, which costs the book's levels rather than the whole gap.
@@ -90,7 +92,7 @@ The first version queued **one event per level**. A book with more levels than t
 The design now:
 1. On Subscribe, the publisher copies its level view into a sorted, **immutable** `publisher.Snapshot` (it already built this slice to sort the levels). It hands it over with `Subscriber.DeliverSnapshot`, which doesn't block.
 2. The session puts the snapshot on a small side channel (at most 4 pending), and an `EvSnapshot` marker on its normal queue. The marker fixes the snapshot's place in the stream: after every event before it, before every event after it.
-3. When the writer goroutine reaches the marker, it **streams** the header and every level frame straight from the snapshot, with blocking socket writes. Each flush is bounded by `WriteTimeout`. Then it goes back to the queue.
+3. When the writer goroutine reaches the marker, it **streams** the header and every level frame straight from the snapshot, with blocking socket writes. Each socket write is bounded by `WriteTimeout`. Then it goes back to the queue.
 
 The writer can't read the publisher's own level maps in place: the publisher goroutine keeps changing them, so that would be a data race. The copy is what makes "directly from the book view" safe. It costs O(levels) on the publisher goroutine, the same as the sort.
 
@@ -98,7 +100,7 @@ The writer can't read the publisher's own level maps in place: the publisher gor
 - **A client that can't consume the snapshot is still disconnected.** If it stops reading, a socket write blocks past `WriteTimeout` and the session closes. If the market moves faster than it reads while the snapshot streams, the queue (which holds the events after the snapshot) fills, and it is a slow consumer as before.
 - **A client that can consume it isn't, however deep the book.** A 4,000-level book goes through a 64-event queue (`TestDeepSnapshotBeyondQueue`).
 
-### engctl names instruments by id (a deviation, chosen with the user; closed in milestone 7)
+### engctl names instruments by id (a deviation, chosen with the author; closed in milestone 7)
 
 PRD 5.7 writes `engctl book <symbol>`, but the wire protocol identifies instruments by numeric id and has no symbol lookup. Milestone 6 uses `--instrument N`; milestone 7's instrument endpoint will let `engctl` resolve symbols. *(Done: `engctl book XYZ` resolves the symbol through `GET /instruments`, [decision 018](018-http-admin-and-instruments.md).)*
 

@@ -1,7 +1,9 @@
 # 014 — The fill log and replay-check
 
-- **Status:** accepted (milestone 5). Writing a fill log, rather than comparing only books, was chosen with the user.
+- **Status:** accepted (milestone 5). Writing a fill log, rather than comparing only books, was chosen with the author.
 - **Code:** `internal/snapshot/filllog.go`, `internal/snapshot/check.go`, `internal/publisher/publisher.go` (`FillRecorder`), `cmd/engctl` (`replay-check`)
+
+> **Superseded in part (2026-10-14, `b1ad711`):** the fill log no longer fsyncs even at a segment roll (`wal.Options.NoSyncOnRoll`; a roll still syncs the directory, a no-op on Windows), and a fill log damaged beyond a torn tail is moved aside to `fills.damaged-<unix nanoseconds>` instead of stopping `server.Start`. Both are described under "Not fsynced" below (review F-006).
 
 ## Context
 
@@ -26,9 +28,9 @@ The record is a `snapshot.Match`:
 
 That is everything both parties were told.
 
-**Matches only, no cancels (confirmed with the user in milestone 8).** The fill log has no record for a cancel of any kind: neither a requested cancel nor a remainder cancelled on arrival (a market order's `Expired`, an IOC's `IOCUnfilled`, [decision 020](020-ioc-and-fok.md)). That's deliberate for v1:
+**Matches only, no cancels (confirmed with the author in milestone 8).** The fill log has no record for a cancel of any kind: neither a requested cancel nor a remainder cancelled on arrival (a market order's `Expired`, an IOC's `IOCUnfilled`, [decision 020](020-ioc-and-fok.md)). That's deliberate for v1:
 - **Its job is replay-check on matches.** Fills are what move money between two parties, so they're what an audit must reproduce exactly. A cancel moves nothing.
-- **Cancel-on-arrival is verified elsewhere.** The differential test compares every result, including the quantity cancelled on arrival, with the reference book. The engine's `TestIOCAndFOKEvents` pins which reason each case gets, and `TestIOCAndFOKOverTheWire` checks the `CancelAck` a client receives. *The crash harness doesn't check cancels:* it checks acknowledged commands against the WAL, received fills against the replay, and the recovered state, but not the cancel events a client received.
+- **Cancel-on-arrival is verified elsewhere.** The differential test compares every result, including the quantity cancelled on arrival, with the reference book. The engine's `TestIOCAndFOKEvents` pins which reason each case gets, and `TestIOCAndFOKOverTheWire` checks the `CancelAck` a client receives. *The crash harness doesn't check cancel-on-arrival:* it checks acknowledged commands (a requested cancel's `CancelAck` among them) against the WAL, received fills against the replay, and the recovered state, but not the `Expired` or `IOCUnfilled` cancels a client received.
 - **It would change the format.** A second record type means a type tag on every record, which is a format version change for an audit log that's otherwise complete.
 
 Cancel-on-arrival records are a possible **v2 addition**, for example if the fill log were to become an order-lifecycle audit trail ("show me everything that happened to order 812").
@@ -76,7 +78,7 @@ The result includes the full replayed state at the WAL's end and all replayed ma
   - a fabricated fill-log record fails with "never produced";
   - a WAL with its newest segment removed fails.
 - **`TestSnapshotsWrittenPrunedAndRecovered`:** on a clean data directory, it rebuilt snapshot 902 from base 702 and compared 140 fill-log records with the replay.
-- **The crash harness:** it runs `replay-check` after every one of 50+ kills.
+- **The crash harness:** it runs `replay-check` after every kill (5 runs by default, 50 with `-crash`; decision 015).
 
 ## Costs
 

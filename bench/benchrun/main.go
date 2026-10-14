@@ -222,7 +222,7 @@ func preflight(o *options, plan []spec) (sysinfo.Machine, error) {
 			return m, fmt.Errorf("%s (see bench/CHECKLIST.md; -force runs anyway, marking every run disturbed)", strings.Join(problems, "; "))
 		}
 	}
-	// Ports free: no engine left over from an earlier run (or the user's own).
+	// Ports free: no engine left over from an earlier run (or the operator's own).
 	for _, a := range []string{o.addr(), o.httpAddr()} {
 		ln, err := net.Listen("tcp", a)
 		if err != nil {

@@ -423,3 +423,18 @@ No fix introduced a new problem. Two residues are noted under their findings and
 | 8 | Met |
 
 **Not reviewed:** the two commits outside the findings, ea3465f (crash-harness lock) and 449ab7e (open-loop throughput count). They are covered only by the passing suite and the byte-identical report.
+
+## Status at v0.1-reviewed — 2026-10-14 — commit 661a659
+
+Added by the builder after the author's rulings; the reviewer's lines above are unchanged. Since the follow-up, `make bench-balanced` was re-run (9abe845): all 5 Balanced resting runs are clean, and 1 of 5 Balanced clock-probe runs was disturbed by Defender and is left out, by the author's ruling. `make ci` (build, vet on Windows and Linux, lint, Linux cross-compile, the race suite) passed at 661a659.
+
+| # | Status at v0.1-reviewed |
+|---|---|
+| 1 | Met |
+| 2 | Met |
+| 3 | Met |
+| 4 | Met |
+| 5 | Met |
+| 6 | Met. Every latency row has 5 clean runs (F-014). The one exception, ruled by the author, is the Balanced clock-overhead row, which counts 4 of 5 runs, with the disturbed run listed under the tables. |
+| 7 | Pending CI (F-010). The workflow is set up but has not yet run, so nothing has run on Linux. |
+| 8 | Met |

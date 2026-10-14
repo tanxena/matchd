@@ -1,7 +1,9 @@
 # 012 — Durability: what may leak before fsync, and the three fsync policies
 
-- **Status:** accepted (milestone 4). The group-commit defaults, the batching behaviour of `always`, and full-log replay at startup were chosen with the user.
+- **Status:** accepted (milestone 4). The group-commit defaults, the batching behaviour of `always`, and full-log replay at startup were chosen with the author.
 - **Code:** `internal/sequencer/sequencer.go`, `internal/durable/durable.go`, `internal/publisher/publisher.go` (`Run`, `release`, `withhold`), `internal/server/server.go`
+
+> **Superseded in part (2026-10-12, `85ad960`):** startup no longer replays the whole log into a fresh engine. `server.Start` restores the latest snapshot the manifest names and replays only the WAL after it ([decision 013](013-copy-on-write-snapshots.md)); the full-log replay described below was the milestone 4 behaviour.
 
 ## The rule (PRD 5.4 asks for it to be written down exactly)
 
@@ -34,7 +36,7 @@ That covers acks, rejects, fills, cancel-acks and (from milestone 6) market data
 
 A process crash (`kill -9`) loses nothing under any of them: the OS still writes the page cache to disk. Only power loss or an OS crash distinguishes the policies. That's why the milestone 5 crash test can't validate fsync (PRD 5.4); the fsync-gating tests below, and the benchmark, do.
 
-### `always`: batch what's already waiting (chosen with the user)
+### `always`: batch what's already waiting (chosen with the author)
 
 The sequencer takes every command already in its input channel, up to `MaxBatch` (4,096). It writes them in one `Write`, fsyncs **once**, and only then forwards them to the engine. No command is applied or acknowledged before it is on disk, so the rule holds exactly. But commands that arrived together share an fsync instead of paying for one each.
 
@@ -42,7 +44,7 @@ Strictly one fsync per command was the alternative. It caps throughput at 1 / fs
 
 Measured: 1,000 commands queued behind a blocked fsync went through in **2 fsyncs**. Sequential round trips (each waiting for its ack) cost exactly **one fsync each** (`TestFsyncCounts`).
 
-### `group:Nms`: 1 ms window, early at 4,096 (Section 10, chosen with the user)
+### `group:Nms`: 1 ms window, early at 4,096 (Section 10, chosen with the author)
 
 - **Commands are forwarded to the engine as soon as they are written.** The engine never waits for disk; that is the point of group commit (PRD 5.4: "the engine must not stall per batch").
 - **A separate syncer goroutine** waits for the sequencer's "dirty" signal, then waits out the **window (default 1 ms)**, then fsyncs once for everything written so far and advances `durable.Seq`.
@@ -68,7 +70,7 @@ If a write or fsync fails, `durable.Fail(err)` is called:
 
 **A consequence clients must understand: "not acknowledged" doesn't mean "didn't happen".** The failed batch was *written* to the OS before its fsync failed. If the data did reach the disk, restart replays those commands, and orders the client never got an ack for may exist and may have traded. This is the same ambiguity as a network timeout. v1 has no order-status query, so a client that saw its connection drop without an ack must treat the order's fate as unknown (decision 009 records the missing status query as a known limitation).
 
-## Startup replays the whole log (chosen with the user)
+## Startup replays the whole log (chosen with the author)
 
 Milestone 5 adds snapshots, manifests, `replay-check` and the crash harness. Milestone 4 already needed restarts to work, so `server.Start`:
 1. opens the WAL;

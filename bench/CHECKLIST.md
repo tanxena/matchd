@@ -11,8 +11,8 @@ make bench-smoke
 ```
 
 It runs every configuration once, for 2 s warmup + 5 s, under whatever plan is active, then generates `bin\bench-smoke\report.md` from the results. Expect:
-- 10 lines like `[ 5/10] 05-mix-resting-r1   20007/s  core p50 …  e2e p50 …  cpu eng … gen … other …`;
-- `done in` about 1.5–2 minutes (81 s and 103 s when measured): `10 runs, N disturbed, 0 failed`;
+- 11 lines, the first for the clock probe and the rest like `[ 5/11] 05-mix-resting-r1   20007/s  core p50 …  e2e p50 …  cpu eng … gen … other …`;
+- `done in` about 1.5–2 minutes (81 s and 103 s when measured): `11 runs, N disturbed, 0 failed`;
 - **0 failed.** "Disturbed" is expected here if anything else is running: the line names what (e.g. `chrome.exe 1.63`), which is the point of the check;
 - a report that starts with "Smoke test of the harness, not benchmark results".
 
@@ -30,7 +30,7 @@ If any run **failed**, stop: its file in `bin\bench-smoke\` has a `failed` field
    powercfg /setactive <new-guid>
    powercfg /getactivescheme
    ```
-   `benchrun` checks the plan's *personality* (what kind of plan it is), not its GUID, so the copy's new GUID is fine. The hidden original reads as "high performance" on this machine, and a copy should keep that setting. `benchrun` refuses to start `full` unless the active plan's personality is "high performance". If it refuses with the copy active, tell me rather than using `-force`.
+   `benchrun` checks the plan's *personality* (what kind of plan it is), not its GUID, so the copy's new GUID is fine. The hidden original reads as "high performance" on this machine, and a copy should keep that setting. `benchrun` refuses to start `full` unless the active plan's personality is "high performance". If it refuses with the copy active, find out why rather than using `-force`.
 3. **Power mode.** The probe found Settings > System > Power > *Power mode* set to **"Best power efficiency"** on this machine. Under High performance the slider may be unavailable, but the overlay is still recorded in every result file. Before switching plans, set Power mode to **"Best performance"** so the recorded overlay doesn't contradict the plan.
 
 ## 1b. Microsoft Defender and the data directory
@@ -63,7 +63,7 @@ Only that directory is excluded: the engine's data for the runs, deleted after e
 
 ## 2. Nothing else running
 
-`benchrun` measures this and marks a run disturbed if other processes average over **0.35 logical CPUs** during its 60 s window. Things that tripped it in the smoke runs:
+`benchrun` measures this and marks a run disturbed if other processes average over **0.35 logical CPUs** during its measured window (60 s for a load run; the whole probe for a clock run). Things that tripped it in the smoke runs:
 
 | close | why |
 |---|---|
@@ -104,12 +104,13 @@ On the console, each line ends with `DISTURBED: <reasons>` if any check failed:
 | `measured window lasted …` | the machine stalled (sleep, a long freeze) |
 | `cap cancels` | the book outgrew its bound; the mix was distorted |
 | `affinity reads back as …` | pinning didn't take |
+| `engine disconnected N slow consumers` | the engine dropped a connection that couldn't keep up |
 
 Every result file holds the same in its `disturbed` list, plus the raw CPU figures (`load.cpu`: `other`, `top_other`, `interrupts`, `machine_busy`).
 
 **If any run is disturbed:** the report won't use it, and won't generate at all until you decide. Either:
 - re-run the whole suite: delete `bench\results\full`, fix the cause, `make bench-full` (cleanest);
-- or accept fewer runs for that row: `bin\report -results bench\results -allow-disturbed -min-runs-suite full=4 -readme README.md` (the suite that lost the run). That row then shows "**n=4** of 5†", and the disturbed run is listed under the table with its reason. PRD 7.5 asks for at least 5, so the report refuses a row with fewer than 5 counted runs unless `-min-runs-suite` lowers it for that suite. The Makefile's `bench-report` target does exactly this for the committed Balanced results (`balanced=3`); see its comment.
+- or accept fewer runs for that row: `bin\report -results bench\results -allow-disturbed -min-runs-suite full/fsync=4 -readme README.md` (the suite and table that lost the run; `full=4` lowers it for the whole suite). That row then shows "**n=4** of 5†", and the disturbed run is listed under the table with its reason. PRD 7.5 asks for at least 5, so the report refuses a row with fewer than 5 counted runs unless `-min-runs-suite` lowers it for that suite or table. The Makefile's `bench-report` target does exactly this for the committed Balanced results (`balanced/clock=4`); see its comment.
 
 ## 5. The Balanced row
 
@@ -134,7 +135,7 @@ make bench-report
 git add bench/results README.md
 ```
 
-`bench-report` regenerates the README's benchmark section from every file in `bench\results` (`bench/report`). For the committed results the Makefile passes `-allow-disturbed -min-runs-suite balanced/clock=4`, because one Balanced clock-probe run was disturbed (step 4). After a clean re-run, remove both flags, so that the report refuses disturbed runs again. Commit the results and the README together; I'll write the rest of the README around them.
+`bench-report` regenerates the README's benchmark section from every file in `bench\results` (`bench/report`). For the committed results the Makefile passes `-allow-disturbed -min-runs-suite balanced/clock=4`, because one Balanced clock-probe run was disturbed (step 4). After a clean re-run, remove both flags, so that the report refuses disturbed runs again. Commit the results and the README together.
 
 To restore your usual plan: `powercfg /setactive <guid>` (`powercfg /list` shows them). If you added the Defender exclusion in step 1b, remove it now.
 

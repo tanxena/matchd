@@ -1,6 +1,6 @@
 # 018 — The HTTP side: health, metrics, and instruments without touching the order path
 
-- **Status:** accepted (milestone 7). `GET /instruments` content, and serving it from the publisher's view, were chosen with the user.
+- **Status:** accepted (milestone 7). `GET /instruments` content, and serving it from the publisher's view, were chosen with the author.
 - **Code:** `internal/server/http.go`, `internal/server/admin.go`, `internal/publisher/marketdata.go` (`Instruments`, `ExpectInstrument`), `internal/gateway/gateway.go` (`ReservedClientID`), `cmd/engctl` (`instruments`, `add-instrument`, symbol lookup)
 
 ## Context

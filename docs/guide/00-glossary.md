@@ -20,11 +20,11 @@ Terms used in this repo's code and docs. Each entry names the milestone where th
 
 - **Limit order** (M1): "buy (or sell) up to Q at price P or better". Whatever doesn't trade immediately **rests** on the book at P.
 - **Market order** (M1): "buy (or sell) Q at whatever price is available". It never rests; any unfilled remainder is cancelled (`Result.Expired`).
-- **IOC (immediate or cancel)** *(later, M8)*: a limit order that never rests; its unfilled remainder is cancelled.
-- **FOK (fill or kill)** *(later, M8)*: an order that fills completely right away or does nothing at all.
+- **IOC (immediate or cancel)** (M8): a limit order that never rests; its unfilled remainder is cancelled.
+- **FOK (fill or kill)** (M8): an order that fills completely right away or does nothing at all.
 - **Time in force (TIF)** (M1): how long an order may rest. **GTC** (good till cancelled) rests until filled or cancelled. **Day** would expire at the end of the session; in v1 it is treated as GTC (decision 003).
 - **Order id** (M1): the engine's unique number for an accepted order (`book.OrderID`). The caller assigns it, never the book.
-- **Client order id (ClOrdID)** (M1): the client's own label for an order. It must be unique among that client's *live* orders (PRD 5.1).
+- **Client order id (ClOrdID)** (M1): the client's own label for an order. It must be unique among that client's *live* orders, on every instrument (PRD 5.1; enforced across instruments since review F-003).
 - **Cancel** (M1): removing a resting order. Here it is scoped to the owning client (decision 003).
 - **Reject** (M1): refusing a command, with a reason (`book.RejectReason`). A rejected command doesn't change the book.
 
@@ -50,14 +50,14 @@ Terms used in this repo's code and docs. Each entry names the milestone where th
 
 ## Data structures
 
-- **Slab** (M1): one big slice holding all records of a kind, addressed by index (`Book.nodes`).
+- **Slab** (M1): storage holding all records of a kind, addressed by index. One slice (`Book.nodes`) in milestone 1; since milestone 5, fixed chunks of 4,096 slots (`Book.chunks`).
 - **Free list** (M1): a linked list of unused slab slots or structs, reused before allocating new ones.
 - **Intrusive linked list** (M1): a list whose links (`prev`, `next`) are fields of the elements themselves, rather than separate list nodes.
 
 ## Engine (milestone 2)
 
 - **Command** (M2): an input to the engine: `NewOrder`, `Cancel`, `AddInstrument` (`engine.Command`).
-- **Event** (M2): an output of the engine: `Ack`, `Reject`, `Fill`, `Cancelled`, `BookDelta`, `InstrumentAdded` (`engine.Event`).
+- **Event** (M2): an output of the engine: `Ack`, `Reject`, `Fill`, `Cancelled`, `BookDelta`, `InstrumentAdded`, and since milestone 6 `Trade` (`engine.Event`).
 - **Ack** (M2): the event confirming a new order was accepted, carrying its engine-assigned order id. It is always the first event for that order.
 - **Sequence number (Seq)** (M2; assigned by the sequencer since M3, logged since M4): a global, gap-free counter on every command, including rejected ones. The engine panics on a gap.
 - **Gap-free** (M2): every number in a series is used exactly once, in order. A missing number then proves something was lost.
@@ -103,7 +103,7 @@ Terms used in this repo's code and docs. Each entry names the milestone where th
 - **Page cache** (M4): the operating system's in-memory copy of file data. `write` usually stops here; a process crash doesn't lose it, a power failure does.
 - **fsync** (M4): the call that blocks until a file's data is on stable storage (`FlushFileBuffers` on Windows). It is slow: about 1.5 ms here, against about 3.7 µs for a plain write.
 - **Durable** (M4): on stable storage, so it would survive a power failure.
-- **Durable seq** (M4): the highest command seq known to be durable. The publisher releases an event only when the event's seq is at or below it.
+- **Durable seq** (M4): the highest command seq known to be durable (under `fsync=never`, merely written to the OS). The publisher releases an event only when the event's seq is at or below it.
 - **Segment** (M4): one file of the WAL, named after its first record's seq.
 - **Torn write / torn tail** (M4): a record only partly written when a crash interrupted it, at the end of the log. Truncated on recovery; damage anywhere else is corruption.
 - **CRC32C** (M4): a 32-bit checksum (Castagnoli polynomial) stored with every record, to detect torn or corrupted bytes.
@@ -134,7 +134,7 @@ Terms used in this repo's code and docs. Each entry names the milestone where th
 - **Market-data snapshot** (M6): a full price-level book for one instrument at a stated `md_seq`, sent to a new subscriber before any deltas. (Not the same as a recovery snapshot, milestone 5.)
 - **Snapshot then deltas** (M6): the join rule: after a snapshot at S, the subscriber applies deltas from S + 1, with nothing missing or doubled.
 - **Gap** (M6): a jump in `md_seq` (4,005 then 4,007): something was lost.
-- **Resend** (M6): a request to send again the market-data messages from a given `md_seq`, served from the ring buffer.
+- **Resend** (M6): a request to send again the market-data messages from a given `md_seq`, served from the ring buffer. Since review F-005 a request reaching 4,096 or more messages back (`publisher.MaxResend`) is answered `ResendUnavailable`, so the client re-snapshots instead, and each connection's Subscribe and Resend requests are rate-limited (beyond that, `Reject` reason 106, `TooManyRequests`).
 - **Ring buffer** (M6): fixed-size circular storage of the last N messages per instrument (65,536 here); older ones are overwritten.
 - **Re-snapshot** (M6): starting over with a fresh snapshot when a gap is older than the ring holds.
 - **Feed** (M6): the client-side book builder (`client.Feed`) that applies snapshots and deltas and recovers from gaps.

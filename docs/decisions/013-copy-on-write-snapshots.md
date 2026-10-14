@@ -1,7 +1,9 @@
 # 013 — Snapshots: copy-on-write over a chunked slab
 
-- **Status:** accepted (milestone 5). Copy-on-write rather than the stop-the-world fallback, and the snapshot triggers (every 1,000,000 commands or every 10 s, whichever comes first), were chosen with the user.
+- **Status:** accepted (milestone 5). Copy-on-write rather than the stop-the-world fallback, and the snapshot triggers (every 1,000,000 commands or every 10 s, whichever comes first), were chosen with the author.
 - **Code:** `internal/book/cow.go`, `internal/book/book.go`, `internal/engine/snapshot.go`, `internal/engine/engine.go` (`Run`), `internal/snapshot/writer.go`, `internal/snapshot/format.go`, `internal/snapshot/manifest.go`, `internal/snapshot/recover.go`
+
+> **Superseded in part (2026-10-12, `a9ad131`):** the snapshot file format is now version 2, which adds each instrument's `md_seq` after its lot size; version 1 files are refused ([decision 016](016-market-data.md), `internal/snapshot/format.go`). The rest of the format below is unchanged.
 
 ## Context
 
@@ -49,7 +51,7 @@ Chunks are separate heap objects whose addresses never change. That is what lets
 
   At most one snapshot is in flight per engine.
 
-### Triggers (chosen with the user)
+### Triggers (chosen with the author)
 
 *(Milestone 7)* A clean shutdown also writes a snapshot, after the final fsync, unless nothing changed since the last one or durability failed ([decision 019](019-graceful-shutdown.md)). The next start then replays no WAL.
 
@@ -103,7 +105,7 @@ The server also refuses to start if the fill log reaches a match the recovered e
 ## Measured costs
 
 - **Freeze** is O(instruments + price levels + chunks). It never touches orders.
-- **The first write to a shared chunk** copies 192 KiB. In `TestFrozenViewSurvivesHeavyTradingAcrossChunks`, 20,000 trading operations during one snapshot copied 5 of 5 chunks in the first cycle and 3 of 5 in later ones. Each chunk is copied at most once per snapshot. The effect on p99.9 latency is to be measured in milestone 9 with snapshots every 10 s, as PRD 5.4 requires.
-- **Every order access** goes through a two-level index (`chunks[i>>12].nodes[i&4095]`), and every write adds one epoch comparison. The full differential suite and the engine's zero-allocation tests pass unchanged. The cost in nanoseconds per operation is for the milestone 9 benchmark.
+- **The first write to a shared chunk** copies 192 KiB. In `TestFrozenViewSurvivesHeavyTradingAcrossChunks`, 20,000 trading operations during one snapshot copied 5 of 5 chunks in the first cycle and 3 of 5 in later ones. Each chunk is copied at most once per snapshot. Milestone 9 measured the effect with snapshots every 10 s, as PRD 5.4 requires (README, snapshot table, `bench/results/full`): matching-core p99.9 was 26.6 µs with snapshots on and 25.6 µs with them off, but end-to-end p99.9 was 163,578 µs against 22,544 µs, because WAL fsyncs stall in snapshot runs ([observation 002](../bugs/002-snapshot-runs-stall-the-wal.md)).
+- **Every order access** goes through a two-level index (`chunks[i>>12].nodes[i&4095]`), and every write adds one epoch comparison. The full differential suite and the engine's zero-allocation tests pass unchanged. The cost in nanoseconds per operation isn't measured on its own: the milestone 9 benchmark times only the whole matching step.
 - **Memory:** up to one spare chunk per live chunk (192 KiB each), so book memory can double during a snapshot. Spares are reused, so steady state allocates nothing, including while frozen (`TestZeroAllocWhileFrozen`).
 - **Minimum footprint:** each book starts with one 192 KiB chunk, even if empty.

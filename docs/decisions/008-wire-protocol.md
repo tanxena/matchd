@@ -1,6 +1,9 @@
 # 008 — Wire protocol: length-prefixed frames, fixed little-endian layouts
 
 - **Status:** accepted (milestone 3)
+
+> **Superseded in part (2026-10-14, `bf4c722`):** the gateway has a seventh reject reason, 106 `TooManyRequests`, for market-data requests beyond a connection's rate (review F-005, [decision 016](016-market-data.md)); and since milestone 6 (`26ecd26`) nothing raises 104 `Unsupported`, whose only use was `Subscribe` before market data existed.
+
 - **Code:** `internal/proto/frame.go`, `internal/proto/messages.go`
 
 ## Context
@@ -69,7 +72,7 @@ There is no padding and no alignment. Fields are read with `binary.LittleEndian.
 
 The field-by-field layouts are in the doc comment on each type in `messages.go`. **`LoginAck` is an addition to PRD 5.5's list**: nothing in that list answers a successful login. Without it, a client couldn't tell "logged in" from "the server hasn't answered yet".
 
-The outbound messages map one-to-one onto engine events ([decision 006](006-event-model.md)): Ack, Reject, Fill, and `CancelAck` for both requested cancels and expired market remainders, with a reason byte. Every outbound message carries the command's `seq` and `time`.
+The outbound messages map one-to-one onto engine events ([decision 006](006-event-model.md)): Ack, Reject, Fill, and `CancelAck` for requested cancels, expired market remainders and (since milestone 8) unfilled IOC remainders, with a reason byte. Every outbound message carries the command's `seq` and `time`.
 
 ### Enum values belong to the wire
 
@@ -77,7 +80,7 @@ Side, type, TIF, role, cancel reason and reject reason are defined in `proto` wi
 
 **Reject reasons:**
 - 1–99 are the engine's reasons, which are sequenced and logged;
-- 100 and up are the gateway's, raised before sequencing (`NotLoggedIn`, `AlreadyLoggedIn`, `ClientInUse`, `InvalidClientID`, `Unsupported`, and since milestone 6 `ResendUnavailable`), and always carry `seq = 0`.
+- 100 and up are the gateway's, raised before sequencing (`NotLoggedIn`, `AlreadyLoggedIn`, `ClientInUse`, `InvalidClientID`, `Unsupported` (not raised since milestone 6), since milestone 6 `ResendUnavailable`, and since review F-005 `TooManyRequests`), and always carry `seq = 0`.
 
 ### Hand-written codec
 

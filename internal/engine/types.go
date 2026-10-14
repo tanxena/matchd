@@ -90,8 +90,8 @@ const (
 	// events with the same MatchID: the taker's first, then the maker's.
 	EvFill EventKind = 3
 	// EvCancelled: an order's remaining quantity (Qty) left the book
-	// without trading: by a cancel request, or because a market order's
-	// remainder expired. CancelReason says which.
+	// without trading: by a cancel request, or because a market or IOC
+	// order's remainder expired on arrival. CancelReason says which.
 	EvCancelled EventKind = 4
 	// EvBookDelta: the level at (Instrument, Side, Price) now holds Qty in
 	// total; Qty 0 means the level is gone. Market data is built from these.

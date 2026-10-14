@@ -1,6 +1,9 @@
 # 005 — The engine loop: one goroutine, Step plus Run, ids and sequence rules
 
 - **Status:** accepted (milestone 2)
+
+> **Superseded in part (2026-10-12, `08e1425`):** `Run` now takes a third argument, `snap *SnapshotHooks`, and takes copy-on-write snapshots between commands ([decision 013](013-copy-on-write-snapshots.md)); with that and the latency recording added in milestone 7 ([decision 017](017-metrics-and-clock.md)) it is no longer about ten lines. The loop below is still its core.
+
 - **Code:** `internal/engine/engine.go` (`Engine`, `Step`, `Run`, `newOrder`, `cancel`, `addInstrument`)
 
 ## Context
@@ -33,19 +36,19 @@ when in is closed:        close out
 **Why the split:**
 - Nearly all tests call `Step` directly and inspect its output, with no timing or goroutines involved.
 - `TestRunMatchesStep` then proves the goroutine form emits exactly what `Step` emits, under `-race`.
-- WAL replay (milestone 5) will call `Step` directly too.
+- WAL replay (milestone 5) calls `Step` directly too (`internal/snapshot/recover.go`).
 
 ### Events are sent one at a time, by value
 
 `Run` sends each `Event` (96 bytes at the time, 112 since milestone 6; no pointers) on a `chan Event`. The alternative was sending one slice per command, which would need a pool of event buffers and a protocol for returning them. Otherwise the publisher could read a buffer while the engine overwrites it.
 
-Sending by value can't share memory, and it doesn't allocate. The cost is one channel operation per event rather than per command, measured in milestone 9.
+Sending by value can't share memory, and it doesn't allocate. The cost is one channel operation per event rather than per command. It is not measured on its own: it is part of the engine's per-command latency, which is read after the sends ([decision 017](017-metrics-and-clock.md)).
 
 ### Backpressure stops at the publisher
 
 A send on `out` blocks when the publisher falls behind, and that stalls the engine. This is deliberate: the engine has no way to drop events without breaking the client or market-data contract.
 
-It makes the publisher responsible for never blocking on a slow client: a per-client bounded buffer, and disconnecting a client that can't keep up (PRD 5.5; milestones 3 and 6). A slow client must never be able to slow the engine.
+It makes the publisher responsible for never blocking on a slow client: a per-client bounded buffer, and disconnecting a client that can't keep up (PRD 5.5; milestones 3 and 6; since [decision 022](022-slow-consumers-and-durability-stalls.md) judged by time rather than by a full queue). A slow client must never be able to slow the engine.
 
 ### Sequence numbers come in on commands; gaps panic
 

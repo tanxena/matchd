@@ -1,6 +1,6 @@
 # 02 — The engine loop: one goroutine, commands in, events out
 
-Milestone 2 wraps the book from milestone 1 in an **engine**: a single goroutine that owns every instrument's book, applies a totally ordered stream of commands, and emits events describing what happened. Everything is still in memory; the network arrives in milestone 3 and the disk in milestone 4.
+Milestone 2 wraps the book from milestone 1 in an **engine**: a single goroutine that owns every instrument's book, applies a totally ordered stream of commands, and emits events describing what happened. The engine itself does no I/O: the network (milestone 3) and the disk (milestone 4) sit around it and reach it only through channels.
 
 This milestone also contains this project's first **design reversal**. Proving the PRD's "zero allocations" requirement uncovered Go maps allocating in steady state, so the book's lookups were replaced with a purpose-built hash table. Most of what is worth learning here sits in that story, and in how hard it is to *measure* zero allocations honestly.
 
@@ -26,7 +26,7 @@ What it costs: one engine uses one core. That is fine here. A matching step take
 
 ### 1.2 Commands, events, and the three counters
 
-**Commands** are inputs: `NewOrder`, `Cancel`, `AddInstrument`. **Events** are outputs: `Ack`, `Reject`, `Fill`, `Cancelled`, `BookDelta`, `InstrumentAdded`. One command produces zero or more events, in an order fixed by [decision 006](../decisions/006-event-model.md).
+**Commands** are inputs: `NewOrder`, `Cancel`, `AddInstrument`. **Events** are outputs: `Ack`, `Reject`, `Fill`, `Cancelled`, `BookDelta`, `InstrumentAdded`, and, since milestone 6, `Trade`, the public print of each match ([06-market-data.md](06-market-data.md)). One command produces zero or more events, in an order fixed by [decision 006](../decisions/006-event-model.md).
 
 Three counters give everything an identity. Each is **gap-free**, meaning every number is used exactly once, in order:
 
@@ -110,7 +110,7 @@ The general lesson: **a test of "nothing happened" needs its own test showing it
 - **`InstrumentID`, `Seq`, `Timestamp`** ([types.go:22–31](../../internal/engine/types.go#L22)). Named integer types, as in milestone 1. Instrument id 0 is never valid.
 - **`CommandKind`, `Command`** ([types.go:34, 58](../../internal/engine/types.go#L58)). One flat struct (104 bytes) for every command kind; fields a kind doesn't use stay zero. `Client` is set by the gateway from the logged-in session (milestone 3), never taken from the frame payload, which is what makes owner-scoped cancel secure.
 - **`EventKind`** ([types.go:81](../../internal/engine/types.go#L81)). Each constant's comment states its contract, for example "`EvAck`: always the first event for an accepted order".
-- **`Role`, `CancelReason`** ([types.go:145, 153](../../internal/engine/types.go#L145)). Taker or maker; requested or expired.
+- **`Role`, `CancelReason`** ([types.go:145, 153](../../internal/engine/types.go#L145)). Taker or maker; requested or expired (and, since milestone 8, `IOCUnfilled`).
 - **`Event`** ([types.go:168](../../internal/engine/types.go#L168)). One flat, pointer-free struct (96 bytes in milestone 2; 112 since milestone 6 added `MDSeq`). `Qty` means a different thing per kind: order qty for an ack, matched qty for a fill, qty removed for a cancel, the level's new total for a delta. The comment on the field says so. `Leaves` is a party's open quantity after a fill.
 
 ### `internal/engine/engine.go`: the engine
@@ -120,6 +120,8 @@ The general lesson: **a test of "nothing happened" needs its own test showing it
   - `symbols map[string]InstrumentID`, which is only touched by `AddInstrument`, so its rare allocations don't matter;
   - the three counters `lastSeq`, `lastOrderID`, `lastMatchID`;
   - `fills`, a scratch buffer reused across commands.
+
+  Later milestones added `mdSeq` (each instrument's market-data sequence, milestone 6), `clOrds` (the `book.ClOrdIDs` every book shares, so a client order id is unique across instruments; review F-003), the latency histograms (milestones 7 and 9), and `outBlocked`, the count of event sends that found the output channel full (review F-008).
 
   The doc comment states the ownership rule: one goroutine, no locks.
 - **`Step`** ([engine.go:86](../../internal/engine/engine.go#L86)) checks `c.Seq == lastSeq+1` (panicking otherwise), records it, and dispatches on `Kind`. It panics on an unknown kind.
@@ -132,19 +134,19 @@ The general lesson: **a test of "nothing happened" needs its own test showing it
       send every event in buf on out
   ```
 
-  When `in` is closed, the loop ends, the deferred `close(out)` runs, and the consumer's `range` loop ends. That is how shutdown propagates (draining is PRD 6's graceful shutdown, built in milestone 7: [decision 019](../decisions/019-graceful-shutdown.md)). Since milestone 7, `Run` also times each command with `internal/clock`, never `time.Now` ([07-operations.md](07-operations.md#13-timing-sub-microsecond-work-on-windows)).
+  When `in` is closed, the loop ends, the deferred `close(out)` runs, and the consumer's `range` loop ends. That is how shutdown propagates (draining is PRD 6's graceful shutdown, built in milestone 7: [decision 019](../decisions/019-graceful-shutdown.md)). Since milestone 7, `Run` also times each command with `internal/clock`, never `time.Now` ([07-operations.md](07-operations.md#13-timing-sub-microsecond-work-on-windows)). Since review F-008, each send is first tried without blocking; one that finds `out` full is counted (`OutputBlocked`) and then waits.
 
   *Since milestone 5,* `Run` also takes snapshot hooks and selects on two more channels (a snapshot-trigger tick, and snapshots coming back to be thawed). It freezes the engine between commands when a trigger fires ([05-recovery.md](05-recovery.md#2-code-walkthrough)).
 - **`newOrder`** ([engine.go:235](../../internal/engine/engine.go#L235)):
   1. Look up the book. If it doesn't exist, reject with `UnknownInstrument`.
   2. Build a `book.Order` with id `lastOrderID+1` and call `Submit` with the scratch fills buffer.
-  3. If the book rejects it, emit a `Reject`. The id was never committed.
+  3. If the book rejects it (including, since milestone 8, a FOK it can't fill), emit a `Reject`. The id was never committed.
   4. Otherwise commit `lastOrderID`, then emit the `Ack`.
-  5. For each fill: bump `lastMatchID`, reduce the taker's `leaves`, and emit the taker event then the maker event. Fills arrive grouped by price, best first, so after the **last fill at a price** (the next fill has a different price, or there isn't one), emit `BookDelta` with `bk.LevelQty(opp, price)`, the level's final size, because matching has already finished.
-  6. Emit `Cancelled(expired)` for a market order's remainder, and a `BookDelta` for the taker's own level if a limit remainder rested.
+  5. For each fill: bump `lastMatchID`, reduce the taker's `leaves`, and emit the taker event then the maker event (since milestone 6, followed by that match's `Trade` print, with the instrument's next `md_seq`). Fills arrive grouped by price, best first, so after the **last fill at a price** (the next fill has a different price, or there isn't one), emit `BookDelta` with `bk.LevelQty(opp, price)`, the level's final size, because matching has already finished.
+  6. Emit `Cancelled(expired)` for a market order's remainder (`Cancelled(IOCUnfilled)` for an IOC limit order's, since milestone 8), and a `BookDelta` for the taker's own level if a limit remainder rested.
 - **`cancel`** ([engine.go:313](../../internal/engine/engine.go#L313)) calls `book.Cancel` and emits `Cancelled(requested)`, echoing the client order id, side and price returned in `CancelResult`, then the level's delta. Or it emits a `Reject`.
-- **`addInstrument`** ([engine.go:336](../../internal/engine/engine.go#L336)) validates the spec, rejects duplicate symbols, creates the book, and appends it, so its id is `len(books)`.
-- **Accessors:** `LastSeq`, `LastOrderID`, `Lookup`, `Book`, `NumInstruments`. They are for tests now, and for snapshots in milestone 5.
+- **`addInstrument`** ([engine.go:336](../../internal/engine/engine.go#L336)) validates the spec, rejects duplicate symbols, creates the book, attaches it to the shared client-order-id set (`Share`, review F-003), and appends it, so its id is `len(books)`.
+- **Accessors:** `LastSeq`, `LastOrderID`, `Lookup`, `Book`, `NumInstruments`. Tests and the snapshot code (milestone 5) use them.
 
 ### `internal/book/index.go`: the hash index (new)
 
@@ -182,17 +184,18 @@ The general lesson: **a test of "nothing happened" needs its own test showing it
   - `TestOrderIDsAreGapFreeAcrossRejects`.
   - `TestEventsCarryCommandSeqAndTime`.
   - The panic tests for sequence gaps, repeats and unknown kinds.
+  - Added later: `TestIOCAndFOKEvents` (milestone 8) and `TestClientOrderIDUniqueAcrossInstruments` (review F-003).
 
   A small `driver` plays the sequencer, assigning `Seq` and a fake clock.
 - **`internal/engine/stream_test.go`**: randomized properties.
   - `streamGen` produces commands for two instruments. The mix is limits, markets, cancels (including the wrong owner and the wrong instrument), invalid orders and unknown instruments.
   - **`views.apply`** ([stream_test.go:109](../../internal/engine/stream_test.go#L109)) folds each command's events into two pictures built **only from events**: a market-data view, from deltas, and a client view of every order's open quantity, from acks, fills and cancels. Along the way it checks the per-command rules: Ack first, gap-free order ids, fills in taker/maker pairs with consecutive match ids, `Leaves` consistent with the running quantity, and a `Reject` alone.
   - **`views.check`** ([stream_test.go:234](../../internal/engine/stream_test.go#L234)) compares both views with the real books after every command, level by level and order by order, including counts, so a level that is never removed or an order that leaves without an event is caught.
-  - `TestEventStreamRebuildsState` runs 8 seeds × 5,000 commands and requires every event kind to occur at least 1% as often as commands.
+  - `TestEventStreamRebuildsState` runs 8 seeds × 5,000 commands and requires each of `Ack`, `Reject`, `Fill`, `Cancelled`, `BookDelta` and `Trade` to occur at least 1% as often as commands.
   - `TestDeterministic` runs a seed twice and requires identical event logs.
   - `TestRunMatchesStep` sends the same commands through `Run` on its own goroutine and requires an identical event stream.
 - **`internal/engine/alloc_test.go`**: the zero-allocation proof.
-  - Six workloads, each a cycle that leaves the books unchanged, run against a book with 200 background orders per side.
+  - Eight workloads, each a cycle that leaves the books unchanged, run against a book with 200 background orders per side: the six in the tables below, plus an IOC and a FOK cycle added in milestone 8.
   - `TestZeroAllocSteadyState` requires both `AllocsPerRun == 0` and no attributed allocations over 100,000 cycles.
   - `TestAllocCheckCanFail` proves the check can see rare allocations that `AllocsPerRun` misses.
   - `BenchmarkCycles` times the workloads.
@@ -222,7 +225,7 @@ The general lesson: **a test of "nothing happened" needs its own test showing it
 
 ### Measurements
 
-**Zero allocations** (`go test ./internal/engine -run Alloc -v`). Every workload, 100,000 cycles after 10,000 warm-up cycles, against 200 resting orders per side:
+**Zero allocations**, measured in milestone 2 (`go test ./internal/engine -run Alloc -v`). Every workload, 100,000 cycles after 10,000 warm-up cycles, against 200 resting orders per side:
 
 | workload (one cycle) | commands | `AllocsPerRun` | attributed allocations |
 |---|---:|---:|---:|
@@ -235,7 +238,7 @@ The general lesson: **a test of "nothing happened" needs its own test showing it
 
 The test passed 400 consecutive runs (300, then 100 after the final change).
 
-**Cycle cost** (`go test ./internal/engine -run '^$' -bench BenchmarkCycles -benchtime 2000000x -count 5`). These are microbenchmarks for intuition, not the PRD section 7 protocol: no warm-up period, no CPU pinning, no load generator. They must not be quoted in the README:
+**Cycle cost**, measured in milestone 2 (`go test ./internal/engine -run '^$' -bench BenchmarkCycles -benchtime 2000000x -count 5`). These are microbenchmarks for intuition, not the PRD section 7 protocol: no warm-up period, no CPU pinning, no load generator. They must not be quoted in the README:
 
 | workload (one cycle) | commands | median ns/cycle | min–max over 5 runs | B/op | allocs/op |
 |---|---:|---:|---:|---:|---:|
@@ -269,13 +272,13 @@ The test passed 400 consecutive runs (300, then 100 after the final change).
 
 4. **A command is applied with a sequence gap instead of panicking.** Suppose the sequencer skips `Seq` 1,000 because of a bug, and the engine accepts 1,001. Everything works until a crash. Replay then finds no record 1,000 in the log, so replay-check (milestone 5) can't tell whether a record is missing, and acknowledged state may have been built on a command that never reached the disk. A panic instead stops the process at the first inconsistency, when it is still diagnosable. `TestStepPanicsOnSeqGapOrRepeat` covers gaps, repeats and zero.
 
-5. **The publisher blocks on a slow client.** `Run` sends each event on `out`, and that send blocks if nobody receives. If the publisher waited on a slow client's socket before receiving the next event, one client with a bad connection would stop matching for **every** instrument and every client. That is why decision 005 assigns the slow-consumer policy (bounded buffer, disconnect) to the publisher. *Since milestone 3:* this was planted as a bug in the real gateway and observed. With a blocking delivery, a healthy client got no responses for 5 s, and even shutdown hung ([03-gateway.md](03-gateway.md#4-what-breaks-if), item 1). The other half of acceptance 5, that the engine's latency histogram doesn't move, is checked once the histogram exists (milestone 7).
+5. **The publisher blocks on a slow client.** `Run` sends each event on `out`, and that send blocks if nobody receives. If the publisher waited on a slow client's socket before receiving the next event, one client with a bad connection would stop matching for **every** instrument and every client. That is why decision 005 assigns the slow-consumer policy (bounded buffer, disconnect) to the publisher. *Since milestone 3:* this was planted as a bug in the real gateway and observed. With a blocking delivery, a healthy client got no responses for 5 s, and even shutdown hung ([03-gateway.md](03-gateway.md#4-what-breaks-if), item 1). The other half of acceptance 5, that the engine's latency histogram doesn't move, is checked by the acceptance-5 test in `internal/server` (milestone 7); since review F-008 it also requires the engine's `OutputBlocked` count to stay 0.
 
 ---
 
 ## 5. Go idioms introduced
 
-**Goroutines: `go f()`.** Starts `f` running concurrently and returns at once. There is no handle or join: you coordinate through channels, or through `sync` primitives. In `TestRunMatchesStep`, `go engine.New().Run(in, out)` starts the engine goroutine, and a second goroutine feeds it commands.
+**Goroutines: `go f()`.** Starts `f` running concurrently and returns at once. There is no handle or join: you coordinate through channels, or through `sync` primitives. In `TestRunMatchesStep`, `go engine.New().Run(in, out, nil)` starts the engine goroutine, and a second goroutine feeds it commands.
 
 **Channels and directional channel types.** `make(chan engine.Command, 64)` creates a buffered channel. `Run(in <-chan Command, out chan<- Event, snap *SnapshotHooks)` uses **directional** types: inside `Run`, `in` can only be received from and `out` only sent to. The compiler enforces the data flow.
 
@@ -316,17 +319,17 @@ The test passed 400 consecutive runs (300, then 100 after the final change).
 
 1. The taker sells into the best (highest) bids, oldest first.
    - `Ack` (sell, qty 10, a new order id).
-   - `Fill` taker: sell, price 100, qty 3, leaves 7, match 42. Then `Fill` maker A: buy, price 100, qty 3, leaves 0, match 42.
-   - `Fill` taker: price 100, qty 4, leaves 3, match 43. Then `Fill` maker B: buy, price 100, qty 4, leaves 0, match 43.
+   - `Fill` taker: sell, price 100, qty 3, leaves 7, match 42. Then `Fill` maker A: buy, price 100, qty 3, leaves 0, match 42. Then `Trade`: sell, price 100, qty 3, match 42.
+   - `Fill` taker: price 100, qty 4, leaves 3, match 43. Then `Fill` maker B: buy, price 100, qty 4, leaves 0, match 43. Then `Trade`: sell, price 100, qty 4, match 43.
    - `BookDelta` buy 100, qty 0 (the level is gone).
-   - `Fill` taker: price 99, qty 3, leaves 0, match 44. Then `Fill` maker C: buy, price 99, qty 3, leaves 3, match 44.
+   - `Fill` taker: price 99, qty 3, leaves 0, match 44. Then `Fill` maker C: buy, price 99, qty 3, leaves 3, match 44. Then `Trade`: sell, price 99, qty 3, match 44.
    - `BookDelta` buy 99, qty 3.
 
-   There is no `Cancelled`, because the order filled completely and nothing expired. If it had been for 15, it would end with `Cancelled(expired)` qty 2 after the 99 delta: 3 + 4 + 6 = 13 filled.
+   The `Trade` prints (since milestone 6) and the deltas each take the instrument's next `md_seq`. There is no `Cancelled`, because the order filled completely and nothing expired. If it had been for 15, it would end with `Cancelled(expired)` qty 2 after the 99 delta: 3 + 4 + 6 = 13 filled.
 
 2. A gap means the command stream (the log) and the engine no longer agree. Rejecting would mean the engine and the log record different histories. Logging and continuing would produce a state that replay can't reproduce, because replay would apply exactly the logged commands. Either way, the core guarantee, that state is a pure function of the log, is gone, silently. Stopping keeps the log as the single source of truth: fix the bug, restart, replay.
 
-3. The seed only decides where each key sits in the slot array. Every operation on the index (get, put, delete, len) returns the same answer for any seed, and nothing ever iterates the slots, so the order of entries in memory can never reach the output. The book's state and every event are identical whatever the seed. **What would break it:** iterating the index (for example, to build a snapshot or list orders) and emitting in slot order. Different seeds would then give different output orders. Any future iteration must sort, or walk the price levels instead.
+3. The seed only decides where each key sits in the slot array. Every operation on the index (get, put, delete, len) returns the same answer for any seed, and nothing that produces output iterates the slots (only `grow` walks them, to re-insert), so the order of entries in memory can never reach the output. The book's state and every event are identical whatever the seed. **What would break it:** iterating the index (for example, to build a snapshot or list orders) and emitting in slot order. Different seeds would then give different output orders. Any future iteration must sort, or walk the price levels instead.
 
 4. `AllocsPerRun` returns `mallocs / runs` with integer division. The map rebuild allocated a handful of objects over tens of thousands of runs, which is less than one per run, so it truncated to 0. `MemStats.Mallocs` counts allocations from the whole process, and the Go runtime's own background goroutines (scavenger, GC workers, thread creation) allocate a few objects at random moments. A must-be-zero count failed at random, unrelated to our code. Only attributing each allocation to a call stack separates "our code allocated" from "the runtime allocated".
 

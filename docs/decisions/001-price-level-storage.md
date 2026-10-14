@@ -55,6 +55,6 @@ Emptied `level` structs go onto `Book.freeLevels` and are reused by `newLevel`. 
 
 ## Costs
 
-- **Worst case: inserting or removing a level far from the best costs O(L).** With L = 1,000 levels that is a `memmove` of up to 8 KB of pointers. That is fast in absolute terms, but it is a tail-latency source the benchmark (milestone 9) should show. If it does, the price-indexed array (option 4) is the next step.
+- **Worst case: inserting or removing a level far from the best costs O(L).** With L = 1,000 levels that is a `memmove` of up to 8 KB of pointers. That is fast in absolute terms, but it is a tail-latency source. The milestone 9 benchmark doesn't exercise it: its passive orders rest 1–10 ticks from the mid, so a side holds at most 10 levels ([decision 021](021-benchmark-harness.md)). If a deeper workload shows the cost, the price-indexed array (option 4) is the next step.
 - **The slice holds pointers to levels** rather than levels by value. That costs one indirection, but means a `*level` stays valid while the slice shifts around it. Matching relies on this: it keeps `lv` across the inner loop.
 - **The sign trick is a small piece of cleverness.** `TestLadderOrderingBestLast` pins it down, and the differential test exercises it on both sides.

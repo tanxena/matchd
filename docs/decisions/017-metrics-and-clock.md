@@ -1,10 +1,14 @@
 # 017 — Metrics: a hand-written exporter, fixed buckets, and a clock that can time a microsecond
 
-- **Status:** accepted (milestone 7). Chosen with the user:
+- **Status:** accepted (milestone 7). Chosen with the author:
   - a hand-written exporter, not `client_golang`;
   - fixed bucket boundaries in microseconds, exposed in seconds under Prometheus naming;
   - the TSC-based clock on Windows, with the conditions recorded below. This was the Section 10 question "HDR-style with fixed buckets, or sampled?".
 - **Code:** `internal/metrics`, `internal/clock`, `internal/server/metrics.go`, `internal/engine/engine.go` (`Run`, `SetLatency`), `internal/wal/wal.go` (`Sync`), `internal/publisher/publisher.go` (`count`)
+
+> **Superseded in part (2026-10-14, `8e86d91`):** the TSC conversion now takes a signed difference from the calibration base, so a reading slightly below it converts to a time just before the base instead of wrapping to the far future (review F-020, under "Costs and risks" below).
+
+> **Superseded in part (2026-10-14, `7d161f7`):** acceptance 5 (`TestSlowConsumerDoesNotMoveEngineLatency`) no longer compares `/metrics` buckets within one of the baseline. It asserts the engine never waited on a full output channel (`matchd_engine_output_blocked_total`) and compares p50, p99 and p99.9 from the log-linear histogram within stated ratios (review F-008, under "Tests" below).
 
 ## Context
 
@@ -17,7 +21,7 @@ PRD 7.1 defines matching-core latency exactly: from when the engine goroutine de
 
 ## Decision 1: write the exporter by hand
 
-`internal/metrics` is about 350 lines:
+`internal/metrics` is about 350 lines (`metrics.go`; milestone 9's `LogHistogram`, below, adds about 170):
 - **Counter and Gauge:** one atomic each.
 - **Histogram:** fixed bounds in integer nanoseconds, one atomic counter per bucket plus a sum.
 - **Registry:** renders the text exposition format: `# HELP`, `# TYPE`, labelled samples, and for each histogram cumulative `_bucket{le=…}`, `_sum` and `_count`.
@@ -26,7 +30,7 @@ Every method works on a nil receiver, so a component can hold metrics that were 
 
 **Rejected: `github.com/prometheus/client_golang`.**
 - **Weight.** It's the project's first third-party dependency, and it brings protobuf, `client_model`, `common`, `procfs` and more, for a format that takes a few dozen lines to write.
-- **We don't need its registry.** Every metric is created once at startup, in one place (`Server.registerMetrics`). Collectors, dynamic registration, exemplars and the protobuf exposition solve problems this program doesn't have.
+- **We don't need its registry.** Every metric is created once at startup, in `Server.registerMetrics` (the fsync histogram and stall counter just before it, in `server.Start`, because recovery opens the WAL first). Collectors, dynamic registration, exemplars and the protobuf exposition solve problems this program doesn't have.
 - **Control over the hot path.** The engine records on every command. Ours is two atomic adds and a scan of about a dozen bounds: 14 ns, no allocation (`BenchmarkObserve`, `TestRecordingDoesNotAllocate`).
 
 **Cost:**
@@ -43,7 +47,7 @@ The boundaries are decided once. *(Amended in milestone 9, below: the benchmark 
 | `matchd_matching_latency_seconds`, `matchd_matching_step_seconds` | 0.25, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 5000 |
 | `matchd_wal_fsync_seconds` | 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000, 1000000 |
 
-**Units (the user's call):** Prometheus convention is base units, so the names end in `_seconds` and the `le` labels are seconds: 0.25 µs is `le="2.5e-07"`. A standard dashboard expects exactly that. The benchmark tables stay in microseconds, and the README notes the conversion.
+**Units (the author's call):** Prometheus convention is base units, so the names end in `_seconds` and the `le` labels are seconds: 0.25 µs is `le="2.5e-07"`. A standard dashboard expects exactly that. The benchmark tables stay in microseconds, and the README notes the conversion.
 
 **No precision problem:**
 - The bounds are stored as integer nanoseconds (`Micros(0.25)` = 250), and observations are integer nanoseconds, so bucket membership is an exact integer comparison.
@@ -51,7 +55,7 @@ The boundaries are decided once. *(Amended in milestone 9, below: the benchmark 
 
 **Rejected:** HDR-style histograms (log-linear, thousands of buckets, more memory and more to render), and sampling (only some commands timed), which would undercount exactly the tail the histogram exists to show.
 
-**Amendment (milestone 9, chosen with the user; [decision 021](021-benchmark-harness.md)).** For the benchmark these buckets are too coarse: a p50 could only be reported as "between 0.5 and 1 µs", and no maximum at all. So the engine also records each command's matching latency (the same span) into a log-linear histogram (`metrics.LogHistogram`: 32 sub-buckets per power of two, quantiles at most 3.125% high, 12 ns per observation). It is served as JSON at `GET /debug/latency`, **not** in `/metrics`. The rejection above still holds for `/metrics`: the scrape stays small and the dashboard buckets are unchanged. The benchmark's core-latency tables come from `/debug/latency`.
+**Amendment (milestone 9, chosen with the author; [decision 021](021-benchmark-harness.md)).** For the benchmark these buckets are too coarse: a p50 could only be reported as "between 0.5 and 1 µs", and no maximum at all. So the engine also records each command's matching latency (the same span) into a log-linear histogram (`metrics.LogHistogram`: 32 sub-buckets per power of two, quantiles at most 3.125% high, 12 ns per observation). It is served as JSON at `GET /debug/latency`, **not** in `/metrics`. The rejection above still holds for `/metrics`: the scrape stays small and the dashboard buckets are unchanged. The benchmark's core-latency tables come from `/debug/latency`.
 
 ## Decision 3: what is measured where
 
@@ -70,7 +74,7 @@ The boundaries are decided once. *(Amended in milestone 9, below: the benchmark 
 
 Commands are counted once each, by the event that decides them: `Ack`, `Reject`, `Cancelled` with reason requested, or `InstrumentAdded`. A cancel and an order can be told apart because events now carry their command's kind (`Event.Cmd`, in what was padding). PRD 5.8's "one debug line per command" is logged at the same point, on release, guarded so that a disabled debug level costs one boolean check.
 
-## Decision 4: a clock that can time the engine (chosen with the user)
+## Decision 4: a clock that can time the engine (chosen with the author)
 
 **The problem, measured on this machine:** Go's `time.Now` on Windows advances once per system timer tick, about **515 µs** here. Of a million back-to-back pairs of readings, 999,980 were equal, and the rest differed by about 515 µs. A matching step takes about 1 µs, so a histogram fed by `time.Now` would put nearly every command in the lowest bucket and a scattering at half a millisecond. That says nothing about matching. On Linux, `time.Now` reads a nanosecond clock through the vDSO, typically around 20 ns. That's the usual figure, not measured here, since Linux hasn't been run locally.
 
@@ -89,11 +93,11 @@ QPC costs that much because every call crosses Go's syscall boundary: switching 
 - **Windows without one,** or with an implausible calibration result: QPC.
 - **Elsewhere:** Go's monotonic clock.
 
-**Conditions (from the user), and where they're met:**
+**Conditions (from the author), and where they're met:**
 - **Only clock on the hot path:** the engine's `Run`, the WAL's `Sync` and the sequencer's `WallClock` all read `internal/clock`.
 - **Calibration drift test:** `TestCalibrationDriftAgainstQPC` compares TSC-derived elapsed time with QPC over 3 s. **Bound: ±50 ppm.** Measured −0.02, 1.02 and 3.62 ppm in three normal runs, and −9.85 ppm under the race detector with the suite running.
 - **Forced fallback test:** `TestForcedQPCFallback` runs the "no invariant TSC" path. It checks the source is QPC, elapsed time is right, and it doesn't allocate (measured 78–94 ns per read).
-- **The measured costs recorded:** here; at startup in the log (`msg=clock source=tsc read_cost=…`); in `/metrics` (`matchd_clock_read_cost_seconds`). Milestone 9's benchmark must carry them in its clock-overhead row and in the footnote of every core-latency table, naming the source and its cost.
+- **The measured costs recorded:** here; at startup in the log (`msg=clock source=tsc read_cost=…`); in `/metrics` (`matchd_clock_read_cost_seconds`). Milestone 9's benchmark carries them in its clock-overhead table and in the footnote of every core-latency table, naming the source and its cost (README).
 
 **Is per-command timing too expensive (PRD 7.1's switch to batch timing)?** No. Three reads (start, after `Step`, after the sends) cost about 45 ns against a sustained-load mean of 821 ns for `Step` and 1.5 µs for the whole command: about 3–5%. Batch timing isn't needed.
 
@@ -109,7 +113,7 @@ How long a command takes depends on how busy the engine is:
 - **One command at a time** (clients wait for each answer): the engine idles between commands, its caches go cold, and the CPU clocks down. `Step` lands in the 2–10 µs buckets, and the whole command one bucket higher.
 - **Sustained load** (a pipelined burst of 50,000 orders): `Step` has a median under 1 µs and a mean of 821 ns; the whole command averages 1.5 µs.
 
-Milestone 2's ~0.3 µs was a hot loop of `Step` with nothing else in the system. The benchmark (milestone 9) must say which regime each figure comes from.
+Milestone 2's ~0.3 µs was a hot loop of `Step` with nothing else in the system. The benchmark (milestone 9) says which load each table ran under: open loop at 20,000 commands/s, or closed loop at saturation ([decision 021](021-benchmark-harness.md)).
 
 ## Tests
 

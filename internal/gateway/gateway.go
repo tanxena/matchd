@@ -96,7 +96,7 @@ type Gateway struct {
 	finishing  chan struct{}
 	finishOnce sync.Once
 
-	accepted atomic.Uint64 // counters for tests now, /metrics in milestone 7
+	accepted atomic.Uint64 // counters, read by tests and /metrics
 	active   atomic.Int64
 	// slowWrites: sessions closed because a socket write blocked for longer
 	// than WriteTimeout: slow consumers caught by the writer rather than by

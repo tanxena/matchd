@@ -1,6 +1,6 @@
 # 021 — The benchmark harness: what is measured, how, and when a run doesn't count
 
-- **Status:** accepted (milestone 9). Chosen with the user:
+- **Status:** accepted (milestone 9). Chosen with the author:
   - benchmarks run on **AC power under the High performance plan**, stated in the hardware line with "nothing else running". One extra row, the resting mix under the **Balanced** plan, shows what a reader on a laptop with default settings would see; the clock-overhead row runs under both;
   - **the author runs `make bench-full` and `make bench-balanced`.** The harness was walked through first ([the guide](../guide/09-benchmarks.md), §2), and `make bench-smoke` checks it in about a minute and a half;
   - the engine is pinned to logical CPUs 0–3 and the load generator to 4–7, with the claim about physical cores made **only because the sibling mapping was verified** (below);
@@ -8,6 +8,14 @@
   - core-latency quantiles come from a **finer, log-linear histogram** (amending decision 017), served at `GET /debug/latency`;
   - processes are pinned with **`SetProcessAffinityMask`**, the mask `start /affinity` sets, rather than by running `start` itself.
 - **Code:** `bench/` (`loadgen`, `clockprobe`, `benchrun`, `report`, `internal/load`, `internal/result`, `internal/sysinfo`), `internal/metrics/loghist.go`, `internal/server/http.go` (`handleLatency`), `Makefile` (`bench-*`)
+
+> **Superseded in part (2026-10-14, `5b08015`):** clock-probe runs are now judged by the other-processes check too, over the probe's own run, not only by power and pinning (review F-014, Decision 7).
+
+> **Superseded in part (2026-10-14, `667678f`):** the load generator now reads CPU times before the first engine scrape and stops sending before the second, so the engine's window is wider than the load generator's by one scrape and the commands in flight, not by a process-list query and continued sending; the committed main-suite results predate this (review F-018, under "Costs and limitations").
+
+> **Superseded in part (2026-10-14, `449ab7e`):** open-loop throughput is now the commands sent in the window and answered, divided by the window; closed loop still counts first answers received in the window (Decision 3). The committed open-loop results are within 0.1% of the target either way.
+
+> **Superseded in part (2026-10-14, `b6ac4b2`):** `report`'s `-min-runs-suite` can lower the run minimum for one table of a suite (`SUITE/TABLE=N`), not only for a whole suite; the README is generated with `balanced/clock=4`, after the Balanced re-run (`9abe845`) left one disturbed clock-probe run out (Decision 7, "Results").
 
 ## Context
 
@@ -38,7 +46,7 @@ The engine is the shipped `cmd/engine` binary, started with ordinary flags. Noth
 - **Closed loop** (`-rate 0`): each of 4 connections keeps 64 commands in flight. A free slot is filled at once, and every free slot is sent in **one write**. This finds **sustained throughput**: the rate at which answers come back when the engine is never waiting for work. End-to-end latency measured here is mostly queueing, about (in flight) ÷ (throughput) by Little's law, and is labelled as such. **Used for the fsync table**, where throughput is the question.
 - **Open loop** (`-rate N`): commands are scheduled at N per second, spread evenly over the connections. One pacer goroutine spins on the clock and writes whatever is due. **Latency is measured from each command's *scheduled* time, not from when it was actually written**, so a load generator that falls behind can't hide the delay (no *coordinated omission*). How far behind it fell is recorded separately as **send lag**. **Used for the mix table, the snapshot row and the Balanced row**, where latency at a known load is the question.
 
-**The rate: 20,000 commands/s.** In the smoke runs, closed-loop saturation on this machine was 50,000–68,000 commands/s, so 20,000 is well under it, about 30–40%. The engine is busy but not queueing. Both the rate and the window are flags, recorded in every result file.
+**The rate: 20,000 commands/s.** In the smoke runs, closed-loop saturation on this machine was 50,000–68,000 commands/s, so 20,000 is well under it, about 30–40%. (The committed fsync runs agree: 51,653–54,947 commands/s under `group:1ms`, the latency tables' policy, so 20,000 is 36–39% of it.) The engine is busy but not queueing. Both the rate and the window are flags, recorded in every result file.
 
 **The pacer spins** rather than sleeps. A sleeping sender wakes late by the OS timer's granularity, and that lateness would land in the latency it measures. The cost is one busy CPU in the load generator, on its own cores, and that shows in its CPU column.
 
@@ -115,7 +123,7 @@ The count at each window's start and end is recorded.
 
 ## Decision 7: when a run doesn't count
 
-`result.Assess` judges every finished run, and `benchrun` writes the reasons into the file (`disturbed`). A disturbed run's numbers are **never** in the README: `report` refuses to run until there are none (`-allow-disturbed` leaves them out, with "4 of 5†" in the row and the list underneath). A failed run has no numbers at all.
+`result.Assess` judges every finished run, and `benchrun` writes the reasons into the file (`disturbed`). A disturbed run's numbers are **never** in the README: `report` refuses to run until there are none (`-allow-disturbed` leaves them out, with "**n=4** of 5†" in the row and the list underneath). It also refuses a row with fewer counted runs than `-min-runs` (5, PRD 7.5); `-min-runs-suite SUITE=N` or `SUITE/TABLE=N` lowers that for one suite or one table of it. A failed run has no numbers at all.
 
 Since review F-014, clock-probe runs get the other-processes check too, measured over the probe's own run. Before, they were checked only for power and pinning.
 
@@ -161,18 +169,18 @@ This is an environment caveat, not a code change. Defender's real-time protectio
 
 That work runs during measured windows: snapshots in the snapshot row, a fresh data directory per run, and its deletion during the cooldown. It counts against "nothing else running", and may slow the disk the WAL fsyncs to. It wasn't established as the cause of the one 5 s fsync stall seen in a smoke run ([decision 022](022-slow-consumers-and-durability-stalls.md)).
 
-`bench/CHECKLIST.md` step 1b excludes the data directory for the duration of the runs. That needs an administrator PowerShell, since exclusions can't even be read without one. Whether an exclusion was set must be stated in the README's environment line: the harness can't read it, so the user says so.
+`bench/CHECKLIST.md` step 1b excludes the data directory for the duration of the runs. That needs an administrator PowerShell, since exclusions can't even be read without one. Whether an exclusion was set must be stated in the README's environment line: the harness can't read it, so the author says so (`report -asserted`, which `make bench-report` passes).
 
 ## Results (2026-10-13)
 
-`make bench-full`: 45 runs, 0 disturbed, 0 failed. `make bench-balanced`: 10 runs. In the first run, two resting runs were disturbed by Defender (`MsMpEng.exe` at 0.87 and 0.77 CPUs, despite the data-directory exclusion), so that row reported **n=3**, below PRD 7.5's minimum of 5 (review F-014). Re-run on 2026-10-14 with the clock-run check in place: all 5 resting runs are clean. One clock-probe run of 5 was disturbed by Defender (`MsMpEng.exe` at 1.15 CPUs), so the clock row counts the other 4 (`bench-report -min-runs-suite balanced/clock=4`, with that run listed under the tables). The clock row is a per-read cost, not a latency row. The tables are in the README, generated from `bench/results/`. One finding came out of them: with snapshots on, WAL fsyncs stall and intake stops behind them, which costs the end-to-end tail but not core latency ([open observation 002](../bugs/002-snapshot-runs-stall-the-wal.md)).
+`make bench-full`: 45 runs, 0 disturbed, 0 failed. `make bench-balanced`: 10 runs. In the first run, two resting runs were disturbed by Defender (`MsMpEng.exe` at 0.87 and 0.77 CPUs, despite the data-directory exclusion), so that row reported **n=3**, below PRD 7.5's minimum of 5 (review F-014). Re-run on 2026-10-14 with the clock-run check in place: all 5 resting runs are clean. One clock-probe run of 5 was disturbed by Defender (`MsMpEng.exe` at 1.15 CPUs), so the clock row counts the other 4 (`make bench-report` runs `report` with `-min-runs-suite balanced/clock=4`, and that run is listed under the tables). The clock row is a per-read cost, not a latency row. The tables are in the README, generated from `bench/results/`. One finding came out of them: with snapshots on, WAL fsyncs stall and intake stops behind them, which costs the end-to-end tail but not core latency ([open observation 002](../bugs/002-snapshot-runs-stall-the-wal.md)).
 
 ## Costs and limitations
 
 - **Loopback TCP is not a network.** End-to-end latency includes two kernel network stacks on one machine and the L3 the two processes share. It's an upper bound on what the engine adds, not a network figure.
-- **End-to-end latency includes the WAL fsync** (`group:1ms` in the latency tables). In the smoke runs the fsync itself averaged 1.4–2.4 ms on this laptop's SSD, which dominates end-to-end p50 (3–4 ms). That's what the durability contract costs here, and the fsync table shows it per policy.
+- **End-to-end latency includes the WAL fsync** (`group:1ms` in the latency tables). In the committed mix runs the fsync itself averaged 1.33–1.66 ms on this laptop's SSD, which dominates end-to-end p50 (2.9–3.6 ms). That's what the durability contract costs here, and the fsync table shows it per policy.
 - **Quantiles are up to 3.1% high** (Decision 3). The tables say so.
-- **The window edges are scraped over HTTP.** The engine's counters cover a slightly wider window than the load generator's. *(Review F-018: in the committed results it was 100–220 commands per open-loop run wider, 5–18 ms of traffic, not about a millisecond as first written. A process-list query sat between the first scrape and the start of the window, and sending continued until after the second scrape. That is about 0.02% of samples, negligible for the quantiles, though a core-latency maximum could come from those edges. Runs from the fix on read CPU times before the first scrape and stop sending before the second, leaving one scrape at the start and the in-flight commands at the end.)*
+- **The window edges are scraped over HTTP.** The engine's counters cover a slightly wider window than the load generator's. *(Review F-018: in the main suite's results (`bench/results/full`, run before the fix) it was 98–220 commands per open-loop run wider, about 5–11 ms of traffic at 20,000/s, not about a millisecond as first written. A process-list query sat between the first scrape and the start of the window, and sending continued until after the second scrape. That is about 0.02% of samples, negligible for the quantiles, though a core-latency maximum could come from those edges. Runs from the fix on read CPU times before the first scrape and stop sending before the second, leaving one scrape at the start and the in-flight commands at the end. In the Balanced re-run, made after the fix, the engine counted 2–47 more commands than the load generator.)*
 - **The open-loop pacer always costs one busy CPU** in the load generator.
 - **Synthetic mixes, one instrument, one machine.** The numbers describe this engine under this protocol, nothing more (PRD 7.7: no comparisons).
 

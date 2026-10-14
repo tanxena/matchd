@@ -7,7 +7,7 @@ A benchmark is an experiment, and most benchmark numbers are wrong in one of a f
 - a check on every run for anything that could have disturbed it;
 - README tables generated from the raw files by a program, never typed in.
 
-This doc is also the **walkthrough of the harness**, line by line where it matters (§2), written before any benchmark numbers exist. [`bench/CHECKLIST.md`](../../bench/CHECKLIST.md) is the pre-flight checklist for running it.
+This doc is also the **walkthrough of the harness**, line by line where it matters (§2). It was written while the harness was built, before the committed runs; what those showed is at the end of §2. [`bench/CHECKLIST.md`](../../bench/CHECKLIST.md) is the pre-flight checklist for running it.
 
 ---
 
@@ -113,11 +113,11 @@ When a network packet or disk completion arrives, the CPU runs an **interrupt** 
   1. Check that instrument 1 has tick 1 and lot 1 (`checkInstrument`).
   2. Dial the connections, and start a reader for each and the senders.
   3. Sleep through the warmup.
-  4. **Window start:** read the engine (`/metrics`, `/debug/latency`, `/instruments`), then CPU times, then flip `phase` to measuring and take `start`.
+  4. **Window start:** CPU times, then read the engine (`/metrics`, `/debug/latency`, `/instruments`), then flip `phase` to measuring and take `start`.
   5. Sleep through the window.
-  6. **Window end, in reverse:** flip the phase (stop counting), take `end`, CPU times, read the engine. The engine's window therefore *encloses* the load generator's, by the time an HTTP read takes.
-  7. `halt` stops the senders. **Drain:** wait until every command has its answer, so no connection closes with answers still queued at the engine. Then close.
-  8. Assemble: sum the connections, merge their histograms (`LogSnapshot.Add`), subtract the engine's before from its after.
+  6. **Window end:** flip the phase (stop counting), take `end`, and `halt` the senders at once; then CPU times, then read the engine. The engine's window therefore *encloses* the load generator's: by one HTTP read at the start, and at the end by the commands still in flight when sending stopped. *(Until review F-018 the CPU read sat between the first scrape and the flip, and sending went on until after the second scrape: in the committed results the engine's window is 98–220 commands (about 5–11 ms of traffic at 20,000/s) wider.)*
+  7. **Drain:** wait until every command has its answer, so no connection closes with answers still queued at the engine. Then close.
+  8. Assemble: sum the connections, merge their histograms (`LogSnapshot.Add`), subtract the engine's before from its after. Throughput is the answers received in the window (closed loop) or, in the open loop, the commands sent in the window that were answered, in it or in the drain (since 449ab7e): counting answers received in the window would also count a backlog sent before it, which can hide a sender that fell behind.
 - **`pace`** ([run.go:284](../../bench/internal/load/run.go#L284)), the open-loop sender. One goroutine, staggered schedules per connection (`interval × i / n`), and a loop:
 
   ```go
@@ -128,7 +128,7 @@ When a network packet or disk completion arrives, the CPU runs an **interrupt** 
   Every due command is sent in one write. It **spins** rather than sleeps (a sleep wakes late by the timer's granularity), and calls `runtime.Gosched` every 1,024 spins so the readers aren't starved of a P.
 - **`cpuUse`** ([run.go:370](../../bench/internal/load/run.go#L370)) turns two CPU samples into cores used: engine, load generator, machine busy, interrupts + DPCs, and **every other process**, from the OS's process list, with the top five named.
 
-**`scrape.go`.** **`parseMetrics`** ([scrape.go:111](../../bench/internal/load/scrape.go#L111)) reads `series value` lines into a map. **`counters`** ([scrape.go:172](../../bench/internal/load/scrape.go#L172)) subtracts before from after for commands, trades, fsyncs (count and sum, giving the mean), WAL bytes, snapshots and slow consumers, and reads the clock's source and cost.
+**`scrape.go`.** **`parseMetrics`** ([scrape.go:111](../../bench/internal/load/scrape.go#L111)) reads `series value` lines into a map. **`counters`** ([scrape.go:172](../../bench/internal/load/scrape.go#L172)) subtracts before from after for commands, trades, fsyncs (count and sum, giving the mean), WAL bytes, snapshots and slow consumers, and, since review F-013, fsync stalls and the slowest fsync's bucket. It also reads the clock's source and cost.
 
 ### The result format and the verdict: `bench/internal/result`
 
@@ -149,6 +149,7 @@ Thin wrappers over Windows APIs, each loaded with `syscall.NewLazyDLL(...).NewPr
 **`probe`** ([main.go:47](../../bench/clockprobe/main.go#L47)):
 - **Pass 1**, cost: 20 million `clock.Now()` calls timed as a whole with `time.Now`. Hundreds of milliseconds, so `time.Now`'s 0.5 ms tick is under 0.5% of it.
 - **Pass 2**, steps: pairs `a := clock.Now(); b := clock.Now()`, with `b - a` recorded in a `LogHistogram`. That is what timing *nothing* measures. Its smallest non-zero value is the resolution the clock shows in practice. For the TSC that's about one read's cost, far above the counter's 0.47 ns tick.
+- Around both passes it reads the process list, so a clock run's other-process CPU is checked by `Assess` like a load run's (review F-014).
 
 ### The interleaving script: `bench/benchrun`
 
@@ -189,7 +190,7 @@ Thin wrappers over Windows APIs, each loaded with `syscall.NewLazyDLL(...).NewPr
 ### The report: `bench/report`
 
 - **`groups`** ([report.go:50](../../bench/report/report.go#L50)) sorts runs into rows by (suite, table, config). A failed or disturbed run goes to `Excluded`, never into the numbers. The exception is `-smoke`, where disturbed runs count and the report says "not benchmark results" at the top.
-- **`check`** ([report.go:77](../../bench/report/report.go#L77)) refuses rows with fewer than 5 counted runs, and refuses any exclusion unless `-allow-disturbed`.
+- **`check`** ([report.go:77](../../bench/report/report.go#L77)) refuses rows with fewer than `-min-runs` (5) counted runs, or a lower minimum given with `-min-runs-suite`, and refuses any exclusion unless `-allow-disturbed`.
 - **`stats`** ([report.go:140](../../bench/report/report.go#L140)): the median (the middle value, or the mean of the middle two) and min–max.
 - **`hardware`** ([report.go:313](../../bench/report/report.go#L313)) writes one hardware-and-environment line from the files:
   - CPU (cores / threads, L3), RAM, OS and Go;
@@ -197,9 +198,9 @@ Thin wrappers over Windows APIs, each loaded with `syscall.NewLazyDLL(...).NewPr
   - the pinning claim, which says "no shared physical core" only if the recorded topology says so;
   - any `-asserted` statement, for what the harness can't measure, such as the Defender exclusion, labelled "stated by the operator".
 
-  It then gives "nothing else running" as the measured median and maximum other-process CPU, naming the worst run's biggest process. `-min-runs-suite` lets one suite (`balanced=3`), or one table of it (`balanced/clock=4`), report fewer runs; such a row shows **n=4** of 5†, with the left-out runs listed.
+  It then gives "nothing else running" as the measured median and maximum other-process CPU, naming the worst run's biggest process. `-min-runs-suite` lets one suite (`SUITE=N`, e.g. `balanced=3`), or one table of it (`SUITE/TABLE=N`, e.g. `balanced/clock=4`, which the committed results use), report fewer runs; a row with runs left out shows **n=4** of 5†, with the left-out runs listed.
 - The table functions each state their conditions in a sentence and give every cell as `median (min–max)`. Every core-latency table carries **`coreFootnote`** ([report.go:462](../../bench/report/report.go#L462)): the clock's source and per-read cost, and the 3.1% bound.
-- **`commands`** ([report.go:686](../../bench/report/report.go#L686)) lists each row's exact `start /affinity` lines.
+- **`commands`** ([report.go:686](../../bench/report/report.go#L686)) lists each suite's `benchrun` command and each row's exact `start /affinity` lines, with each run's data path shown relative (`matchd-bench\<run>\…`) rather than under the home directory of whoever ran it.
 - **`splice`** ([main.go:94](../../bench/report/main.go#L94)) replaces only what lies between the README's `bench:begin` and `bench:end` markers.
 
 ### Tests and what the smoke runs showed
@@ -210,7 +211,7 @@ Thin wrappers over Windows APIs, each loaded with `syscall.NewLazyDLL(...).NewPr
   - a closure was allocating per message;
   - Ctrl-C only ended the current run;
   - the report took its pinning and protocol lines from the suite's first run, which is a clock probe with neither, so they were silently missing.
-- **Book depth.** The first mixes kept the book bounded by draining it, to 80–870 orders: too thin to be representative. The depth control now holds 6,000–10,000 (decision 021, Decision 4).
+- **Book depth.** The first mixes kept the book bounded by draining it, to 80–870 orders: too thin to be representative. The depth control now holds 6,200–10,400, depending on the mix (decision 021, Decision 4).
 - The smoke runs' **numbers aren't results.** They were short, ran under Balanced with "best power efficiency", and Chrome was playing media. Still, they gave an order of magnitude:
   - 50,000–68,000 commands/s at saturation;
   - core p50 around 1 µs;
@@ -220,7 +221,7 @@ Thin wrappers over Windows APIs, each loaded with `syscall.NewLazyDLL(...).NewPr
 
 ### What the committed results showed
 
-The README's tables come from `bench/results/`. The snapshot row is the one surprise. Core latency is the same with snapshots on and off: copy-on-write works. But about 0.9% of commands wait over 50 ms end to end with snapshots on, and none do with them off. A reproduction sampling `/metrics` every few milliseconds showed why: a WAL fsync of 30–80 ms a few seconds after a snapshot, during which `matchd_events_held` stays flat and nothing reaches the engine, because the sequencer's next WAL append waits behind the fsync. That's [open observation 002](../bugs/002-snapshot-runs-stall-the-wal.md). The stall metric added in decision 022 is what made it visible rather than inferred.
+The README's tables come from `bench/results/`. The snapshot row is the one surprise. Core latency is the same with snapshots on and off: copy-on-write works. But about 0.9% of commands wait over 50 ms end to end with snapshots on, and none do with them off. Why is an open question. A separate reproduction sampling `/metrics` every 3–4 ms saw WAL fsyncs of 31–78 ms, 1–3 s after a snapshot, during which `matchd_events_held` stayed flat and nothing reached the engine, consistent with the sequencer's next WAL append waiting behind the fsync. That fits the tail but isn't verified: the committed result files don't record fsync stalls (the load generator records them from 13875f7 on). It is [open observation 002](../bugs/002-snapshot-runs-stall-the-wal.md). The stall metric added in decision 022 is what made the reproduction's stalls visible.
 
 ---
 
@@ -248,11 +249,11 @@ The README's tables come from `bench/results/`. The snapshot row is the one surp
 
 3. **The masks split hyperthread siblings.** Suppose the OS numbered siblings {0,4}, {1,5}, … (some machines do). Then masks 0x0F and 0xF0 would put the engine and the load generator on the *same four physical cores*, competing for execution units and L1/L2. Throughput drops and latency rises, and the README's "share no physical core" would be false. `preflight` reads the topology and refuses such masks. `TestSharedCores` covers that numbering.
 
-4. **The report takes the best run, or includes a disturbed one.** Either way the table stops describing the engine. The best run is the luckiest of five, and a disturbed run describes Chrome. Both are planted and caught in `report_test.go`. The rule is mechanical: `report` won't generate while any run is disturbed unless told, and then it shows "4 of 5†" and lists why.
+4. **The report takes the best run, or includes a disturbed one.** Either way the table stops describing the engine. The best run is the luckiest of five, and a disturbed run describes Chrome. Both are planted and caught in `report_test.go`. The rule is mechanical: `report` won't generate while any run is disturbed unless told, and then it shows "**n=4** of 5†" and lists why.
 
 5. **"Other CPU" is computed as machine busy time minus engine and loadgen.** This is what the harness did first. Closed-loop runs reported about 2 CPUs of "other processes" on a quiet machine, and every run would have been rejected. The missing piece was interrupt and DPC time: the loopback network stack carrying the benchmark's own traffic is charged to no process. Counting other processes from the process list, with interrupts kept separate, fixed it, and also named the real culprits when there were some (`chrome.exe 1.63`).
 
-6. **The book is left to find its own size.** Tuned to stay bounded by draining, it held 80–870 orders. Every level is short, cancels find their order in a tiny index, and the numbers flatter the engine compared with a book of thousands. The depth control fixes the size at about 10,000, whatever the mix (planted: disabling it fails `TestMixesHoldTheBookNearTarget`).
+6. **The book is left to find its own size.** Tuned to stay bounded by draining, it held 80–870 orders. Every level is short, cancels find their order in a tiny index, and the numbers flatter the engine compared with a book of thousands. The depth control holds it at thousands of orders: about 10,000 for the resting mix, 6,200–7,000 for cancel-heavy, reported per mix (planted: disabling it fails `TestMixesHoldTheBookNearTarget`).
 
 7. **The disk stalls for a few seconds under load.** It happened in a smoke run: one fsync in a 5-second window. The durability gate holds every answer, and the load generator keeps sending, so up to 65,536 answers pile up in the publisher. When the disk comes back they're released at once. Under the original slow-consumer rule (a full 4,096-event queue disconnects at once), a client that was reading perfectly well was disconnected, and so would every busy client have been. The fix ([decision 022](../decisions/022-slow-consumers-and-durability-stalls.md)) judges slowness by time: over the soft limit for longer than `WriteTimeout`. `matchd_wal_fsync_stalls_total` now makes the stall itself visible. `TestDurabilityStallBurstDoesNotDisconnect` injects a 50 ms stall under load and requires zero disconnects.
 
@@ -280,7 +281,7 @@ The README's tables come from `bench/results/`. The snapshot row is the one surp
 
 1. Why does the fsync table use a closed loop and the mix table an open loop? What would each table show if you swapped them?
 2. In an open-loop run at 20,000/s the load generator's thread is descheduled for 10 ms. What happens to the commands due in those 10 ms, and where does the delay show up in the result file?
-3. The engine's matching-latency p99.9 is reported as 31.7 µs. What do you know about the true value, and why?
+3. The Balanced row reports a matching-core p99.9 of 30.7 µs, the median of its five runs. What do you know about the true value, and why?
 4. Why does `benchrun` set `GOMAXPROCS=4` in the environment, when it pins the process anyway?
 5. A run's other-process CPU is 0.6, mostly `chrome.exe`. What happens to that run in the README? What do you do about it?
 6. Why are the core-latency tables not given per fsync policy, while throughput is?
@@ -293,11 +294,11 @@ The README's tables come from `bench/results/`. The snapshot row is the one surp
 
 2. When the thread runs again, the pacer finds 200 commands overdue (20 per ms × 10) and sends them, in batches of up to 256, immediately. Each keeps its *scheduled* time. Its end-to-end latency is measured from that time, so all 200 carry up to 10 ms of lateness in `e2e`. Each one's lateness is also recorded in `send_lag`. If send lag p99 exceeds 100 µs, `Assess` marks the run disturbed ("load generator fell behind its schedule"), and the report leaves it out.
 
-3. It's the upper bound of the log-linear bucket holding the p99.9 sample. Buckets are under 1/32 of their values wide, so the true p99.9 is between about 30.7 and 31.7 µs: never above the reported value, at most 3.125% below it. It's a quantile of the engine's own timing: from dequeue to the last event sent, with `internal/clock`, which adds about one clock read inside the span (the footnote gives its cost).
+3. It's the median of the five runs' p99.9 values, and each of those is the upper bound of the log-linear bucket holding that run's p99.9 sample. Buckets are under 1/32 of their values wide, so the median run's true p99.9 is never above the reported value and at most 3.125% below it: between about 29.8 and 30.7 µs (the bucket there is in fact 512 ns wide, 30.21–30.72 µs). It's a quantile of the engine's own timing: from dequeue to the last event sent, with `internal/clock`, which adds about one clock read inside the span (the footnote gives its cost).
 
 4. The Go runtime decides `GOMAXPROCS` once, at startup, from the CPUs the process may use *then*. `benchrun` can only pin a process after it has started, by which point the runtime has already chosen 8. Pinning then restricts its threads to 4 CPUs, but the scheduler still runs 8 Ps, so twice the OS threads compete for them. Setting the environment variable makes the runtime choose 4 from the start.
 
-5. 0.6 exceeds the 0.35 limit, so `Assess` marks the run disturbed and names `chrome.exe`. `report` then refuses to generate the README. Either re-run the suite with Chrome closed (cleanest; interleaving needs the whole suite), or report with `-allow-disturbed`: the row shows "4 of 5†", the run is listed with its reason, and with only 4 runs the row is below PRD 7.5's minimum unless you accept that with `-min-runs 4`.
+5. 0.6 exceeds the 0.35 limit, so `Assess` marks the run disturbed and names `chrome.exe`. `report` then refuses to generate the README. Either re-run the suite with Chrome closed (cleanest; interleaving needs the whole suite), or report with `-allow-disturbed`: the row shows "**n=4** of 5†", the run is listed with its reason, and with only 4 runs the row is below PRD 7.5's minimum of 5, so `report` still refuses unless that row's lower minimum is accepted explicitly with `-min-runs-suite SUITE/TABLE=4` (as the committed results do for the Balanced clock row).
 
 6. Matching-core latency is timed from the engine dequeuing a command to it emitting the events, and the WAL write and fsync happen before the engine sees the command (sequencer) and after it (publisher). The fsync policy isn't inside the span, so per-policy core tables would be the same table three times (PRD 7.1 says so). Throughput and end-to-end latency include waiting for the fsync, so they depend on the policy directly.
 

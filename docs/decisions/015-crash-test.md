@@ -1,8 +1,10 @@
 # 015 — The crash test: what it checks, and what it can't prove
 
-- **Status:** accepted (milestone 5). "5 runs by default, 50+ with `-crash`" was chosen with the user.
+- **Status:** accepted (milestone 5). "5 runs by default, 50+ with `-crash`" was chosen with the author.
 - **Code:** `internal/crashtest/crash_test.go`
 - **Run:** `go test ./internal/crashtest` (5 runs), `go test ./internal/crashtest -crash` (50 runs, acceptance 2), `-crashruns N` for more
+
+> **Superseded in part (2026-10-14, `3852a5e`):** the per-run checks below no longer stand alone. The engine runs with `-archive`, and after the last run every acknowledged command and every received fill is checked against a replay of the whole history from seq 1; every fifth run the harness injects a torn WAL tail the binary must cut off (steps 6 and 7, review F-007). The milestone 5 results table predates both.
 
 ## Context
 

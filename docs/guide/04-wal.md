@@ -98,14 +98,15 @@ A process crash loses nothing under *any* policy, because the OS keeps the page 
 - **`Append`** ([wal.go:426](../../internal/wal/wal.go#L426)) adds a record to `pending`: a placeholder CRC, then seq, time and payload, then the CRC is computed over the body and written in. It panics on a seq gap.
 - **`Flush`** ([wal.go:457](../../internal/wal/wal.go#L457)) rolls to a new segment if needed, writes all of `pending` with one `Write` under `mu`, and then publishes `appended`.
 - **`roll`** ([wal.go:482](../../internal/wal/wal.go#L482)), under `syncMu`:
-  1. fsyncs and closes the old segment, so a finished segment is always fully durable;
+  1. fsyncs and closes the old segment, so a finished segment is always fully durable (since review F-006, a log opened with `Options.NoSyncOnRoll` skips that fsync; only the fill log sets it, never the command WAL);
   2. creates the new one and writes its header;
   3. fsyncs the directory.
 - **`Sync`** ([wal.go:518](../../internal/wal/wal.go#L518)), under `syncMu`:
   1. takes `mu` only to read the file handle and `appended`;
   2. releases `mu` and fsyncs, so appends carry on meanwhile;
   3. on success, publishes `synced` as the value read before the fsync. Records written during the fsync aren't counted.
-- **`syncdir_windows.go` / `syncdir_other.go`:** directory fsync on Linux; a documented no-op on Windows.
+- **`internal/fsutil` (`syncdir_windows.go` / `syncdir_other.go`):** `fsutil.SyncDir`, directory fsync on Linux; a documented no-op on Windows.
+- *Added later:* every fsync goes through `fsync`, which times it (milestone 7) and counts one slower than `StallThreshold` (25 ms by default) as a durability stall ([decision 022](../decisions/022-slow-consumers-and-durability-stalls.md)).
 
 ### `internal/engine/codec.go`: commands on disk
 
@@ -147,13 +148,13 @@ The layout is persistent: changing it means a new WAL format version.
 ### `internal/publisher/publisher.go`: the gate
 
 - **`MaxPending`** = 65,536 held events.
-- **`Run`** ([publisher.go:235](../../internal/publisher/publisher.go#L235)) selects on three channels:
+- **`Run`** ([publisher.go:235](../../internal/publisher/publisher.go#L235)) selects on three channels (four since milestone 6, which added market-data requests):
   - the event channel. It is set to `nil` while 65,536 events are held, so the engine waits; that is the backpressure.
   - `durable.Notify`;
   - `durable.Failed`.
 
   It returns only when its input has closed **and** nothing is still held, or when durability fails.
-- **`release`** ([publisher.go:271](../../internal/publisher/publisher.go#L271)) routes the prefix of held events whose seq is ≤ durable. Seqs never decrease, so the releasable events are always a prefix. It then reuses or compacts the slice so it doesn't grow forever.
+- **`release`** ([publisher.go:271](../../internal/publisher/publisher.go#L271)) routes the prefix of held events whose seq is ≤ durable (since milestone 5 also recording released fills in the fill log, and since milestone 7 counting them in the metrics). Seqs never decrease, so the releasable events are always a prefix. It then reuses or compacts the slice so it doesn't grow forever.
 - **`withhold`** ([publisher.go:306](../../internal/publisher/publisher.go#L306)) drops everything held, drains the rest of the engine's output so the engine is never left blocked, counts it in `Withheld`, and logs an error.
 
 ### `internal/server/server.go`: recovery and failure
@@ -166,7 +167,7 @@ The layout is persistent: changing it means a new WAL format version.
 
 *Superseded in milestone 5:* step 1 now loads the newest snapshot first and replays only the WAL after it (`snapshot.Recover`), so the WAL no longer has to start at seq 1. See [05-recovery.md](05-recovery.md#2-code-walkthrough).
 
-**`Close`** ([server.go:360](../../internal/server/server.go#L360)) runs once: gateway, then `cmds`, then wait for the pipeline (which ends with the sequencer's final fsync), then close the WAL. It returns the durability error, if any. **`Failed`** and **`Err`** expose the failure to `cmd/engine`, which shuts down on it.
+**`Close`** ([server.go:360](../../internal/server/server.go#L360)) runs once: gateway, then `cmds`, then wait for the pipeline (which ends with the sequencer's final fsync), then close the WAL. *Since milestone 7* the gateway is stopped in two steps around that drain (readers first, writers after the pipeline has finished), and a shutdown snapshot is written while the writers deliver ([07-operations.md](07-operations.md)). It returns the durability error, if any. **`Failed`** and **`Err`** expose the failure to `cmd/engine`, which shuts down on it.
 
 ### Tests
 
@@ -231,7 +232,7 @@ The layout is persistent: changing it means a new WAL format version.
 
 1. **An ack is sent before the fsync.** Suppose the publisher released events as soon as the engine produced them, under `group`. A client is told "order 812 filled at 100" and hedges elsewhere. The machine loses power 0.5 ms later, before the fsync. On restart, replay rebuilds the book from the log, which doesn't contain order 812. The exchange has no record of a fill it confirmed. The counterparty's fill is gone too, so one side is hedged against a trade that doesn't exist. *Planted (the publisher ignoring the durable seq) and caught.*
 
-2. **Replay uses a fresh clock instead of the logged time.** Suppose recovery stamped each replayed command with `time.Now()`. Every rebuilt event, and from milestone 6 every market-data message regenerated from the log, would carry restart-day timestamps. A trade that happened at 09:30:00.000123 would appear in the replayed fill log at 16:02:11. The replay check (milestone 5) compares fill logs, would report every record as different, and could no longer prove recovery correct. That's why the sequencer is the only place that reads the clock, and why the time is stored in the record. (No test catches this yet, because no engine *state* depends on time. Milestone 5's replay check, which compares the fill log, will. Recorded here so it isn't forgotten.)
+2. **Replay uses a fresh clock instead of the logged time.** Suppose recovery stamped each replayed command with `time.Now()`. Every rebuilt event, and from milestone 6 every market-data message regenerated from the log, would carry restart-day timestamps. A trade that happened at 09:30:00.000123 would appear in the replayed fill log at 16:02:11. The replay check (milestone 5) compares fill logs, would report every record as different, and could no longer prove recovery correct. That's why the sequencer is the only place that reads the clock, and why the time is stored in the record. (No engine *state* depends on time, so a comparison of state can't catch this. The replay check of milestone 5 can: it compares every field of each fill-log match, `Time` included, with its own replay of the WAL, so a replay that restamped commands would differ on every record.)
 
 3. **A failed fsync is retried.** Under `group`, the fsync for a batch returns an I/O error. The code logs it and tries again, and the second attempt succeeds, because the kernel had already dropped the dirty pages and marked them clean, so there was nothing left to write. The batch's acks are then released. The data was never written, so after the next restart those acknowledged orders don't exist. Our code never retries: `Fail` closes the gate permanently, and the server stops.
 
@@ -274,7 +275,7 @@ The layout is persistent: changing it means a new WAL format version.
 <details>
 <summary>Answers</summary>
 
-1. The buyer's reader decodes the frame and puts the command on `cmds`. The sequencer takes it (plus anything else waiting), stamps its seq and time, appends it, and `Flush`es: one `write`, so the data is now in the page cache. It calls `markDirty` and forwards the command at once. The engine matches it and emits Ack, taker Fill, maker Fill and BookDelta, all carrying the order's seq. The publisher **holds** them, because `durable` is still below that seq. Within about 1 ms the group syncer wakes, fsyncs, and **only now is the order durable**; it advances `durable`. That pings the publisher, which releases the four events: the Ack and taker fill to the buyer's session, the maker fill to the seller's. The writers then send them.
+1. The buyer's reader decodes the frame and puts the command on `cmds`. The sequencer takes it (plus anything else waiting), stamps its seq and time, appends it, and `Flush`es: one `write`, so the data is now in the page cache. It calls `markDirty` and forwards the command at once. The engine matches it and emits Ack, taker Fill, maker Fill, Trade (since milestone 6) and BookDelta, all carrying the order's seq. The publisher **holds** them, because `durable` is still below that seq. Within about 1 ms the group syncer wakes, fsyncs, and **only now is the order durable**; it advances `durable`. That pings the publisher, which releases the events: the Ack and taker fill to the buyer's session, the maker fill to the seller's, and the Trade and BookDelta to the instrument's market-data subscribers. The writers then send them.
 
 2. Killing a process doesn't lose the OS page cache; the kernel still writes it to disk. So under any policy, every record that was written before the kill is there on restart. Only a power or OS failure discards unsynced pages, and a test can't easily cause one. The difference is shown by (a) the fsync-gating tests, which wrap the file and *block* or *fail* fsync, then check that nothing is acknowledged before it, or after a failure; and (b) the throughput and latency difference between policies in the benchmark.
 

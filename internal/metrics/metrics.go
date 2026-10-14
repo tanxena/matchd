@@ -184,7 +184,7 @@ func Micros(us ...float64) []int64 {
 	return out
 }
 
-// Bucket boundaries in microseconds, chosen with the user (decision 017).
+// Bucket boundaries in microseconds, chosen with the author (decision 017).
 // The benchmark (milestone 9) uses the same lists, so its tables and
 // /metrics agree; /metrics shows them in seconds.
 var (

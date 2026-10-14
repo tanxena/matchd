@@ -174,7 +174,7 @@ func Run(cfg Config) (*result.Load, error) {
 	// the end by the commands still in flight when sending stopped. Until
 	// review F-018 a full process-list query sat between the first scrape
 	// and the flip, and sending went on until after the second scrape: the
-	// engine counted 100-220 more commands per run, 5-18 ms of traffic.
+	// engine counted 98-220 more commands per run, 5-11 ms of traffic.
 	cpu0, errCPU := readCPU(cfg.EnginePID)
 	before, errBefore := eng.read()
 	r.phase.CompareAndSwap(phaseWarmup, phaseMeasure)

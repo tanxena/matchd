@@ -554,7 +554,7 @@ func (l *Log) fsync(f File) error {
 }
 
 // DefaultStallThreshold is the fsync duration above which a sync counts as
-// a durability stall. This laptop's SSD averages 1.4-2.4 ms per fsync.
+// a durability stall. This laptop's SSD averaged 1.3-1.7 ms in the benchmark.
 const DefaultStallThreshold = 25 * time.Millisecond
 
 // SyncInProgress is how long the fsync now running has taken so far, or 0
