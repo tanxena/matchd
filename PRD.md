@@ -1,32 +1,6 @@
-# PRD — Order Matching Engine (Go)
+# PRD: order matching engine (Go)
 
-## 0. How to work on this project
-
-You are pair-programming with me, not building this for me. Rules:
-
-- Work in **small increments**. Finish one roadmap milestone, stop, and explain what you built and why before moving on. Do not build ahead.
-- For every non-trivial design decision (book data structure, WAL format, sequencing, locking, protocol framing), write `docs/decisions/NNN-title.md`: options considered, choice, why, what it costs.
-- Prefer the **standard library**. Justify each dependency in a decision record. No gRPC, no protobuf; the wire protocol is ours.
-- No magic. Every goroutine, mutex, channel, and atomic has a comment saying what it protects or coordinates.
-- Every package gets tests. Anything touching shared state runs under `go test -race`. Anything touching disk gets a crash/recovery test. The matching core gets differential tests against the reference book (see 5.3).
-- **Git is local only.** `git init` if needed, Go `.gitignore`, commit after each milestone with conventional messages. No remote, no push until I say so.
-- **Benchmarks:** you write the harness under `bench/` and walk me through it line by line before I run it. All README numbers come from committed files in `bench/results/`. The benchmark rules in section 7 are requirements, not suggestions.
-- When you finish a milestone, give me 3 to 5 questions I should be able to answer about the code.
-
-### 0.1 Learning documentation (mandatory)
-
-This repo is also my study resource. Maintain `docs/learn/` as you go.
-
-For every milestone, write `docs/learn/NN-<milestone>.md`, in this order:
-
-1. **Concepts** — the ideas this milestone depends on (price-time priority, what a limit order book is, why a WAL plus deterministic replay gives exact recovery, what `fsync` guarantees, how TCP framing works, what sequence numbers buy a market-data consumer), from first principles for someone who knows Python/TypeScript but is new to Go and to exchange systems. Link primary sources where they exist (Go docs, the relevant RFCs, exchange protocol specs such as NASDAQ ITCH/OUCH for terminology), not blog posts.
-2. **Code walkthrough** — file by file, function by function, real paths and names.
-3. **Design decisions** — summary linking to `docs/decisions/`.
-4. **What breaks if** — 3 to 5 concrete failure scenarios (ack before fsync, replay with a non-deterministic clock, cancel racing a fill, a market-data gap) and exactly what goes wrong.
-5. **Go idioms introduced** — one paragraph each, first time used.
-6. **Self-check questions** — answers in a collapsed `<details>` block.
-
-Also maintain `docs/learn/00-glossary.md` and `docs/learn/README.md` (reading order, and "how an order flows from socket to fill to market-data event"). Stale learning docs = failing milestone.
+This is the product requirements document the engine was built from. Section numbers are cited throughout the code and docs ("PRD 5.4", "PRD 7.1"). How the project was built against it (working rules, documentation, review) is described in [docs/process/build-process.md](docs/process/build-process.md).
 
 ## 1. Summary
 
@@ -76,9 +50,9 @@ clients (CLI, bench loadgen, SDK)
      disk: <data>/{wal/*.log, snapshots/*.snap, manifest.json}
 ```
 
-The engine is single-threaded by design: one goroutine consumes a totally ordered command stream and emits events. This is the standard architecture for matching engines and is the central thing you must be able to defend. Concurrency lives at the edges (connections, WAL writer, publisher), not in the book.
+The engine is single-threaded by design: one goroutine consumes a totally ordered command stream and emits events. This is the standard architecture for matching engines. Concurrency lives at the edges (connections, WAL writer, publisher), not in the book.
 
-Module `github.com/<me>/<name>`:
+Module `github.com/tanxena/matchd`:
 
 ```
 cmd/engine/          server binary
@@ -93,15 +67,15 @@ internal/engine/     command loop, event emission, instrument registry
 internal/publisher/  event fan-out, market-data sequencing, subscriber ring buffers, slow-consumer policy
 internal/snapshot/   snapshot write/load, manifest, recovery orchestration
 internal/metrics/    counters, histograms (HDR-style), /metrics
-bench/               loadgen (yours, walked through), scripts, results/
-docs/decisions/  docs/learn/
+bench/               load generator, benchmark runner, report generator, results/
+docs/                decision records, guide, review
 ```
 
 ## 5. Functional requirements
 
 ### 5.1 Instruments and orders
 - Instruments created via admin command or config: symbol, tick size, lot size. Prices and quantities are integers in ticks and lots; no floats anywhere in the matching path.
-- Order: `client_id`, `client_order_id`, `instrument`, `side`, `type ∈ {limit, market, ioc, fok}` (ioc/fok in milestone 8), `price` (limit only), `qty`, `tif` for limit ∈ {gtc, day} (day is accepted and treated as gtc in v1; document).
+- Order: `client_id`, `client_order_id`, `instrument`, `side`, `type ∈ {limit, market, ioc, fok}`, `price` (limit only), `qty`, `tif` for limit ∈ {gtc, day} (day is accepted and treated as gtc in v1; document).
 - Engine assigns a monotonic `order_id` per accepted order and a global `seq` per accepted command.
 - `client_order_id` is unique **per client among live orders**. A `NewOrder` whose `(client_id, client_order_id)` matches a currently resting order is rejected with `DuplicateClientOrderID`. Once that order is fully filled or cancelled, the id may be reused. The reference book implements the identical rule; the differential test asserts identical rejects.
 
@@ -153,7 +127,7 @@ docs/decisions/  docs/learn/
 ## 6. Non-functional requirements
 
 - Go 1.22+ (use what's installed; record version). `go vet`, `golangci-lint`, `go test -race ./...` clean.
-- The engine goroutine must not allocate on the steady-state path for limit add, cancel, and match. Show with `testing.AllocsPerRun` and a benchmark table in the learning doc.
+- The engine goroutine must not allocate on the steady-state path for limit add, cancel, and match. Show with `testing.AllocsPerRun` and a benchmark table.
 - Graceful shutdown: stop accepting, drain the command channel, fsync, snapshot, close.
 - No Docker. `Makefile` with `build`, `test`, `test-long`, `lint`, `run`, `bench`.
 
@@ -186,7 +160,7 @@ These are hard requirements on the harness and on what the README may claim.
 7. `go test -race ./...` and lint clean; Linux and Windows both pass.
 8. README: architecture, the single-threaded-engine rationale, wire protocol summary, WAL/recovery diagram, quick start, benchmark tables, known limitations (no STP, no replication, day orders as GTC).
 
-## 9. Roadmap (build in this order; stop after each)
+## 9. Roadmap (built in this order)
 
 1. **Skeleton + book core**: module, config, `internal/book` with price levels and FIFO queues, add/cancel/match for limit and market; `internal/book/ref`; differential harness with seeded streams; invariant checks. This is the heart; get it right before anything else.
 2. **Engine loop + events**: single goroutine, instrument registry, event types, in-memory only. Allocation tests.
@@ -198,31 +172,4 @@ These are hard requirements on the harness and on what the README may claim.
 8. **IOC / FOK** (small; FOK needs a liquidity pre-check without mutating the book). Extend differential tests.
 9. **Benchmarks + write-up**: loadgen per section 7, interleaving script, results, generator script for the README table, README.
 
-If milestone 1's differential test is not clean after two days, stop and tell me; everything else depends on it.
-
-**Scope note.** This is larger than the LLM Gateway. If the subscription window is at risk, the cut order is: milestone 8 (IOC/FOK) first; then market-data resend (keep snapshot-then-deltas and gap *detection*, drop `Resend`); then the Linux pass (keep Windows only, state it). Never cut: differential testing, WAL + recovery + crash test, the benchmark protocol.
-
-## 10. Open questions to raise with me at the relevant milestone
-
-- Price level storage: sorted slice of levels, skip list, or red-black tree? Which is most defensible for the access pattern (best-level hot, inserts near best)?
-- Order lookup for cancel: map from order_id to a linked-list node, or an indexed slab?
-- Group commit window default (1 ms?) and how acks are released.
-- Should the matching-core latency histogram be HDR-style with fixed buckets, or sampled?
-- md ring buffer size and whether it's per instrument.
-
-## 11. Post-build review process
-
-### 11.1 Tagging
-- When milestone 9 is complete and all tests pass, tag `v0.1-unreviewed`. After all review findings are resolved, tag `v0.1-reviewed`. Create neither tag until told.
-
-### 11.2 Responding to a review
-A separate reviewer session writes `docs/reviews/full-review.md` with numbered findings (`F-001`, …). I will strike some out. When told to respond:
-1. Read the whole file. Do not act on struck findings.
-2. Under each remaining finding append: `- **Builder response:** Accepted — fixed in <sha>: <one line>` or `Rejected — <technical reason citing code, test, or PRD section>`. "Works as intended" is not a reason.
-3. Fix accepted findings Critical → Should-fix → Nit, one commit per finding or tight group, message `fix(review): F-00N <title>`.
-4. If a fix changes behaviour covered by a learning doc or decision record, update it in the same commit. If a finding shows a doc or README claim was wrong, correct the claim even if the code stands, and say so.
-5. Run `go build ./...`, `go vet ./...`, `go test -race ./...`, lint. Report results. Stop. Do not tag.
-After the reviewer's follow-up round I will rule on disputed findings; apply rulings the same way, then wait for the instruction to tag.
-
-### 11.3 Interview follow-ups
-An interviewer session writes `docs/interviews/<date>.md` (gitignored) with ranked gaps. When asked to expand a learning doc on a topic: expand only that section; add at least one new concrete example or "what breaks if" scenario; add two new self-check questions to that doc's `<details>` block; commit as `docs(learn): expand <file> on <topic>`.
+**Scope.** If time ran short, the planned cut order was: milestone 8 (IOC/FOK) first; then market-data resend (keeping snapshot-then-deltas and gap *detection*); then the Linux pass. Never cut: differential testing, WAL + recovery + crash test, the benchmark protocol. Nothing was cut: all nine milestones are built.

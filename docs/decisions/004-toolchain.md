@@ -22,7 +22,7 @@ PRD 6 asks for "Go 1.22+, use what's installed". The code currently needs nothin
 - `math/rand/v2`'s PCG generator gives seeded, reproducible test streams;
 - `testing` and `flag` cover everything the differential harness needs.
 
-Every future dependency needs its own decision record (PRD 0).
+Every future dependency needs its own decision record ([build process](../process/build-process.md#working-rules)).
 
 ## Lint
 

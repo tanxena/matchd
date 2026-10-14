@@ -19,7 +19,7 @@ go.work.sum
 # Runtime data directories (WAL, snapshots)
 /data/
 
-# Interview notes are private (PRD 11.3)
+# Interview notes are private (docs/process/build-process.md)
 docs/interviews/
 
 # Editor / OS
