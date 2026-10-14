@@ -41,13 +41,32 @@ func TestNowDoesNotAllocate(t *testing.T) {
 // conversion error.
 func TestNowMeasuresElapsedTime(t *testing.T) {
 	Init()
-	a, wa := Now(), time.Now()
+	a, wa := readBoth(t)
 	time.Sleep(200 * time.Millisecond)
-	b, wb := Now(), time.Now()
+	b, wb := readBoth(t)
 	got, want := time.Duration(b-a), wb.Sub(wa)
 	if d := got - want; d < -2*time.Millisecond || d > 2*time.Millisecond {
 		t.Fatalf("Now measured %v, time.Now %v", got, want)
 	}
+}
+
+// readBoth reads Now between two time.Now reads, and retries until nothing
+// came between them. Read one after the other, the two clocks can be
+// milliseconds apart under load: in one `make ci` run, the thread was
+// descheduled between them and the test saw Now short by 2.85 ms over
+// 200 ms, though the clocks agree within about 75 µs when read together.
+func readBoth(t *testing.T) (int64, time.Time) {
+	t.Helper()
+	for range 1000 {
+		w1 := time.Now()
+		n := Now()
+		w2 := time.Now()
+		if w2.Sub(w1) < 100*time.Microsecond {
+			return n, w1
+		}
+	}
+	t.Fatal("couldn't read Now and time.Now together in 1000 tries")
+	return 0, time.Time{}
 }
 
 func TestWallNanos(t *testing.T) {
