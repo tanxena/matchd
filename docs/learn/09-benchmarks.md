@@ -189,17 +189,17 @@ Thin wrappers over Windows APIs, each loaded with `syscall.NewLazyDLL(...).NewPr
 ### The report: `bench/report`
 
 - **`groups`** ([report.go:50](../../bench/report/report.go#L50)) sorts runs into rows by (suite, table, config). A failed or disturbed run goes to `Excluded`, never into the numbers. The exception is `-smoke`, where disturbed runs count and the report says "not benchmark results" at the top.
-- **`check`** ([report.go:76](../../bench/report/report.go#L76)) refuses rows with fewer than 5 counted runs, and refuses any exclusion unless `-allow-disturbed`.
-- **`stats`** ([report.go:137](../../bench/report/report.go#L137)): the median (the middle value, or the mean of the middle two) and min–max.
-- **`hardware`** ([report.go:310](../../bench/report/report.go#L310)) writes one hardware-and-environment line from the files:
+- **`check`** ([report.go:77](../../bench/report/report.go#L77)) refuses rows with fewer than 5 counted runs, and refuses any exclusion unless `-allow-disturbed`.
+- **`stats`** ([report.go:140](../../bench/report/report.go#L140)): the median (the middle value, or the mean of the middle two) and min–max.
+- **`hardware`** ([report.go:313](../../bench/report/report.go#L313)) writes one hardware-and-environment line from the files:
   - CPU (cores / threads, L3), RAM, OS and Go;
   - each suite's power plan and source;
   - the pinning claim, which says "no shared physical core" only if the recorded topology says so;
   - any `-asserted` statement, for what the harness can't measure, such as the Defender exclusion, labelled "stated by the operator".
 
-  It then gives "nothing else running" as the measured median and maximum other-process CPU, naming the worst run's biggest process. `-min-runs-suite balanced=3` lets one suite's rows report fewer runs; such a row shows **n=3** of 5†, with the left-out runs listed.
-- The table functions each state their conditions in a sentence and give every cell as `median (min–max)`. Every core-latency table carries **`coreFootnote`** ([report.go:459](../../bench/report/report.go#L459)): the clock's source and per-read cost, and the 3.1% bound.
-- **`commands`** ([report.go:683](../../bench/report/report.go#L683)) lists each row's exact `start /affinity` lines.
+  It then gives "nothing else running" as the measured median and maximum other-process CPU, naming the worst run's biggest process. `-min-runs-suite` lets one suite (`balanced=3`), or one table of it (`balanced/clock=4`), report fewer runs; such a row shows **n=4** of 5†, with the left-out runs listed.
+- The table functions each state their conditions in a sentence and give every cell as `median (min–max)`. Every core-latency table carries **`coreFootnote`** ([report.go:462](../../bench/report/report.go#L462)): the clock's source and per-read cost, and the 3.1% bound.
+- **`commands`** ([report.go:686](../../bench/report/report.go#L686)) lists each row's exact `start /affinity` lines.
 - **`splice`** ([main.go:94](../../bench/report/main.go#L94)) replaces only what lies between the README's `bench:begin` and `bench:end` markers.
 
 ### Tests and what the smoke runs showed

@@ -73,12 +73,13 @@ bench-balanced: bench-build
 	$(BIN)/benchrun$(EXE) -suite balanced -results bench/results/balanced
 
 ## bench-report: regenerate the README's benchmark section from bench/results.
-## For the committed results: the Balanced resting row has 3 clean runs of
-## 5 (2 disturbed by Defender, listed under the tables), accepted as n=3;
-## the Defender exclusion was set by the operator and can't be measured.
+## For the committed results: one of the 5 Balanced clock-probe runs was
+## disturbed by Defender (listed under the tables), so that row counts the 4
+## clean ones; every latency row has 5 clean runs. The Defender exclusion was
+## set by the operator and can't be measured.
 bench-report: bench-build
 	$(BIN)/report$(EXE) -results bench/results -readme README.md \
-		-allow-disturbed -min-runs-suite balanced=3 \
+		-allow-disturbed -min-runs-suite balanced/clock=4 \
 		-asserted "Microsoft Defender exclusion on the benchmark data directory (%TEMP%\matchd-bench)"
 
 ## ci: what CI runs, plus a Linux cross-compile of every binary and test
