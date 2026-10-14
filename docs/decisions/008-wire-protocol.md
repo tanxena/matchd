@@ -2,7 +2,7 @@
 
 - **Status:** accepted (milestone 3)
 
-> **Superseded in part (2026-10-14, `bf4c722`):** the gateway has a seventh reject reason, 106 `TooManyRequests`, for market-data requests beyond a connection's rate (review F-005, [decision 016](016-market-data.md)); 104 `Unsupported`, whose only use was `Subscribe` before market data existed (nothing raised it from milestone 6, `26ecd26`), has answered, since a later commit the same day, a well-formed frame of a type clients don't send, before the connection is closed.
+> **Superseded in part (2026-10-14, `bf4c722`):** the gateway has a seventh reject reason, 106 `TooManyRequests`, for market-data requests beyond a connection's rate (review F-005, [decision 016](016-market-data.md)); 104 `Unsupported`, whose only use was `Subscribe` before market data existed (nothing raised it from milestone 6, `26ecd26`), has answered, since `cd35a0b` (2026-10-14), a well-formed frame of a type clients don't send, before the connection is closed.
 
 - **Code:** `internal/proto/frame.go`, `internal/proto/messages.go`
 

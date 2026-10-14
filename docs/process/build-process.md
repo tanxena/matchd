@@ -55,7 +55,7 @@ Interview-preparation notes about the code are private (`docs/interviews/`, giti
 
 ## The doc-link check is enforced at docs commits, not every code commit
 
-`internal/doccheck` checks that every link from a doc to a line of code (link text `engine.go:112`, target `engine.go#L112`) lands on a declaration of the symbol its text names. It runs in `make test` and `make ci`, and **must pass at every docs commit and at the head of the branch.**
+`internal/doccheck` checks that every link from a doc to a line of code (link text `engine.go:112`, target `engine.go#L112`) lands on a declaration of the symbol its text names: the leading name in the backtick spans just before the link (`Order.Validate`, `rest(o, qty)`), with its receiver when one is given. Until 2026-10-14 any backtick identifier earlier on the doc's line counted, which let three wrong links through. It runs in `make test` and `make ci`, and **must pass at every docs commit and at the head of the branch.**
 
 It is **not** expected to pass at every code commit. Each milestone is committed as code first, then its docs. Line-anchored links go stale as soon as a code commit moves the lines they point at, and stay stale until the milestone's docs commit updates them. From milestone 6 on, most code commits fail this check, and the next docs commit makes it pass again.
 

@@ -372,6 +372,7 @@ set "GOMAXPROCS=4" && start "loadgen" /affinity F0 bin\loadgen.exe -addr 127.0.0
 - **No replication or failover.** It's a single process. Durability is the local disk's, under the fsync policy chosen.
 - **Day orders behave as GTC.** There are no trading sessions, so nothing expires them.
 - **IOC and FOK are limit-only.** There is no market IOC or FOK.
+- **No minimum-quantity orders.** An order can't ask to fill at least N lots or not at all. FOK, which fills in full or not at all, is the nearest ([decision 020](docs/decisions/020-ioc-and-fok.md)).
 - **With snapshots on, WAL fsyncs stall and the end-to-end tail suffers** ([observation 002](docs/bugs/002-snapshot-runs-stall-the-wal.md)). The cause on the disk side is not established, and nothing is fixed.
 - **A race-detector failure was seen once and never reproduced** ([observation 001](docs/bugs/001-unreproduced-server-race-failure.md)). `make test-race-loop` repeats one package under `-race` to look for it.
 - **Linux is untested.** Every binary and test binary cross-compiles for Linux, but the suite has only run on Windows. The Linux-only code paths (directory fsync, the monotonic clock, `SIGKILL` in the crash harness, the TCP reset check) are compiled but not exercised. Benchmark numbers exist for Windows on one laptop only.
