@@ -1,48 +1,93 @@
 # matchd
 
-An order matching engine in Go, built to show what an exchange core actually does, and to measure it honestly.
+matchd is a limit order matching engine written in Go: the core of an exchange, as one process. Clients connect over TCP with a compact binary protocol, send orders and cancels, and receive acknowledgements, fills and a sequenced market-data feed. Every accepted command is written to a write-ahead log before anything about it is sent, and the engine's state is a pure function of that log, so a crash is recovered by replay to the same book, sequence numbers and fills. It is meant for anyone who wants to see what an exchange core does and what it costs, measured, and for embedding a deterministic matcher in a trading simulator. It is not a production exchange: it has no risk checks, accounts, authentication or replication (see [Known limitations](#known-limitations-and-open-observations)).
 
-- **Matching:** one book per instrument, price-time priority. Limit orders (GTC, Day, IOC, FOK), market orders and cancels.
-- **Durability:** every accepted command is written to a write-ahead log before anything is acknowledged. The engine's state is a pure function of that log, so a crash at any point is recovered by replay to the same book, sequence numbers and fills.
-- **Correctness:** checked against a deliberately simple reference book on over a million randomised commands, and by a harness that kills the real binary 50 times and verifies every acknowledged command and fill survives.
-- **Clients:** a compact binary protocol over TCP, and a sequenced market-data feed with snapshots, gap detection and resend.
-- **Operations:** Prometheus metrics, health checks and graceful shutdown.
-- **Benchmarks:** absolute latency and throughput under a strict protocol, with every number generated from committed raw results ([below](#benchmarks)).
+## Features
 
-The [learning docs](docs/guide/README.md) explain every part from first principles, and the [decision records](docs/decisions/) say why each choice was made and what it cost.
+- **Matching:** one book per instrument, by price-time priority. Limit orders (GTC; Day, accepted and treated as GTC; IOC; FOK), market orders, and cancels scoped to the owning client. A client order id is unique among that client's live orders on every instrument.
+- **Instruments** are given at startup or added at runtime over HTTP. Prices and quantities are integer ticks and lots, with bounds that keep every sum in the book from overflowing.
+- **Write-ahead log** with a CRC32C per record, and three fsync policies (`always`, `group:<window>`, `never`). No answer leaves the process before its command is durable.
+- **Snapshots** taken without pausing the engine (copy-on-write), recovery from the newest snapshot plus the WAL, and an independent replay check (`engctl replay-check`).
+- **Binary TCP protocol** with a hand-written codec: no reflection, and no allocation on the hot path. Clients that can't keep up are disconnected rather than allowed to stall the engine.
+- **Market data:** per-instrument book deltas and trades with a gap-free `md_seq`, snapshot-then-deltas for new subscribers, gap detection, and `Resend` from a ring buffer.
+- **Operations:** Prometheus metrics, `/healthz`, a log line per command at debug level, and graceful shutdown.
+- **Testing:** differential testing against a deliberately simple reference book, and a crash harness that kills the real binary 50 times and checks every acknowledged command and fill.
+- **Benchmarks:** a harness that measures matching-core and end-to-end latency and throughput under a fixed protocol, and generates this README's tables from committed raw results.
+
+## Quick start
+
+Go 1.27 or later; no other dependencies.
+
+```sh
+git clone https://github.com/tanxena/matchd && cd matchd
+go build -o bin/ ./cmd/...
+
+# terminal 1: the engine, one instrument XYZ (tick 1, lot 1)
+bin/engine -data ./data -instrument XYZ:1:1    # TCP 127.0.0.1:9000, HTTP 127.0.0.1:9100
+
+# terminal 2: market data for XYZ (a snapshot, then deltas and trades)
+bin/engctl subscribe XYZ
+
+# terminal 3: rest a sell, then cross it with a buy
+bin/engctl order --client 7 --instrument XYZ --side sell --type limit --px 101 --qty 5
+bin/engctl order --client 8 --instrument XYZ --side buy --type limit --px 101 --qty 2
+bin/engctl book XYZ
+```
+
+The buy is acknowledged and filled against the resting sell:
+
+```
+Ack seq=2 order=1 clordid=… inst=1 sell 5 @ 101
+Ack seq=3 order=2 clordid=… inst=1 buy 2 @ 101
+Fill seq=3 match=1 order=2 clordid=… taker buy 2 @ 101 leaves=0
+```
+
+and the subscriber sees the trade and the level change (`Trade md=… 2 @ 101 (aggressor buy)`, then `BookDelta … sell 101 -> qty 3`). More:
+
+```sh
+bin/engctl add-instrument --symbol ABC --tick 5 --lot 100
+bin/engctl instruments
+curl 127.0.0.1:9100/metrics
+bin/engctl connect --client 7                   # interactive; type "help"
+```
+
+Ctrl-C shuts the engine down gracefully: clients receive every answer, a snapshot is written, and the next start replays nothing. With the engine stopped, `bin/engctl replay-check --data ./data` rebuilds the newest snapshot independently from the WAL and checks the fill log against it. On Windows the binaries are `bin\engine.exe` and `bin\engctl.exe`.
 
 ## Architecture
 
+Adapted from [PRD section 4](PRD.md#4-architecture):
+
 ```
 clients (engctl, bench/loadgen, internal/client)
-   │  TCP, length-prefixed binary frames
-   ▼
-gateway ─ one reader and one writer goroutine per connection
-   │  commands (one shared channel)                    ▲ events, per client
-   ▼                                                   │
-sequencer ─ assigns seq + timestamp ──▶ WAL ──fsync──▶ durable seq
-   │  sequenced commands                               │ (gates release)
-   ▼                                                   │
-engine ─ ONE goroutine, all books ─ events ──▶ publisher ──┬──▶ client sessions
-   │                                           (holds each  ├──▶ fill log
-   │ copy-on-write freeze                       event until  └──▶ market-data subscribers
-   ▼                                            durable)          (snapshot, then deltas by md_seq,
-snapshot writer ──▶ snapshots + manifest                          resend from a ring)
+     |  TCP, length-prefixed binary frames
+     v
++-------------------------------------------------------------+
+| gateway     framing, decode, login, per-connection writer   |
+|     |                                                       |
+|     v  one ordered command channel                          |
+| sequencer   assigns seq + timestamp, appends to WAL, fsync  |
+|     |                                                       |
+|     v                                                       |
+| engine      one goroutine; owns all books; no locks inside  |
+|   ├─ book[instrument]  price levels, FIFO queues            |
+|   └─ matcher           price-time priority                  |
+|     |                                                       |
+|     v  events (ack, fill, cancel-ack, reject, book delta)   |
+| publisher   holds each event until its command is durable,  |
+|             then fans out to clients and market-data subs   |
+| snapshot    copy-on-write book snapshots; recovery          |
+| metrics     /metrics, /healthz, /instruments on HTTP        |
++-------------------------------------------------------------+
+     disk: <data>/{wal/*.log, snapshots/*.snap, manifest.json, fills/*.log}
 ```
 
-How one order travels this path, step by step, is in [the learning docs' order flow](docs/guide/README.md#how-an-order-flows-from-socket-to-fill-to-market-data-event).
+All books belong to one goroutine, which takes commands off a channel one at a time ([decision 005](docs/decisions/005-engine-loop.md)). Nothing else touches a book, so the matching path has no locks, and the order of execution *is* the sequence order: replaying the log reproduces every fill exactly. A command takes 1–2 µs in the engine at the median (tables below) while each WAL fsync takes milliseconds, so the cost is one core for all instruments, and the rest of the pipeline (gateway, sequencer, WAL, publisher) runs on its own goroutines.
 
-### Why the engine is single-threaded
+How one order travels this path, step by step, is in the [guide's order flow](docs/guide/README.md#how-an-order-flows-from-socket-to-fill-to-market-data-event). The [guide](docs/guide/README.md) explains each part, and the [decision records](docs/decisions/) say why each choice was made and what it cost.
 
-All books belong to one goroutine, which takes commands off a channel one at a time ([decision 005](docs/decisions/005-engine-loop.md)).
-- **No locks on the matching path.** Nothing else touches a book, so there is nothing to lock, no lock contention to measure, and no lock-ordering bug to have. The steady-state path allocates nothing ([decision 007](docs/decisions/007-allocation-testing.md)).
-- **Determinism for free.** The order of execution *is* the sequence order. Replaying the log reproduces every fill exactly, which is what makes recovery and the replay check possible. The engine never reads a clock: timestamps come from the sequencer and are logged.
-- **It is fast enough to be bounded by everything else.** A command takes about a microsecond in the engine (table below), and the WAL fsync takes milliseconds. Parallelising matching would make the cheap part complicated while the expensive part stayed where it is.
-- **The cost:** one instrument's work can't use a second core, and one slow command delays every instrument. The rest of the pipeline (gateway, sequencer, WAL, publisher) runs on its own goroutines, so the engine goroutine does nothing but match.
+### Wire protocol
 
-## Wire protocol
-
-Every frame is a 4-byte little-endian length, then a version byte (1) and a type byte, then a fixed-layout payload ([decision 008](docs/decisions/008-wire-protocol.md)). The codec is hand-written: no reflection, no allocation on the hot path.
+Every frame is a 4-byte little-endian length, then a version byte (1) and a type byte, then a fixed-layout payload ([decision 008](docs/decisions/008-wire-protocol.md)).
 
 | message | code | direction | payload bytes |
 |---|---|---|---:|
@@ -64,11 +109,24 @@ Every frame is a 4-byte little-endian length, then a version byte (1) and a type
 
 Prices are integer ticks (a limit price at most 2^53) and quantities integer lots (at most 2^30), so no sum in the book can overflow ([decision 003](docs/decisions/003-integer-domain-and-reject-semantics.md)). Every outbound message carries its command's sequence number and timestamp.
 
-Sessions:
-- A connection logs in as one client id. The gateway attaches that id to every command, so clients can't act for each other.
+- A connection logs in as one client id, and the gateway attaches that id to every command, so clients can't act for each other.
 - A client that sends nothing for 60 s is disconnected.
-- A client that can't keep up with its own events is disconnected as a slow consumer. It is never allowed to stall the engine or other clients. "Can't keep up" is judged by time, not by a momentary burst ([decision 022](docs/decisions/022-slow-consumers-and-durability-stalls.md)).
-- Market-data requests need no login, so each connection's are rate-limited (a burst of 32, then 16 per second), and a Resend is answered with at most 4,096 events ([decision 016](docs/decisions/016-market-data.md)). The number of connections isn't limited (see known limitations).
+- A client that can't keep up with its own events is disconnected as a slow consumer, judged by time rather than by a momentary burst ([decision 022](docs/decisions/022-slow-consumers-and-durability-stalls.md)).
+- Market-data requests need no login, so each connection's are rate-limited (a burst of 32, then 16 per second), and a Resend is answered with at most 4,096 events ([decision 016](docs/decisions/016-market-data.md)).
+
+### Market data
+
+Per instrument: book deltas (market by price) and trade prints, each with a gap-free `md_seq` assigned by the engine ([decision 016](docs/decisions/016-market-data.md)).
+- A subscriber first gets a snapshot of the book, then every delta after it, with no gap or overlap.
+- A consumer that sees `md_seq` jump sends `Resend`, answered from a 65,536-event ring per instrument. Beyond the ring, it subscribes again for a fresh snapshot.
+- `internal/client.Feed` does all of this. A test joins mid-stream, drops events to induce gaps, and converges to the same book as a subscriber from the start.
+
+### Observability
+
+`/metrics` serves Prometheus text format: commands by type and outcome, fills, matching latency, WAL fsync latency, WAL bytes, snapshot age, connections, slow-consumer disconnects and market-data resends ([decision 017](docs/decisions/017-metrics-and-clock.md)). A stalled disk shows as `matchd_wal_fsync_stalls_total` (fsyncs slower than `-fsync-stall`, default 25 ms) and `matchd_wal_fsync_in_progress_seconds` ([decision 022](docs/decisions/022-slow-consumers-and-durability-stalls.md)). `/debug/latency` serves the matching latency as a log-linear histogram precise to 3.1%, which the benchmark reads ([decision 021](docs/decisions/021-benchmark-harness.md)).
+
+- **Units:** latency histograms are named `_seconds` and labelled in seconds, as Prometheus expects. Their bucket bounds are defined in microseconds (0.25, 0.5, 1, 2, 5 … µs): `le="2.5e-07"` is 0.25 µs.
+- **Clock:** latencies are timed with `internal/clock`, not `time.Now`, which on Windows advances only every ~515 µs on this machine. On Windows with an invariant TSC it reads the CPU's timestamp counter, calibrated against QueryPerformanceCounter: 13.5 ns per read in the clock-overhead table. Without one it uses QPC, measured at 78–179 ns per read from Go. On Linux it uses Go's monotonic clock. The source and its cost are logged at startup and exported as `matchd_clock_info` and `matchd_clock_read_cost_seconds`.
 
 ## Durability and recovery
 
@@ -89,14 +147,14 @@ restart:  manifest ─▶ newest snapshot ─▶ WAL records after its seq ─�
 - **Fsync policies** ([decision 012](docs/decisions/012-durability-and-fsync-policies.md)):
   - `always` (default): each batch is fsynced before it reaches the engine;
   - `group:1ms`: commands reach the engine at once, a syncer fsyncs at most every millisecond, and answers are held until their fsync;
-  - `never`: tests only; acknowledged work can be lost on power failure.
+  - `never`: tests only.
 
-  **Under `always` and `group`, no answer leaves the process before its command is fsynced to disk. Under `never`, before it is written to the operating system**, which a power failure can lose. The benchmark measures what each policy costs.
-- **Snapshots** ([decision 013](docs/decisions/013-copy-on-write-snapshots.md)): every 10 s (and on shutdown), the engine freezes its books between two commands and hands a copy-on-write view to a writer goroutine. The engine carries on, copying only the parts it changes. Two snapshots are kept; older WAL segments are deleted.
-- **Replay check** ([decision 014](docs/decisions/014-fill-log-and-replay-check.md)): `engctl replay-check --data DIR` rebuilds the newest snapshot independently, from the older one plus the WAL, and checks every logged fill against the replay. The fill log is written by the publisher goroutine and never fsynced. That goroutine touches disk in two places only. After each release batch that contains a match, it makes one `write` into the page cache. When the current 64 MiB segment is full, it closes it, creates the next one and writes its 8-byte header; on Linux it then fsyncs the fill-log directory once (on Windows that call is a no-op). Pruning old fill-log segments runs on the snapshot writer's goroutine, not the publisher's.
+  **Under `always` and `group`, no answer leaves the process before its command is fsynced to disk**, so a power failure loses nothing acknowledged. **Under `never`, no answer leaves before its command is written to the operating system**, which a power failure can lose. The benchmark measures what each policy costs.
+- **Snapshots** ([decision 013](docs/decisions/013-copy-on-write-snapshots.md)): by default every 10 s while commands arrive, or every 1,000,000 commands, and on shutdown. The engine freezes its books between two commands and hands a copy-on-write view to a writer goroutine. The engine carries on, copying only the parts it changes. Two snapshots are kept, and WAL segments covered by both are deleted.
+- **Replay check** ([decision 014](docs/decisions/014-fill-log-and-replay-check.md)): `engctl replay-check --data DIR` rebuilds the newest snapshot independently, from the older one plus the WAL, and checks every logged fill against the replay. The fill log is an audit trail, written by the publisher goroutine and never fsynced. That goroutine touches disk in two places only. After each release batch that contains a match, it makes one `write` into the page cache. When the current 64 MiB segment is full, it closes it, creates the next one and writes its 8-byte header; on Linux it then fsyncs the fill-log directory once (on Windows that call is a no-op). Pruning old fill-log segments runs on the snapshot writer's goroutine, not the publisher's.
 
 **What the crash test proves, and what it doesn't** ([decision 015](docs/decisions/015-crash-test.md)):
-- **What it does:** it runs the real binary under load and kills it with `SIGKILL` / `TerminateProcess` 50 times.
+- **What it does:** it runs the real binary under load and kills it with `SIGKILL` / `TerminateProcess` 50 times (`make test-long`; 5 times in the normal suite).
   - **After each kill** it checks:
     - no acknowledged seq is beyond the WAL's end;
     - every acknowledged command still in the WAL is the command the client sent;
@@ -110,46 +168,23 @@ restart:  manifest ─▶ newest snapshot ─▶ WAL records after its seq ─�
   - a test that wraps the WAL file, holds or fails its fsync, and shows no answer leaves before the fsync, under both `always` and `group`;
   - the throughput difference between the policies, in the benchmark.
 
-## Market data
+### How correctness is checked
 
-Per instrument: book deltas (market by price) and trade prints, each with a gap-free `md_seq` assigned by the engine ([decision 016](docs/decisions/016-market-data.md)).
-- A subscriber first gets a snapshot of the book, then every delta after it, with no gap or overlap.
-- A consumer that sees `md_seq` jump sends `Resend`, answered from a 65,536-event ring per instrument. Beyond the ring, it subscribes again for a fresh snapshot.
-- `internal/client.Feed` does all of this. A test joins mid-stream, drops events to induce gaps, and converges to the same book as a subscriber from the start (acceptance 4).
-
-## Quick start
-
-```sh
-go build -o bin/ ./cmd/...
-bin/engine -data ./data -instrument XYZ:1:1          # TCP 127.0.0.1:9000, HTTP 127.0.0.1:9100
-
-bin/engctl order --client 7 --instrument XYZ --side sell --px 101 --qty 5
-bin/engctl order --client 8 --instrument XYZ --side buy --px 101 --qty 2 --tif ioc
-bin/engctl book XYZ                                   # top levels from a fresh snapshot
-bin/engctl subscribe XYZ                              # stream deltas and trades
-bin/engctl add-instrument --symbol ABC --tick 5 --lot 100
-curl 127.0.0.1:9100/metrics
-```
-
-Ctrl-C shuts down gracefully: clients receive every answer, a snapshot is written, and the next start replays nothing.
-
-## Observability
-
-`/metrics` serves Prometheus text format: commands by type and outcome, fills, matching latency, WAL fsync latency, WAL bytes, snapshot age, connections, slow-consumer disconnects and market-data resends ([decision 017](docs/decisions/017-metrics-and-clock.md)). A stalled disk shows as `matchd_wal_fsync_stalls_total` (fsyncs over `-fsync-stall`, 25 ms) and `matchd_wal_fsync_in_progress_seconds` ([decision 022](docs/decisions/022-slow-consumers-and-durability-stalls.md)). There's also `/healthz`, and `/debug/latency`: the matching latency in a log-linear histogram precise to 3.1%, which the benchmark reads ([decision 021](docs/decisions/021-benchmark-harness.md)).
-
-- **Units:** latency histograms are named `_seconds` and labelled in seconds, as Prometheus expects. Their bucket bounds are defined in microseconds (0.25, 0.5, 1, 2, 5 … µs), and the benchmark tables report microseconds: `le="2.5e-07"` is 0.25 µs.
-- **Clock:** latencies are timed with `internal/clock`, not `time.Now`, which on Windows only advances every ~515 µs.
-  - On Windows with an invariant TSC it reads the CPU's timestamp counter, calibrated against QueryPerformanceCounter: about 14 ns per read here (the clock-overhead table).
-  - Without one, it uses QPC: 80–180 ns per read from Go.
-  - On Linux, Go's monotonic clock.
-
-  The source and its measured cost are logged at startup and exported as `matchd_clock_info` and `matchd_clock_read_cost_seconds`. Every core-latency table below states both in its footnote.
+- **Differential testing** ([guide 01](docs/guide/01-book-core.md)): the book is compared, result by result, with a deliberately simple reference book on random command streams: 10,000 commands per seed over 10 seeds in the normal suite, and 1.2 million commands over 20 seeds in `make test-long`, with zero divergence. The streams include edge quantities and prices. A deep-book run takes the book past 11,000 resting orders, as deep as the benchmark's, and another spreads the stream over two instruments that share client order ids.
+- **Crash recovery:** the kill-and-recover runs above.
+- **No allocation** on the engine's steady-state path for limit add, cancel and match, proven by test ([decision 007](docs/decisions/007-allocation-testing.md)).
+- **Market data:** a late joiner converges through an induced gap.
+- **A subscriber that stops reading** is disconnected, and the engine's latency histogram doesn't move.
+- **Planted bugs:** each milestone planted bugs to show its tests fail when they should (listed in each decision record).
+- **Race detector and lint:** `go test -race ./...` and `golangci-lint` are clean on Windows (`make ci`). On Linux, every binary and test binary cross-compiles, but the suite has not yet run there (see [Development process](#development-process)).
 
 ## Benchmarks
 
-**All benchmark tables are Windows 11 on one laptop**, the development machine, stated in full below. There are no Linux benchmark numbers. Linux is cross-compiled, and **the test suite has not yet run on Linux**: the CI workflow is set up, but has not yet run (see Development).
+**The headline tables (order mix and fsync policy) run with snapshots off**, so that they show matching and the WAL without the end-to-end stall that snapshots cause ([observation 002](docs/bugs/002-snapshot-runs-stall-the-wal.md)). The engine's default takes a snapshot every 10 s; for that configuration, read the snapshot table's "on" row.
 
-Every number in this section's tables is generated by [`bench/report`](bench/report) from the per-run JSON files in [`bench/results/`](bench/results), written by the harness in [`bench/`](bench/README.md) under the protocol of PRD section 7 ([decision 021](docs/decisions/021-benchmark-harness.md)). None of them is typed by hand.
+All benchmark tables are Windows 11 on one laptop, the development machine, stated in full below. There are no Linux benchmark numbers. Every number in this section is generated by [`bench/report`](bench/report) from the per-run JSON files in [`bench/results/`](bench/results), written by the harness in [`bench/`](bench/README.md) under the protocol of PRD section 7 ([decision 021](docs/decisions/021-benchmark-harness.md)). None of them is typed by hand.
+
+**Two commits.** The main suite (`bench/results/full`) ran at commit `73e6c8d`, before the review fixes. The Balanced suite (`bench/results/balanced`) was re-run at `449ab7e`, after them; its result files record the commit as `449ab7e…-dirty`, since the working tree had uncommitted changes. The generated protocol line below names only the main suite's commit. The 26 commits between them change code on the measured path, including the book's client-order-id registry (review F-003) and the engine. So the comparison of the two plans is not the power plan alone.
 
 ### How to read the tables
 
@@ -159,11 +194,10 @@ Every number in this section's tables is generated by [`bench/report`](bench/rep
 - **Open loop and closed loop.**
   - The mix, snapshot and Balanced tables send at a fixed 20,000 commands/s, well below saturation. Latency is measured from each command's *scheduled* send time, so a late load generator can't hide its own delay.
   - The fsync table keeps a fixed number of commands in flight (closed loop) to find sustained throughput. Its end-to-end latency is therefore mostly queueing.
-- **The engine is warmer at saturation than at 20,000/s.** At a fixed rate it idles between commands, its caches cool and the CPU clocks down, so the mix table's core latency is higher than the same work under saturation would be. Each table states its load.
+- **Core latency at a fixed rate is not the engine's best case.** At 20,000 commands/s the engine idles between commands, so its caches cool and the CPU can clock down. Each table states its load.
 - **End-to-end latency is dominated by the disk.** Each answer waits for its WAL fsync, and an fsync on this laptop's SSD takes milliseconds: see the "fsync mean" column of the end-to-end mix table (at 20,000 commands/s) and of the fsync table (at saturation). That is the price of acknowledging nothing before it is durable, not of matching.
-- **The headline tables run with snapshots off, and the shipped default has them on.** The engine snapshots every 10 s by default, and snapshots cost the end-to-end tail (next point). So the mix and fsync tables show the end-to-end tail *without* snapshots. For the default configuration, the snapshot table's "on" row is the one to read.
-- **Snapshots cost the tail, not the engine.** In the snapshot table, core latency is the same with snapshots on and off: copy-on-write keeps the engine out of it. End-to-end p99.9 is far higher with snapshots on, and about 0.9% of commands in those runs waited more than 50 ms (from the runs' end-to-end histograms). Why is an open question ([observation 002](docs/bugs/002-snapshot-runs-stall-the-wal.md)). A separate 20 s reproduction, not part of the committed results, saw WAL fsyncs of 30–80 ms a few seconds after a snapshot, during which nothing new reached the engine. That *fits* the next WAL write waiting behind the fsync, but this is not verified. The committed result files don't record fsync stalls; the load generator records them from now on.
-- **Balanced versus High performance:** at this load, the Balanced plan's matching core is slower at every quantile: median 2.11 µs against 1.47, p99 18.9 against 15.1, p99.9 30.7 against 26.1. End to end, the two plans are close, since the fsync dominates: median 3.6 ms against 3.3. All 5 Balanced runs are clean. Its clock row counts 4 of 5 runs: one clock-probe run was disturbed by Defender (`MsMpEng.exe`) and is left out, listed under the tables.
+- **Snapshots cost the tail, not the engine.** In the snapshot table, core latency is about the same with snapshots on and off: copy-on-write keeps the engine out of it. End-to-end p99.9 is far higher with snapshots on, and 0.89–0.99% of commands in those runs waited more than 50 ms (from the runs' end-to-end histograms; none did with snapshots off). Why is an open question: [observation 002](docs/bugs/002-snapshot-runs-stall-the-wal.md) records a separate reproduction in which WAL fsyncs stalled a few seconds after a snapshot, which fits but is not verified. The committed result files don't record fsync stalls; the load generator records them from `13875f7` on.
+- **Balanced versus High performance:** at this load, the Balanced suite's matching core is slower at every quantile: median 2.11 µs against 1.47, p99 18.9 against 15.1, p99.9 30.7 against 26.1. End to end, the two are close, since the fsync dominates: median 3.6 ms against 3.3. The suites ran different commits (above). All 5 Balanced latency runs are clean. Its clock row counts 4 of 5 runs: one clock-probe run was disturbed by Defender (`MsMpEng.exe`) and is left out, listed under the tables.
 - **Quantiles are bucket upper bounds:** at most 3.1% above the true value, never below. Cells are the median (min–max) across runs, never the best run.
 
 <!-- bench:begin: generated by bench/report from bench/results; do not edit by hand -->
@@ -332,44 +366,34 @@ set "GOMAXPROCS=4" && start "loadgen" /affinity F0 bin\loadgen.exe -addr 127.0.0
 
 <!-- bench:end -->
 
-## Correctness and testing
-
-- **Differential testing** ([learning doc 01](docs/guide/01-book-core.md)): the book is compared, result by result, with a deliberately simple reference book on random command streams. That's 10,000 commands per seed over 10 seeds in the normal suite, and 1.2 million commands over 20 seeds (`make test-long`), with zero divergence (acceptance 1). The streams include edge quantities and prices. A deep-book run takes the book past 11,000 resting orders, as deep as the benchmark's, and another spreads the stream over two instruments that share client order ids.
-- **Crash recovery:** 50 kill-and-recover runs of the real binary, as above (acceptance 2).
-- **No allocation** on the engine's steady-state path for limit add, cancel and match, proven by test (acceptance 3).
-- **Market data:** a late joiner converges through an induced gap (acceptance 4).
-- **A subscriber that stops reading** is disconnected, and the engine's latency histogram doesn't move (acceptance 5).
-- **Race detector and lint:** `go test -race ./...` and `golangci-lint` are clean (`make ci`).
-- **Linux: pending CI** (acceptance 7). Every binary and test binary cross-compiles for Linux (`make ci`). The CI workflow is set up to run the race suite and the short crash test on `ubuntu-latest`, but **it has not yet run**, so the suite has never run on Linux. Until it does, the Linux-only code paths (directory fsync, the monotonic clock, SIGKILL in the crash harness, the TCP reset check) are compiled but untested.
-- **Planted bugs:** every milestone planted bugs to show its tests fail when they should (listed in each decision record).
-- **Open observations:**
-  - [001](docs/bugs/001-unreproduced-server-race-failure.md): a race-detector failure seen once and never reproduced;
-  - [002](docs/bugs/002-snapshot-runs-stall-the-wal.md): snapshot runs stall the WAL.
-
-## Known limitations
+## Known limitations and open observations
 
 - **No self-trade prevention.** A client's buy can trade with its own sell.
-- **No replication or failover.** It's a single process. Durability is the local disk's, with the fsync policy chosen.
+- **No replication or failover.** It's a single process. Durability is the local disk's, under the fsync policy chosen.
 - **Day orders behave as GTC.** There are no trading sessions, so nothing expires them.
-- **IOC and FOK are limit-only.** There is no market FOK.
-- **No market-data heartbeat.** A consumer detects a gap only when a later `md_seq` arrives, so a lost *final* message, or a Resend refused by the rate limit that is waiting for a later message to retry on, stays unnoticed until the instrument next changes. Over TCP single frames aren't lost (a stalled consumer is disconnected instead), so this matters only after a bug or a refused Resend. A periodic per-instrument heartbeat carrying the latest `md_seq` would close it ([decision 016](docs/decisions/016-market-data.md)).
+- **IOC and FOK are limit-only.** There is no market IOC or FOK.
+- **With snapshots on, WAL fsyncs stall and the end-to-end tail suffers** ([observation 002](docs/bugs/002-snapshot-runs-stall-the-wal.md)). The cause on the disk side is not established, and nothing is fixed.
+- **A race-detector failure was seen once and never reproduced** ([observation 001](docs/bugs/001-unreproduced-server-race-failure.md)). `make test-race-loop` repeats one package under `-race` to look for it.
+- **Linux is untested.** Every binary and test binary cross-compiles for Linux, but the suite has only run on Windows. The Linux-only code paths (directory fsync, the monotonic clock, `SIGKILL` in the crash harness, the TCP reset check) are compiled but not exercised. Benchmark numbers exist for Windows on one laptop only.
+- **No market-data heartbeat.** A consumer detects a gap only when a later `md_seq` arrives, so a lost *final* message, or a Resend refused by the rate limit that is waiting for a later message to retry on, stays unnoticed until the instrument next changes. Over TCP single frames aren't lost (a stalled consumer is disconnected instead), so this matters only after a bug or a refused Resend ([decision 016](docs/decisions/016-market-data.md)).
 - **No order-status query.** A client that disconnects loses the events sent while it was away; its orders stay on the book.
-- **No risk checks, accounts, auctions, stop, iceberg or pegged orders** (PRD non-goals). There is no TLS or authentication: the gateway and the HTTP side are for a trusted local network, and `/instruments` lets anyone with access add instruments. There's no limit on connections either: many connections each making their full allowance of market-data requests could still keep the publisher busy.
-- **One engine goroutine for all instruments:** see [Why the engine is single-threaded](#why-the-engine-is-single-threaded).
-- **Benchmark numbers exist for Windows on one laptop only.**
-- **The suite has not run on Linux yet** (above).
-- **With snapshots on, the end-to-end tail suffers from WAL fsync stalls** ([observation 002](docs/bugs/002-snapshot-runs-stall-the-wal.md)).
+- **No risk checks, accounts, auctions, stop, iceberg or pegged orders** (PRD non-goals). There is no TLS or authentication: the gateway and the HTTP side are for a trusted local network, and `/instruments` lets anyone with access add instruments. There is no limit on connections either: many connections each making their full allowance of market-data requests could still keep the publisher busy.
+- **One engine goroutine for all instruments:** one instrument's work can't use a second core, and one slow command delays every instrument.
 
-## Development
+## Development process
 
-Go 1.27 ([decision 004](docs/decisions/004-toolchain.md)). The race detector needs cgo, so on Windows it needs gcc on `PATH` (e.g. MSYS2's `C:\msys64\ucrt64\bin`).
+matchd was built with Claude Code, an AI coding agent, working from [`PRD.md`](PRD.md) with the author, one roadmap milestone at a time. Each milestone produced [decision records](docs/decisions/) for its design choices and a [guide](docs/guide/README.md) document explaining the code. A separate Claude Code session then reviewed the finished code against the PRD's acceptance criteria; its 20 findings, the responses and fixes, and the follow-up are in [`docs/reviews/`](docs/reviews/full-review.md). A GitHub Actions workflow ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs vet, lint, the race suite and the short crash test on `ubuntu-latest`; it has not run yet, because the repository has not yet been pushed. The process is described in [docs/process/build-process.md](docs/process/build-process.md).
+
+### Building and testing
+
+Go 1.27 ([decision 004](docs/decisions/004-toolchain.md)). The race detector needs cgo, so on Windows it needs gcc on `PATH` (for example MSYS2's `C:\msys64\ucrt64\bin`).
 
 | target | does |
 |---|---|
 | `make build` | `bin/engine`, `bin/engctl` |
 | `make test` | the suite with `-race`, including 5 kill-and-recover crash runs |
-| `make test-long` | the 1M-command differential test (acceptance 1) and 50 crash runs (acceptance 2) |
-| `make test-race-loop N=50` | one package (`PKG`, default `./internal/server/`) under `-race` N times, every run's output kept in `bin/race-loop.log` ([open observation 001](docs/bugs/001-unreproduced-server-race-failure.md)) |
+| `make test-long` | the 1M-command differential test and 50 crash runs |
+| `make test-race-loop N=50` | one package (`PKG`, default `./internal/server/`) under `-race` N times, every run's output kept in `bin/race-loop.log` |
 | `make lint` | `golangci-lint` |
 | `make run` | an engine on `./data` with one instrument |
 | `make bench` | every Go benchmark, with allocation counts |
@@ -378,6 +402,39 @@ Go 1.27 ([decision 004](docs/decisions/004-toolchain.md)). The race detector nee
 | `make bench-full`, `make bench-balanced` | the benchmark suites, High performance plan (about 75 min) and Balanced (about 10 min); read [`bench/CHECKLIST.md`](bench/CHECKLIST.md) first |
 | `make bench-report` | regenerate the benchmark tables above from `bench/results` |
 
-On Windows, run `make` (MSYS2's `C:\msys64\usr\bin\make.exe`) from PowerShell, cmd or an MSYS2 shell, **not Git Bash**, where it starts with an empty environment ([decision 010](docs/decisions/010-windows-gotchas.md) §13). How commits and the doc-link check relate: [docs/process/build-process.md](docs/process/build-process.md).
+On Windows, run `make` (MSYS2's `C:\msys64\usr\bin\make.exe`) from PowerShell, cmd or an MSYS2 shell, **not Git Bash**, where it starts with an empty environment ([decision 010](docs/decisions/010-windows-gotchas.md) §13).
 
-**Linux:** development is on Windows. `make ci` cross-compiles everything for Linux. [`.github/workflows/ci.yml`](.github/workflows/ci.yml) is set up to run gofmt, vet, lint, the race suite and the short crash test on `ubuntu-latest`. **It has not yet run**: it runs when the repository is pushed to GitHub, and until then the suite has never run on Linux.
+## Layout
+
+```
+cmd/engine/          the server
+cmd/engctl/          CLI client: order, cancel, connect, book, subscribe, instruments, add-instrument, replay-check
+internal/proto/      wire protocol: frames, encode/decode
+internal/gateway/    TCP listener, per-connection reader and writer, sessions
+internal/sequencer/  seq and timestamp assignment, WAL append, fsync policies
+internal/wal/        segmented log, CRC32C per record, replay, torn-tail handling
+internal/engine/     the engine goroutine, events, instrument registry
+internal/book/       order book: price levels, FIFO queues, matching; copy-on-write
+internal/book/ref/   reference book, used only by tests
+internal/publisher/  durability gate, fan-out, market data
+internal/snapshot/   snapshots, manifest, fill log, recovery, replay check
+internal/server/     wiring, HTTP side (/metrics, /healthz, /instruments), shutdown
+internal/client/     client library, including the market-data Feed
+internal/clock/      the hot-path clock
+internal/metrics/    counters and histograms
+internal/crashtest/  the kill-and-recover harness
+internal/durable/    the durable-seq signal shared by the sequencer and publisher
+internal/fsutil/     fsync and atomic-replace helpers per platform
+internal/testutil/   test helpers (allocation checks)
+internal/doccheck/   test that keeps the docs' code links accurate
+bench/               load generator, clock probe, runner, report generator, results/
+docs/decisions/      decision records
+docs/guide/          guide to the design and code
+docs/bugs/           open observations
+docs/reviews/        the code review, responses and follow-up
+docs/process/        how the project was built
+```
+
+## License
+
+MIT; see [LICENSE](LICENSE).
