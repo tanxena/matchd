@@ -32,7 +32,7 @@ Here:
 
 The cost moves from "copy everything, once, while everyone waits" to "copy only what changes, a chunk at a time, spread across normal work".
 
-*If you know TypeScript or React:* it is the immutable-update idea (`{...state, field: newValue}`), applied only to the 192 KiB block that's changing, and only while someone else holds the old version.
+*Comparison:* it is the immutable-update idea familiar from React (`{...state, field: newValue}`), applied only to the 192 KiB block that's changing, and only while someone else holds the old version.
 
 ### 1.3 Why the book had to change shape
 
@@ -197,7 +197,7 @@ A **crash harness** starts the real program, drives load, kills it, and checks w
 
 ## 3. Design decisions
 
-- [013: Copy-on-write snapshots](../decisions/013-copy-on-write-snapshots.md). The chunked slab, `node`/`nodeW`, Freeze/Thaw, the spare pool, triggers (1M commands or 10 s, chosen with you), durability before publishing, atomic writes, the manifest, keeping 2 snapshots and pruning only then, the file format, recovery, and the costs.
+- [013: Copy-on-write snapshots](../decisions/013-copy-on-write-snapshots.md). The chunked slab, `node`/`nodeW`, Freeze/Thaw, the spare pool, triggers (1M commands or 10 s), durability before publishing, atomic writes, the manifest, keeping 2 snapshots and pruning only then, the file format, recovery, and the costs.
 - [014: The fill log and replay-check](../decisions/014-fill-log-and-replay-check.md). What's recorded and when; the WAL format with gaps allowed; no fsync; what replay-check verifies and what it can't; the startup cross-check.
 - [015: The crash test](../decisions/015-crash-test.md). The configuration, the table mapping PRD wording to assertions, **what it cannot prove**, and the results.
 - [010: Windows gotchas](../decisions/010-windows-gotchas.md). New: `os.Rename` isn't atomic, and the bug the fix introduced; killing processes from tests.
@@ -240,7 +240,7 @@ A **crash harness** starts the real program, drives load, kills it, and checks w
 
 ---
 
-## 6. Self-check questions
+## 6. Review questions
 
 1. A snapshot freezes a book with 10 chunks. During the snapshot the engine writes to orders in chunks 2, 2, 7 and 2. How many chunks are copied, which ones, and what does `Thaw` do with each of the 10 afterwards?
 2. Why must the snapshot writer wait for `durable ≥ seq` before writing, under group commit? Describe the bad state on disk if it didn't, and why it only bites at a *later* restart.

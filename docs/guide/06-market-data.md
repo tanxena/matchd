@@ -207,7 +207,7 @@ BookDelta md=7 inst=1 sell 102 -> qty 2
 
 ---
 
-## 6. Self-check questions
+## 6. Review questions
 
 1. A subscriber's book reflects `md_seq` 812, and the next message it receives is a `BookDelta` with `md_seq` 815. Describe exactly what the Feed does from here until it's live again, including what happens to a live message 816 that arrives before the resend.
 2. Why does subscribing never produce a gap or a duplicate between the snapshot and the first delta, even though `Subscribe` arrives on a different goroutine from the one fanning out deltas?

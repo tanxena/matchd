@@ -90,10 +90,10 @@ So cancel is **O(1) for the order plus O(log L) for the level** in the common ca
   - `TestIndexChurnNeverGrows`;
   - `TestCheckIndexDetectsCorruption`.
 
-  Four planted bugs in the deletion logic were each caught within 391 operations (see `docs/learn/02-engine.md`).
+  Four planted bugs in the deletion logic were each caught within 391 operations (see `docs/guide/02-engine.md`).
 - **Memory: at most 50% load**, so the table has 2–4 slots per live entry. Each slot is small (16 bytes for an order-id key, 24 for the client-order-id key), so this is cheap at book scale.
 - **Growth still allocates**, by doubling the table, when the book reaches a new peak order count. That is unavoidable without a fixed maximum size, and it is not steady state. Snapshots or a configured size hint can pre-grow it later if the benchmark shows it matters.
-- **The slab grows the same way.** *(Milestone 1–4 wording; since milestone 5 the slab grows by adding a chunk, and existing chunks never move, so the pointer hazard below no longer exists. Decision 013.)* `append` doubles the backing array when the book reaches a new peak. The pointer `m := &b.nodes[i]` is only valid until the next growth, so `Submit` finishes matching, which never grows the slab, before calling `rest`, which may. That rule is commented in the code and is a "what breaks if" scenario in `docs/learn/01-book-core.md`.
+- **The slab grows the same way.** *(Milestone 1–4 wording; since milestone 5 the slab grows by adding a chunk, and existing chunks never move, so the pointer hazard below no longer exists. Decision 013.)* `append` doubles the backing array when the book reaches a new peak. The pointer `m := &b.nodes[i]` is only valid until the next growth, so `Submit` finishes matching, which never grows the slab, before calling `rest`, which may. That rule is commented in the code and is a "what breaks if" scenario in `docs/guide/01-book-core.md`.
 - **2³²−1 resting orders at most per book.** `alloc` panics beyond that.
 - **No level pointer in the node.** This keeps `orderNode` pointer-free, so the GC never scans the slab. The price is the O(log L) level search on cancel.
 - **Two hash lookups per accepted order:** the duplicate check on arrival, and an insert when it rests. This is the price of the PRD 5.1 rule.

@@ -222,7 +222,7 @@ The layout is persistent: changing it means a new WAL format version.
 ## 3. Design decisions
 
 - [011: WAL format](../decisions/011-wal-format.md). Segments named by first seq, with a magic and version header; records `length | crc32c | seq | time | payload`; `MaxPayload` 4 KB; strict seq continuity; the persistent command encoding; the torn-tail rule and its blind spot; a concurrency design that never blocks appends during fsync; directory fsync (and its absence on Windows).
-- [012: Durability and fsync policies](../decisions/012-durability-and-fsync-policies.md). The exact rule for what may leak before fsync; one gate in the publisher for all policies; `always` with batching (chosen with you); `group` with a 1 ms window and an early fsync at 4,096 (the Section 10 question); `never`; what each loses; fail-stop instead of retrying fsync; "unacknowledged isn't the same as didn't happen"; full-log replay at startup.
+- [012: Durability and fsync policies](../decisions/012-durability-and-fsync-policies.md). The exact rule for what may leak before fsync; one gate in the publisher for all policies; `always` with batching; `group` with a 1 ms window and an early fsync at 4,096 (one of the PRD's open questions, [answered here](../process/build-process.md#questions-settled-during-the-build)); `never`; what each loses; fail-stop instead of retrying fsync; "unacknowledged isn't the same as didn't happen"; full-log replay at startup.
 - [010: Windows gotchas](../decisions/010-windows-gotchas.md). New: the cost of `FlushFileBuffers`; directories can't be fsynced; hard-killing a process from Git Bash.
 
 ---
@@ -263,7 +263,7 @@ The layout is persistent: changing it means a new WAL format version.
 
 ---
 
-## 6. Self-check questions
+## 6. Review questions
 
 1. Under `group:1ms`, a buy order crosses a resting sell. List, in order, what happens from the buyer's frame arriving to both parties receiving their fills, and say at which point the order is durable.
 2. Why can't a test that kills the process with `kill -9` (or `TerminateProcess`) distinguish `fsync=always` from `fsync=never`? What *does* show the difference in this repo?

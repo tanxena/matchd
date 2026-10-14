@@ -80,7 +80,7 @@ The new TIFs are 3 and 4, not 2 and 3. **2 is `Day`**, and has been in every log
 ### The wire and the CLI
 
 - `proto`: `TIFIOC`/`TIFFOK` (3/4), `CancelIOCUnfilled` (3), `ReasonFOKNoLiquidity` (11). The client prints `ioc-unfilled`.
-- `engctl order --tif ioc|fok`; in `engctl connect`, `buy 10 101 ioc`. **`parseTIF`** ([main.go:181](../../cmd/engctl/main.go#L181)) parses both. A market order sent with `--tif ioc` passes it through, so the user sees the engine's reject.
+- `engctl order --tif ioc|fok`; in `engctl connect`, `buy 10 101 ioc`. **`parseTIF`** ([main.go:181](../../cmd/engctl/main.go#L181)) parses both. A market order sent with `--tif ioc` passes it through, so the operator sees the engine's reject.
 
 ### Tests and results
 
@@ -95,7 +95,7 @@ The new TIFs are 3 and 4, not 2 and 3. **2 is `Day`**, and has been in every log
 | **`TestIOCAndFOKOverTheWire`** ([server_test.go:557](../../internal/server/server_test.go#L557)) | the real messages over TCP |
 | crash harness | clients now send IOC and FOK; WAL replay still exact |
 
-**A measurement note.** The "full match" benchmark cycle measures 700–1,100 ns today; milestone 2's learning doc recorded about 290 ns for the same cycle. Building milestone 2's own code today gives 830–880 ns, so this is the machine's state (power scheme, thermal), not a regression. It's a reminder for milestone 9 of why the benchmark protocol records power mode, interleaves runs and reports medians.
+**A measurement note.** The "full match" benchmark cycle measures 700–1,100 ns today; milestone 2's guide document recorded about 290 ns for the same cycle. Building milestone 2's own code today gives 830–880 ns, so this is the machine's state (power scheme, thermal), not a regression. It's a reminder for milestone 9 of why the benchmark protocol records power mode, interleaves runs and reports medians.
 
 ---
 
@@ -131,7 +131,7 @@ The new TIFs are 3 and 4, not 2 and 3. **2 is `Day`**, and has been in every log
 
 ---
 
-## 6. Self-check questions
+## 6. Review questions
 
 1. A FOK buy for 12 at limit 102 arrives; asks are 101 × 5, 102 × 5, 103 × 5. What happens, which events are emitted, and is an order id consumed? And for 10 at 102?
 2. Why is FOK decided by a read-only pass instead of matching and undoing?

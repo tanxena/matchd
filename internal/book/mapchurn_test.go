@@ -14,7 +14,7 @@ import (
 //
 //	go test ./internal/book -run MapChurn -mapchurn -v
 //
-// It reproduces the table in docs/learn/02-engine.md and
+// It reproduces the table in docs/guide/02-engine.md and
 // docs/decisions/002-order-storage-and-cancel.md.
 var mapChurn = flag.Bool("mapchurn", false, "run the Go map vs index churn measurement (about a minute)")
 

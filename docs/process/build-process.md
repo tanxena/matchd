@@ -20,7 +20,7 @@ The project was built as a pair-programming exercise, one roadmap milestone at a
 
 ## The guide
 
-Each milestone also produced a document in [`docs/learn/`](../learn/README.md). These cover the concepts the milestone depends on, from first principles (price-time priority, what `fsync` guarantees, TCP framing, market-data sequencing), with links to primary sources. Each document has the same sections, in this order:
+Each milestone also produced a document in [`docs/guide/`](../guide/README.md). These cover the concepts the milestone depends on, from first principles (price-time priority, what `fsync` guarantees, TCP framing, market-data sequencing), with links to primary sources. Each document has the same sections, in this order:
 
 1. **Concepts**: the ideas the milestone depends on.
 2. **Code walkthrough**: file by file and function by function, with real paths and names.
@@ -29,7 +29,7 @@ Each milestone also produced a document in [`docs/learn/`](../learn/README.md). 
 5. **Go idioms**: one paragraph each, the first time an idiom is used.
 6. **Review questions**: with answers in collapsed `<details>` blocks.
 
-The guide also has a [glossary](../learn/00-glossary.md) and a [reading order](../learn/README.md), including how an order flows from socket to fill to market-data event. A milestone whose guide document was stale counted as unfinished. The doc-link check below enforces part of that.
+The guide also has a [glossary](../guide/00-glossary.md) and a [reading order](../guide/README.md), including how an order flows from socket to fill to market-data event. A milestone whose guide document was stale counted as unfinished. The doc-link check below enforces part of that.
 
 ## Questions settled during the build
 

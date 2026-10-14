@@ -1,6 +1,6 @@
 # Glossary
 
-Terms used in this repo's code and docs. Each entry names the milestone where the term first matters. Terms marked *(later)* are defined now so earlier docs can refer to them.
+Terms used in this repo's code and docs. Each entry names the milestone where the term first matters.
 
 ## Market structure
 
@@ -184,7 +184,7 @@ Terms used in this repo's code and docs. Each entry names the milestone where th
 - **Disturbed run** (M9): a run that failed one of `result.Assess`'s checks (other processes busy, power changed, the load generator behind schedule …); its numbers are never reported.
 - **Depth control** (M9): the load generator scales its crossing orders' size to hold the book near a target number of resting orders (10,000).
 
-## Later milestones
+## References
 - **ITCH / OUCH** (reference): NASDAQ's market-data (ITCH) and order-entry (OUCH) protocols. They are cited for terminology:
   - [TotalView-ITCH 5.0](https://www.nasdaqtrader.com/content/technicalsupport/specifications/dataproducts/NQTVITCHspecification.pdf)
   - [OUCH 4.2](https://www.nasdaqtrader.com/content/technicalsupport/specifications/TradingProducts/OUCH4.2.pdf)

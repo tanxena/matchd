@@ -30,7 +30,7 @@ Orders are grouped by price into **price levels**:
 
 The best bid is always strictly below the best ask. If a buyer were willing to pay 100 and a seller to accept 100, they would already have traded. A matching engine's job is to keep that true: whenever a new order overlaps the other side, it trades immediately.
 
-Everything here is an integer. Prices are **counts of ticks** and quantities are **counts of lots** (decision [003](../decisions/003-integer-domain-and-reject-semantics.md)). If you come from Python or TypeScript, think "store money as integer cents, never as `0.1 + 0.2`". The `float64` value `0.1` isn't exactly 0.1, and two orders "at the same price" could otherwise compare unequal.
+Everything here is an integer. Prices are **counts of ticks** and quantities are **counts of lots** (decision [003](../decisions/003-integer-domain-and-reject-semantics.md)). It is the same rule as storing money in integer cents, never as `0.1 + 0.2`. The `float64` value `0.1` isn't exactly 0.1, and two orders "at the same price" could otherwise compare unequal.
 
 ### 1.2 Price-time priority
 
@@ -86,7 +86,7 @@ Three things make this trustworthy rather than theatrical:
 
 **Invariants** are a second safety net. They are properties that must hold after *every* command, whatever the inputs: the book isn't crossed, each level's total equals the sum of its orders, no order appears twice, and filled or cancelled ids are gone (PRD 5.3). Both books check their own invariants after every command in the harness.
 
-### 1.6 Two data-structure ideas you'll meet
+### 1.6 Two data-structure ideas used here
 
 - **Sorted slice with the hot end at the back.** Removing the last element of a slice costs nothing; removing the first means shifting everything. We put the **best** price level at the *end* of each side's slice, so the most frequent operation, consuming the best level, is free ([decision 001](../decisions/001-price-level-storage.md)).
 - **Slab plus free list plus index links.** Instead of allocating a separate heap object per order and linking them with pointers, every order lives by value in one big slice (`[]orderNode`). The queue at a level is linked by **indices** into that slice. Freed slots go on a free list and are reused before the slice grows. In steady state there are no allocations and no pointers for the garbage collector to trace ([decision 002](../decisions/002-order-storage-and-cancel.md); background in the [Go GC guide](https://go.dev/doc/gc-guide)).
@@ -271,7 +271,7 @@ Each of these was either run for real against the harness (the "caught" results 
 
 ## 5. Go idioms introduced
 
-**Named (defined) types.** `type Price int64` creates a new type whose underlying representation is `int64`, but which the compiler treats as distinct. You can't pass a `Qty` where a `Price` is expected without an explicit conversion (`book.Price(x)`). This is Go's cheap answer to TypeScript's branded types, with zero runtime cost. See [Type definitions](https://go.dev/ref/spec#Type_definitions) in the spec.
+**Named (defined) types.** `type Price int64` creates a new type whose underlying representation is `int64`, but which the compiler treats as distinct. You can't pass a `Qty` where a `Price` is expected without an explicit conversion (`book.Price(x)`). It does what "branded" types do in other languages, at zero runtime cost. See [Type definitions](https://go.dev/ref/spec#Type_definitions) in the spec.
 
 **Typed constants and the zero value.** Every Go variable starts at its type's *zero value*: 0, `""`, nil, or a struct of zero values. There is no `undefined`. We number `Buy = 1, Sell = 2` so that the zero `Side` is *invalid* and gets rejected. A struct literal that forgets `Side:` can't accidentally become a buy. See [The zero value](https://go.dev/ref/spec#The_zero_value).
 
@@ -285,7 +285,7 @@ Each of these was either run for real against the harness (the "caught" results 
 
 **Append to a caller-supplied buffer.** `Submit(o, fills []Fill) (Result, []Fill)` appends to `fills` and returns the possibly-reallocated slice. The caller passes `buf[:0]`, which keeps the backing array but sets the length to zero, and stores the result back. After a few calls the buffer is big enough and matching never allocates again. The same pattern is used by `strconv.AppendInt` and `Orders(s, dst)`. It works because a slice is a small `(pointer, len, cap)` header, not the data itself ([Go slices: usage and internals](https://go.dev/blog/slices-intro)).
 
-**Pointers into slices, and `append` moving the data.** `&b.nodes[i]` is a real pointer into the slice's backing array. `append` beyond capacity allocates a *new* array and copies, and old pointers keep pointing at the old one. Python lists and JS arrays hide this; Go doesn't. See "What breaks if" #5. (The book itself avoids this since milestone 5 by storing orders in fixed chunks.)
+**Pointers into slices, and `append` moving the data.** `&b.nodes[i]` is a real pointer into the slice's backing array. `append` beyond capacity allocates a *new* array and copies, and old pointers keep pointing at the old one. Languages with managed arrays hide this; Go doesn't. See "What breaks if" #5. (The book itself avoids this since milestone 5 by storing orders in fixed chunks.)
 
 **`copy` for insert and remove, and clearing the vacated slot.** `insertAt` does `append(s, nil)`, then `copy(s[i+1:], s[i:])`, then `s[i] = x`. `removeAt` does the reverse, then sets the now-unused last element to nil. Without that, the backing array would keep a pointer to the removed level and the GC couldn't reclaim what it references. The `slices` package (`slices.Insert`, `slices.Delete`, which the reference book uses) does the same thing; the real book writes it out to keep control of the hot path.
 
@@ -309,7 +309,7 @@ Each of these was either run for real against the harness (the "caught" results 
 
 ---
 
-## 6. Self-check questions
+## 6. Review questions
 
 1. An incoming **sell limit at 99 for 10** meets this bid side: 100×4 (order X), 99×3 (Y, oldest at 99), 99×5 (Z), 98×8 (W). List the fills in order, with price and quantity, and say what is left on the book afterwards.
 2. Why does `Submit` match against `levels[len-1]` rather than `levels[0]`, and what would it cost to keep the best level at index 0 instead?

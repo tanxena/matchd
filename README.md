@@ -9,7 +9,7 @@ An order matching engine in Go, built to show what an exchange core actually doe
 - **Operations:** Prometheus metrics, health checks and graceful shutdown.
 - **Benchmarks:** absolute latency and throughput under a strict protocol, with every number generated from committed raw results ([below](#benchmarks)).
 
-The [learning docs](docs/learn/README.md) explain every part from first principles, and the [decision records](docs/decisions/) say why each choice was made and what it cost.
+The [learning docs](docs/guide/README.md) explain every part from first principles, and the [decision records](docs/decisions/) say why each choice was made and what it cost.
 
 ## Architecture
 
@@ -30,7 +30,7 @@ engine ─ ONE goroutine, all books ─ events ──▶ publisher ──┬─�
 snapshot writer ──▶ snapshots + manifest                          resend from a ring)
 ```
 
-How one order travels this path, step by step, is in [the learning docs' order flow](docs/learn/README.md#how-an-order-flows-from-socket-to-fill-to-market-data-event).
+How one order travels this path, step by step, is in [the learning docs' order flow](docs/guide/README.md#how-an-order-flows-from-socket-to-fill-to-market-data-event).
 
 ### Why the engine is single-threaded
 
@@ -334,7 +334,7 @@ set "GOMAXPROCS=4" && start "loadgen" /affinity F0 bin\loadgen.exe -addr 127.0.0
 
 ## Correctness and testing
 
-- **Differential testing** ([learning doc 01](docs/learn/01-book-core.md)): the book is compared, result by result, with a deliberately simple reference book on random command streams. That's 10,000 commands per seed over 10 seeds in the normal suite, and 1.2 million commands over 20 seeds (`make test-long`), with zero divergence (acceptance 1). The streams include edge quantities and prices. A deep-book run takes the book past 11,000 resting orders, as deep as the benchmark's, and another spreads the stream over two instruments that share client order ids.
+- **Differential testing** ([learning doc 01](docs/guide/01-book-core.md)): the book is compared, result by result, with a deliberately simple reference book on random command streams. That's 10,000 commands per seed over 10 seeds in the normal suite, and 1.2 million commands over 20 seeds (`make test-long`), with zero divergence (acceptance 1). The streams include edge quantities and prices. A deep-book run takes the book past 11,000 resting orders, as deep as the benchmark's, and another spreads the stream over two instruments that share client order ids.
 - **Crash recovery:** 50 kill-and-recover runs of the real binary, as above (acceptance 2).
 - **No allocation** on the engine's steady-state path for limit add, cancel and match, proven by test (acceptance 3).
 - **Market data:** a late joiner converges through an induced gap (acceptance 4).

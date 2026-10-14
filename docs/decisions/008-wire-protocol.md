@@ -83,7 +83,7 @@ Side, type, TIF, role, cancel reason and reject reason are defined in `proto` wi
 
 Encoders are `AppendX(dst []byte, m *X) []byte`: they append the frame to a caller's buffer. Decoders are `(m *X) Decode(payload []byte) error`: they fill a value in place.
 
-This uses no reflection and no `encoding/binary.Read` (which uses reflection and allocates). Measured: 8–18 ns per operation and 0 allocations for all six hot operations (`docs/learn/03-gateway.md`).
+This uses no reflection and no `encoding/binary.Read` (which uses reflection and allocates). Measured: 8–18 ns per operation and 0 allocations for all six hot operations (`docs/guide/03-gateway.md`).
 
 `proto.Reader` reads the 6-byte header into a fixed array and the payload into one reused 1,024-byte buffer. The payload slice it returns is valid only until the next call, a rule written on the method.
 

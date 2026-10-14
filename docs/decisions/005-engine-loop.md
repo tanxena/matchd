@@ -16,7 +16,7 @@ PRD section 4: "one goroutine consumes a totally ordered command stream and emit
 The alternatives were one goroutine per book, or a lock per book. They were rejected for these reasons:
 
 - **Determinism.** With one goroutine and one input order, the output order is fully determined. With several goroutines, the order in which events from different books reach the publisher would depend on scheduling. Replay could then produce the same books but a differently interleaved event stream, and the crash test's "identical to a no-crash run" (PRD goal 2) would be harder to state and to prove.
-- **Throughput is not lock-bound.** A matching step is a few hundred nanoseconds (see `docs/learn/02-engine.md`). An uncontended lock costs tens of nanoseconds, and a contended one far more. One core running without locks is the standard design, and it is fast enough that the network and disk, not matching, set the limits.
+- **Throughput is not lock-bound.** A matching step is a few hundred nanoseconds (see `docs/guide/02-engine.md`). An uncontended lock costs tens of nanoseconds, and a contended one far more. One core running without locks is the standard design, and it is fast enough that the network and disk, not matching, set the limits.
 - **Simplicity.** Every invariant in `internal/book` assumes a single owner. Adding locks would mean re-proving all of them under interleaving.
 
 **Cost:** a single book can use only one core. Spreading instruments across several engine goroutines would be a later, explicit change; PRD section 3 excludes it from v1.

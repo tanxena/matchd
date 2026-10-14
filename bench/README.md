@@ -1,6 +1,6 @@
 # bench: the benchmark harness
 
-PRD section 7's protocol, as programs. Why each piece is the way it is: [decision 021](../docs/decisions/021-benchmark-harness.md). How each works, line by line: [the learning doc](../docs/learn/09-benchmarks.md) §2. How to run it: [CHECKLIST.md](CHECKLIST.md).
+PRD section 7's protocol, as programs. Why each piece is the way it is: [decision 021](../docs/decisions/021-benchmark-harness.md). How each works, line by line: [the guide](../docs/guide/09-benchmarks.md) §2. How to run it: [CHECKLIST.md](CHECKLIST.md).
 
 | directory | what |
 |---|---|

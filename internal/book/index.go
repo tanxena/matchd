@@ -10,7 +10,7 @@ import "hash/maphash"
 // enough accumulate it rebuilds the table into newly allocated memory even
 // though the number of live keys hasn't changed. That is a steady-state
 // allocation plus an O(n) pause on the matching path. The measurement is in
-// mapchurn_test.go and docs/learn/02-engine.md.
+// mapchurn_test.go and docs/guide/02-engine.md.
 //
 // How this table avoids it:
 //   - Linear probing: a key lives at hash&mask or the next free slot after it.

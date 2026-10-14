@@ -18,7 +18,7 @@ import (
 // scavenger's timer, GC mark workers, creating an OS thread) allocate a few
 // objects at unpredictable moments, so a Mallocs-based "must be zero" check
 // fails at random. The profiler records each allocation with its stack, which
-// lets us count only allocations our code caused (docs/learn/02-engine.md).
+// lets us count only allocations our code caused (docs/guide/02-engine.md).
 //
 // OwnAllocations sets runtime.MemProfileRate, which is process-wide, so it
 // must not run while other tests run in parallel.

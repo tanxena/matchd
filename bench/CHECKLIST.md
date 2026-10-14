@@ -1,6 +1,6 @@
 # Benchmark pre-flight checklist
 
-For `make bench-full` (about **75 min**, High performance plan) and `make bench-balanced` (about **10 min**, Balanced plan): about 90 min in all, plus switching plans in between. The why behind each step is in [decision 021](../docs/decisions/021-benchmark-harness.md) and the [learning doc](../docs/learn/09-benchmarks.md).
+For `make bench-full` (about **75 min**, High performance plan) and `make bench-balanced` (about **10 min**, Balanced plan): about 90 min in all, plus switching plans in between. The why behind each step is in [decision 021](../docs/decisions/021-benchmark-harness.md) and [the guide](../docs/guide/09-benchmarks.md).
 
 Run every `make` from **PowerShell or cmd, not Git Bash** (decision 010 §13). `make` needs `C:\msys64\usr\bin` and `C:\msys64\ucrt64\bin` on `PATH`.
 

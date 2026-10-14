@@ -276,7 +276,7 @@ The README's tables come from `bench/results/`. The snapshot row is the one surp
 
 ---
 
-## 6. Self-check questions
+## 6. Review questions
 
 1. Why does the fsync table use a closed loop and the mix table an open loop? What would each table show if you swapped them?
 2. In an open-loop run at 20,000/s the load generator's thread is descheduled for 10 ms. What happens to the commands due in those 10 ms, and where does the delay show up in the result file?

@@ -32,7 +32,7 @@ Each message has one fixed layout. `NewOrder` is always 31 payload bytes: instru
 
 **Endianness** is the order in which a multi-byte number's bytes are stored. The number 0x04030201 in **little-endian** is the bytes `01 02 03 04`, least significant first. x86 and ARM CPUs store numbers this way in memory, so encoding is cheap. Many network protocols, including NASDAQ's [OUCH](https://www.nasdaqtrader.com/content/technicalsupport/specifications/TradingProducts/OUCH4.2.pdf) and [ITCH](https://www.nasdaqtrader.com/content/technicalsupport/specifications/dataproducts/NQTVITCHspecification.pdf), use **big-endian** ("network byte order"). OUCH and ITCH are also fixed-layout binary formats, which is where this design comes from. Since we don't need to interoperate with them, we use the CPU's native order.
 
-*If you know TypeScript:* this is a `DataView` with `getUint32(offset, true)`, where `true` means little-endian. Compared with JSON, a fixed binary layout has no parsing, no allocation, no field names on the wire, and a fixed size you can check before reading anything.
+*Comparison:* in JavaScript this is a `DataView` with `getUint32(offset, true)`, where `true` means little-endian. Compared with JSON, a fixed binary layout has no parsing, no allocation, no field names on the wire, and a fixed size you can check before reading anything.
 
 ### 1.3 Goroutine per connection
 
@@ -303,7 +303,7 @@ The fifth row is why golden-bytes tests exist. A round trip only proves the enco
 
 ---
 
-## 6. Self-check questions
+## 6. Review questions
 
 1. A client writes one 37-byte `NewOrder` frame (6-byte header plus 31-byte payload), and the server's first `Read` returns only 20 bytes. Walk through what `proto.Reader.Next` does, and say what would go wrong in a reader that called `conn.Read` once per frame.
 2. Why is the publisher's send into a session queue non-blocking, while a gateway reader's send into the shared command channel *is* allowed to block? What happens upstream in each case when the queue is full?

@@ -10,7 +10,7 @@ This milestone also contains this project's first **design reversal**. Proving t
 
 ### 1.1 Why one goroutine owns the whole engine
 
-PRD section 4 calls the single-threaded engine "the central thing you must be able to defend". Here is the defence.
+PRD section 4 makes the engine single-threaded by design. This section is the case for it.
 
 A matching engine is a **state machine**: state (the books), plus a function that takes the current state and one command and produces a new state and some outputs. If the same commands are applied in the same order to the same starting state, you get the same results every time. That property, determinism, gives us three things at once:
 
@@ -20,7 +20,7 @@ A matching engine is a **state machine**: state (the books), plus a function tha
 
 Determinism needs a **single, total order** of commands and **no hidden inputs**. Hidden inputs include the wall clock, random numbers, and the order in which Go iterates a map. A single goroutine gives the total order for free. If you let several goroutines touch the books, even with locks, the interleaving depends on the OS scheduler, and the scheduler is a hidden input.
 
-*If you know TypeScript:* this is the Node.js event loop, deliberately. One thread runs your handlers one at a time, so handlers never need locks. The concurrency is in the I/O around them. Our "I/O" (connections, the disk log, fan-out to subscribers) runs in other goroutines that talk to the engine only through channels.
+*Comparison:* this is the Node.js event loop, deliberately. One thread runs handlers one at a time, so handlers never need locks. The concurrency is in the I/O around them. Our "I/O" (connections, the disk log, fan-out to subscribers) runs in other goroutines that talk to the engine only through channels.
 
 What it costs: one engine uses one core. That is fine here. A matching step takes a few hundred nanoseconds (section 2), so even a single core can process millions of commands per second, more than the network or disk will deliver. Splitting across cores would need a design decision about ordering across instruments, which PRD section 3 rules out for v1.
 
@@ -277,7 +277,7 @@ The test passed 400 consecutive runs (300, then 100 after the final change).
 
 **Goroutines: `go f()`.** Starts `f` running concurrently and returns at once. There is no handle or join: you coordinate through channels, or through `sync` primitives. In `TestRunMatchesStep`, `go engine.New().Run(in, out)` starts the engine goroutine, and a second goroutine feeds it commands.
 
-**Channels and directional channel types.** `make(chan engine.Command, 64)` creates a buffered channel. `Run(in <-chan Command, out chan<- Event, snap *SnapshotHooks)` uses **directional** types: inside `Run`, `in` can only be received from and `out` only sent to. The compiler enforces the data flow, the way a read-only type would in TypeScript.
+**Channels and directional channel types.** `make(chan engine.Command, 64)` creates a buffered channel. `Run(in <-chan Command, out chan<- Event, snap *SnapshotHooks)` uses **directional** types: inside `Run`, `in` can only be received from and `out` only sent to. The compiler enforces the data flow.
 
 **`close` and `range` over a channel.** `close(out)` signals "no more values". `for e := range out` receives until the channel is closed **and** empty, then exits. That is how the end of the command stream propagates through the pipeline with no extra "done" message. Only the sender closes a channel. Sending on a closed channel panics.
 
@@ -303,7 +303,7 @@ The test passed 400 consecutive runs (300, then 100 after the final change).
 
 ---
 
-## 6. Self-check questions
+## 6. Review questions
 
 1. A sell market order for 10 arrives. The bid side has 100×3 (order A), 100×4 (order B), and 99×6 (order C). Write out the complete event sequence the engine emits, with each event's kind, side, price, qty and `Leaves`, and the match ids, assuming the last match id used was 41.
 2. Why does the engine panic on a sequence gap instead of rejecting the command, or logging and carrying on?

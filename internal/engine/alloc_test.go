@@ -26,7 +26,7 @@ import (
 // allocation with its stack and counts only those that pass through this
 // module's code. Counting runtime.MemStats.Mallocs instead picks up the Go
 // runtime's own background allocations and fails at random; see
-// docs/learn/02-engine.md, "What breaks if".
+// docs/guide/02-engine.md, "What breaks if".
 
 // allocBench is an engine with one instrument and a realistic resting book
 // (200 orders per side, away from the prices the cycles trade at) so the maps,

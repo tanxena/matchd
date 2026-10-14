@@ -2,7 +2,7 @@
 
 - **Status:** accepted (milestone 9). Chosen with the user:
   - benchmarks run on **AC power under the High performance plan**, stated in the hardware line with "nothing else running". One extra row, the resting mix under the **Balanced** plan, shows what a reader on a laptop with default settings would see; the clock-overhead row runs under both;
-  - **the user runs `make bench-full` and `make bench-balanced`.** The harness was walked through first (the learning doc, §2), and `make bench-smoke` checks it in about a minute and a half;
+  - **the author runs `make bench-full` and `make bench-balanced`.** The harness was walked through first ([the guide](../guide/09-benchmarks.md), §2), and `make bench-smoke` checks it in about a minute and a half;
   - the engine is pinned to logical CPUs 0–3 and the load generator to 4–7, with the claim about physical cores made **only because the sibling mapping was verified** (below);
   - **Windows-only numbers.** Linux is cross-compiled, and its tests are to run in CI, which hasn't run yet (review F-010);
   - core-latency quantiles come from a **finer, log-linear histogram** (amending decision 017), served at `GET /debug/latency`;

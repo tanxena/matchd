@@ -214,7 +214,7 @@ The result goes to `ret+0(FP)`. A `.go` file declares `func rdtsc() uint64` with
 
 ---
 
-## 6. Self-check questions
+## 6. Review questions
 
 1. Why does `time.Now` advance in ~515 µs steps on this Windows machine but in nanoseconds on Linux? Is it a Go limitation?
 2. The engine reads the clock three times per command. Compare the cost with QPC and with the TSC against a command's 0.8–1.5 µs, and explain why one is acceptable and the other isn't. What makes a QPC read from Go so slow?
