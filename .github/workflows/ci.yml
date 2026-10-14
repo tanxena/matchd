@@ -4,9 +4,14 @@
 # the repository hasn't been pushed.
 name: ci
 
+# Pushes to main (and master, the branch this repository was built on) and
+# pull requests into main. The benchmark suites never run here: they need an
+# idle, pinned machine (bench/CHECKLIST.md).
 on:
   push:
+    branches: [main, master]
   pull_request:
+    branches: [main]
 
 jobs:
   linux:

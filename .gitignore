@@ -16,11 +16,16 @@ coverage.*
 go.work
 go.work.sum
 
-# Runtime data directories (WAL, snapshots)
+# Runtime data directories (WAL, snapshots), including any a benchmark run
+# leaves beside its results
 /data/
+bench/results/*/data/
 
 # Interview notes are private (docs/process/build-process.md)
 docs/interviews/
+
+# Private to-do list
+/TODO.md
 
 # Editor / OS
 .idea/
