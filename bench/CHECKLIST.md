@@ -71,7 +71,8 @@ Only that directory is excluded: the engine's data for the runs, deleted after e
 | audio and video (anything that makes `audiodg.exe` busy) | |
 | **Claude Code**: leave the session idle (no prompt running) or close it | an active session used about 0.1 CPU |
 | IDEs and editors with indexers, OneDrive or Dropbox sync, Teams, Slack, Discord | |
-| Windows Update: Settings > Windows Update > *Pause updates* for a week | |
+| **Windows Update: pause it** (Settings > Windows Update > *Pause updates* for a week) before a run | an update installing mid-run disturbs it |
+| **After an update, wait for Defender's post-update scan to finish** before a run: Task Manager shows `Antimalware Service Executable` (`MsMpEng.exe`) near 0% CPU for a few minutes | a Balanced clock run was disturbed by `MsMpEng.exe` at 1.15 CPUs |
 | Microsoft Defender's scheduled scan: don't start a run just after boot or login | `MsMpEng.exe` appeared in a smoke run |
 
 Also:
@@ -133,7 +134,7 @@ make bench-report
 git add bench/results README.md
 ```
 
-`bench-report` regenerates the README's benchmark section from every file in `bench\results` (`bench/report`). For the committed results the Makefile passes `-allow-disturbed -min-runs-suite balanced=3`, because two Balanced runs were disturbed (step 4). After a clean re-run, remove both flags, so that the report refuses disturbed runs again. Commit the results and the README together; I'll write the rest of the README around them.
+`bench-report` regenerates the README's benchmark section from every file in `bench\results` (`bench/report`). For the committed results the Makefile passes `-allow-disturbed -min-runs-suite balanced/clock=4`, because one Balanced clock-probe run was disturbed (step 4). After a clean re-run, remove both flags, so that the report refuses disturbed runs again. Commit the results and the README together; I'll write the rest of the README around them.
 
 To restore your usual plan: `powercfg /setactive <guid>` (`powercfg /list` shows them). If you added the Defender exclusion in step 1b, remove it now.
 
