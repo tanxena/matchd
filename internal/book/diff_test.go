@@ -717,8 +717,9 @@ func (c coverage) requireCoverage(t *testing.T, n int) {
 // Review F-004: the stream above never holds more than a few hundred orders,
 // so the slab never leaves its first chunk and the indexes never grow under
 // the oracle. This one builds a book of more than 10,000 resting orders
-// (three or more chunks, an order index grown past its initial 1,024
-// slots), keeps trading and freezing on it, and requires that it got there.
+// (three or more chunks, an order index grown past the size a new book
+// starts with), keeps trading and freezing on it, and requires that it got
+// there.
 func TestDifferentialDeepBook(t *testing.T) {
 	seeds := []uint64{301}
 	if *longRun {
@@ -740,13 +741,45 @@ func TestDifferentialDeepBook(t *testing.T) {
 			cov := runPairWith(t, g, seed, 20_000, real, oracle)
 			chunks, slots := real.Footprint()
 			t.Logf("seed %d: max depth %d, %d chunks, %d index slots, %d snapshots, %d chunk copies", seed, cov.depth, chunks, slots, cov.freezes, cov.cowCopies)
-			if cov.depth < 10_000 || chunks < 3 || slots <= 1024 {
-				t.Fatalf("deep book not reached: max depth %d, %d chunks, %d index slots", cov.depth, chunks, slots)
+			if err := deepBookReached(cov.depth, chunks, slots); err != nil {
+				t.Fatal(err)
 			}
 			// A freeze of a multi-chunk book copies more than one chunk.
 			if cov.freezes == 0 || cov.cowCopies <= cov.freezes {
 				t.Fatalf("%d snapshots, %d chunk copies: copy-on-write never copied more than one chunk per snapshot", cov.freezes, cov.cowCopies)
 			}
 		})
+	}
+}
+
+// deepBookReached is TestDifferentialDeepBook's check that the stream built
+// the book it was meant to: at least 10,000 resting orders at once, three
+// or more slab chunks, and an order index grown past a new book's.
+func deepBookReached(depth, chunks, slots int) error {
+	fresh, err := book.New(instr)
+	if err != nil {
+		return err
+	}
+	_, initial := fresh.Footprint()
+	if depth < 10_000 || chunks < 3 || slots <= initial {
+		return fmt.Errorf("deep book not reached: max depth %d, %d chunks, %d index slots (a new book has %d)", depth, chunks, slots, initial)
+	}
+	return nil
+}
+
+// The deep-book check must refuse an index that never grew. It used to
+// compare with 1,024 slots, but a new book's index starts at 2,048, so an
+// index that never grew passed.
+func TestDeepBookCheckRefusesAnUngrownIndex(t *testing.T) {
+	fresh, err := book.New(instr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, initial := fresh.Footprint()
+	if err := deepBookReached(10_000, 3, initial); err == nil {
+		t.Fatalf("an index still at its initial %d slots passed the deep-book check", initial)
+	}
+	if err := deepBookReached(10_000, 3, 2*initial); err != nil {
+		t.Fatalf("a grown index failed the deep-book check: %v", err)
 	}
 }
