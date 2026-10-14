@@ -4,7 +4,7 @@
   - benchmarks run on **AC power under the High performance plan**, stated in the hardware line with "nothing else running". One extra row, the resting mix under the **Balanced** plan, shows what a reader on a laptop with default settings would see; the clock-overhead row runs under both;
   - **the author runs `make bench-full` and `make bench-balanced`.** The harness was walked through first ([the guide](../guide/09-benchmarks.md), §2), and `make bench-smoke` checks it in about a minute and a half;
   - the engine is pinned to logical CPUs 0–3 and the load generator to 4–7, with the claim about physical cores made **only because the sibling mapping was verified** (below);
-  - **Windows-only numbers.** Linux is cross-compiled, and its tests are to run in CI, which hasn't run yet (review F-010);
+  - **Windows-only numbers.** Linux is cross-compiled, and its tests run in CI (passing in full since [run 38555017256](https://github.com/tanxena/matchd/actions/runs/38555017256), 2026-10-14; review F-010);
   - core-latency quantiles come from a **finer, log-linear histogram** (amending decision 017), served at `GET /debug/latency`;
   - processes are pinned with **`SetProcessAffinityMask`**, the mask `start /affinity` sets, rather than by running `start` itself.
 - **Code:** `bench/` (`loadgen`, `clockprobe`, `benchrun`, `report`, `internal/load`, `internal/result`, `internal/sysinfo`), `internal/metrics/loghist.go`, `internal/server/http.go` (`handleLatency`), `Makefile` (`bench-*`)
@@ -158,7 +158,7 @@ Since review F-014, clock-probe runs get the other-processes check too, measured
 
 ## Decision 9: Windows only
 
-All tables are Windows 11 on this laptop. Linux is cross-compiled (`make ci`), and the suite is to run in CI for correctness only, which hasn't happened yet (review F-010); there are no Linux benchmark numbers, and the README doesn't promise any. `bench/internal/sysinfo` implements its OS calls for Windows only. Elsewhere they return `ErrUnsupported`, so the bench programs still build.
+All tables are Windows 11 on this laptop. Linux is cross-compiled (`make ci`), and the suite runs in CI for correctness only (passing in full since [run 38555017256](https://github.com/tanxena/matchd/actions/runs/38555017256), 2026-10-14; review F-010); there are no Linux benchmark numbers, and the README doesn't promise any. `bench/internal/sysinfo` implements its OS calls for Windows only. Elsewhere they return `ErrUnsupported`, so the bench programs still build.
 
 ## Environment caveat: Microsoft Defender
 

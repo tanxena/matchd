@@ -438,3 +438,7 @@ Added by the builder after the author's rulings; the reviewer's lines above are 
 | 6 | Met. Every latency row has 5 clean runs (F-014). The one exception, ruled by the author, is the Balanced clock-overhead row, which counts 4 of 5 runs, with the disturbed run listed under the tables. |
 | 7 | Pending CI (F-010). The workflow is set up but has not yet run, so nothing has run on Linux. |
 | 8 | Met |
+
+## Acceptance 7 — 2026-10-14 — commit 5e11a63
+
+Added by the builder; the lines above are unchanged. **Acceptance 7 is met.** CI on `ubuntu-latest` passed in full at `5e11a63` ([run 38555017256](https://github.com/tanxena/matchd/actions/runs/38555017256)): gofmt, vet, lint, `go test -race ./...`, and the short crash test with the signal-shutdown test (`TestCrashRecovery` and `TestSignalShutsDownGracefully` both pass). The first CI run, at `b2bad8a` ([run 38553623640](https://github.com/tanxena/matchd/actions/runs/38553623640)), had failed only in three Windows-only benchmark-harness tests, which now skip off Windows ([observation 003](../bugs/003-bench-harness-never-ran-on-linux.md)). Every acceptance criterion, 1 to 8, is now met; 6 keeps the author's ruling on the Balanced clock row (4 of 5 runs). `make test-long` has run only on Windows.
