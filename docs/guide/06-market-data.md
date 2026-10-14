@@ -102,8 +102,8 @@ The reader handles `Subscribe` by calling `pub.Subscribe(instrument, session)`, 
 
 **Snapshots are streamed by the writer, outside the queue.**
 - **`DeliverSnapshot`** ([session.go:99](../../internal/gateway/session.go#L99)) puts the snapshot on a small side channel `snaps` (at most 4 pending), then an `EvSnapshot` marker on `out`. It never blocks.
-- When the writer reaches the marker, **`streamSnapshot`** ([session.go:489](../../internal/gateway/session.go#L489)) takes the snapshot and writes the header and every level frame from it.
-- **`write`** ([session.go:517](../../internal/gateway/session.go#L517)) buffers one frame. Every socket write the buffer makes when it fills goes through `deadlineWriter`, which first sets the write deadline to now + `WriteTimeout` (review F-001), so a client that stops reading is disconnected after `WriteTimeout`, while one that reads gets the whole book, however deep. Live events published meanwhile wait in `out`.
+- When the writer reaches the marker, **`streamSnapshot`** ([session.go:491](../../internal/gateway/session.go#L491)) takes the snapshot and writes the header and every level frame from it.
+- **`write`** ([session.go:519](../../internal/gateway/session.go#L519)) buffers one frame. Every socket write the buffer makes when it fills goes through `deadlineWriter`, which first sets the write deadline to now + `WriteTimeout` (review F-001), so a client that stops reading is disconnected after `WriteTimeout`, while one that reads gets the whole book, however deep. Live events published meanwhile wait in `out`.
 
 The first version queued one event per level, so a book deeper than the queue (4,096 by default) disconnected every subscriber, even fast ones. Streaming fixed that without making the queue grow.
 

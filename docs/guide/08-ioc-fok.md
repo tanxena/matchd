@@ -92,7 +92,7 @@ The new TIFs are 3 and 4, not 2 and 3. **2 is `Day`**, and has been in every log
 | **`TestIOCAndFOKEvents`** ([engine_test.go:177](../../internal/engine/engine_test.go#L177)) | exact event sequences; a rejected FOK uses no order id |
 | event-stream test | IOC/FOK in the random stream; none ever rests; no accepted FOK is partly cancelled |
 | `TestZeroAllocSteadyState` | IOC cycle and FOK cycle: 0 allocations (~1.0 µs and ~2.1 µs per cycle on this laptop at the time) |
-| **`TestIOCAndFOKOverTheWire`** ([server_test.go:557](../../internal/server/server_test.go#L557)) | the real messages over TCP |
+| **`TestIOCAndFOKOverTheWire`** ([server_test.go:566](../../internal/server/server_test.go#L566)) | the real messages over TCP |
 | crash harness | clients now send IOC and FOK; WAL replay still exact |
 
 **A measurement note.** At this milestone the "full match" benchmark cycle measured 700–1,100 ns; milestone 2's guide document recorded about 290 ns for the same cycle. Building milestone 2's own code on the same day gave 830–880 ns, so this was the machine's state (power scheme, thermal), not a regression. It is why milestone 9's benchmark protocol records the power mode, interleaves runs and reports medians.

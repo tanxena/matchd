@@ -274,7 +274,9 @@ func (s *session) readLoop() {
 			}
 
 		default:
-			s.close(fmt.Sprintf("protocol error: unexpected message type %v", typ))
+			// A well-formed frame of a type clients don't send: say so
+			// (Reject(Unsupported)), then close.
+			s.fatal(proto.ReasonUnsupported, proto.Reject{}, fmt.Sprintf("protocol error: unexpected message type %v", typ))
 			return
 		}
 		if decodeErr != nil {

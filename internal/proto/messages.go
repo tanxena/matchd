@@ -50,7 +50,7 @@ const (
 	ReasonAlreadyLoggedIn Reason = 101 // a second Login on one connection
 	ReasonClientInUse     Reason = 102 // another connection is logged in as this client
 	ReasonInvalidClientID Reason = 103 // client id 0
-	ReasonUnsupported     Reason = 104 // a valid message this server doesn't handle yet
+	ReasonUnsupported     Reason = 104 // a well-formed frame of a type clients don't send; the connection is then closed
 	// ReasonResendUnavailable: a Resend asked for md_seq values the server's
 	// ring buffer no longer holds; Subscribe again for a fresh snapshot.
 	ReasonResendUnavailable Reason = 105

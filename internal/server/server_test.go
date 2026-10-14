@@ -319,21 +319,30 @@ func TestProtocolErrorsCloseOnlyThatConnection(t *testing.T) {
 	s := start(t, nil)
 	healthy := dial(t, s, 1)
 	login := proto.AppendLogin(nil, &proto.Login{ClientID: 77})
-	cases := map[string][]byte{
-		"wrong version":              {6, 0, 0, 0, proto.Version + 1, byte(proto.TypeLogin), 1, 0, 0, 0},
-		"unknown type":               {2, 0, 0, 0, proto.Version, 0x7e},
-		"wrong payload size":         {5, 0, 0, 0, proto.Version, byte(proto.TypeLogin), 1, 0, 0},
-		"length too large":           {0xff, 0xff, 0xff, 0x7f, proto.Version, byte(proto.TypeNewOrder)},
-		"outbound type sent inbound": proto.AppendAck(nil, &proto.Ack{}),
+	// A well-formed frame of a type the server doesn't take from clients
+	// is answered Reject(Unsupported) before the close, so the client
+	// learns why. A malformed frame closes the connection without a reply.
+	cases := map[string]struct {
+		frame       []byte
+		unsupported bool
+	}{
+		"wrong version":              {[]byte{6, 0, 0, 0, proto.Version + 1, byte(proto.TypeLogin), 1, 0, 0, 0}, false},
+		"unknown type":               {[]byte{2, 0, 0, 0, proto.Version, 0x7e}, true},
+		"wrong payload size":         {[]byte{5, 0, 0, 0, proto.Version, byte(proto.TypeLogin), 1, 0, 0}, false},
+		"length too large":           {[]byte{0xff, 0xff, 0xff, 0x7f, proto.Version, byte(proto.TypeNewOrder)}, false},
+		"outbound type sent inbound": {proto.AppendAck(nil, &proto.Ack{}), true},
 	}
-	for name, frame := range cases {
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			c, r := rawConn(t, s)
 			_, _ = c.Write(login)
 			if typ, _, err := r.Next(); err != nil || typ != proto.TypeLoginAck {
 				t.Fatalf("login: %v %v", typ, err)
 			}
-			_, _ = c.Write(frame)
+			_, _ = c.Write(tc.frame)
+			if tc.unsupported {
+				expectReject(t, r, proto.ReasonUnsupported)
+			}
 			expectClosed(t, r)
 		})
 	}
