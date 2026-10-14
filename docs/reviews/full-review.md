@@ -419,7 +419,7 @@ No fix introduced a new problem. Two residues are noted under their findings and
 | 4 | Met |
 | 5 | Met (F-008) |
 | 6 | Partially met. The tables are complete (F-011), but the Balanced row is still n=3 (F-014). |
-| 7 | Not met (F-010) |
+| 7 | Pending CI (F-010): the workflow is set up but has not yet run, so nothing has run on Linux. |
 | 8 | Met |
 
 **Not reviewed:** the two commits outside the findings, ea3465f (crash-harness lock) and 449ab7e (open-loop throughput count). They are covered only by the passing suite and the byte-identical report.
