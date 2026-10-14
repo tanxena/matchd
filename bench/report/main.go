@@ -34,7 +34,7 @@ func main() {
 	minRuns := flag.Int("min-runs", 5, "least counted runs per configuration (PRD 7.5)")
 	smoke := flag.Bool("smoke", false, "checking the harness: count disturbed runs too, and say so at the top (never for the README)")
 	perSuite := suiteMins{}
-	flag.Var(perSuite, "min-runs-suite", "SUITE=N: a different minimum for one suite (repeatable), stated in its rows as n=N")
+	flag.Var(perSuite, "min-runs-suite", "SUITE=N or SUITE/TABLE=N: a different minimum for one suite, or one table of it (repeatable); a row with fewer than 5 runs shows them as n=N")
 	var asserted multi
 	flag.Var(&asserted, "asserted", "a statement about the environment the harness can't measure, for the hardware line (repeatable)")
 	flag.Parse()
@@ -64,7 +64,7 @@ func main() {
 	}
 }
 
-// suiteMins collects -min-runs-suite SUITE=N.
+// suiteMins collects -min-runs-suite SUITE=N and SUITE/TABLE=N.
 type suiteMins map[string]int
 
 func (m suiteMins) String() string { return fmt.Sprint(map[string]int(m)) }

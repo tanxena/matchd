@@ -79,6 +79,16 @@ func TestDisturbedRunsAreExcluded(t *testing.T) {
 	if err := check(groups(runs, false), 4, map[string]int{"other": 3, "full": 5}, true); err == nil {
 		t.Fatal("per-suite minimum 5 not applied")
 	}
+	// A suite/table minimum applies to that table only, ahead of its suite's.
+	if err := check(groups(runs, false), 5, map[string]int{"full/mix": 4}, true); err != nil {
+		t.Fatalf("per-table minimum 4 not applied: %v", err)
+	}
+	if err := check(groups(runs, false), 5, map[string]int{"full/clock": 4}, true); err == nil {
+		t.Fatal("another table's minimum applied to this one")
+	}
+	if err := check(groups(runs, false), 4, map[string]int{"full": 4, "full/mix": 5}, true); err == nil {
+		t.Fatal("the suite's minimum overrode the table's")
+	}
 	out := render(runs, false)
 	// Median of 900, 910, 930, 940 (the disturbed 920 left out) = 920 ns.
 	if !strings.Contains(out, "| resting¹ | 1,200,000 | 0.920 (0.900–0.940) |") {
@@ -175,6 +185,19 @@ func TestEveryLatencyHasItsCountAndQuantiles(t *testing.T) {
 	}
 	if !strings.Contains(out, "| `always` | 0 | 1,200,000 |") {
 		t.Errorf("fsync row lacks its count:\n%s", out)
+	}
+}
+
+// Review F-013: per-row commands carry no home-directory paths.
+func TestRunPathsAreRelative(t *testing.T) {
+	for in, want := range map[string]string{
+		`bin\engine.exe -data C:\Users\u\AppData\Local\Temp\matchd-bench\02-x-r1\data -fsync always`: `bin\engine.exe -data matchd-bench\02-x-r1\data -fsync always`,
+		`bin/clockprobe -out /tmp/matchd-bench/02-x-r1/clock.json`:                                   `bin/clockprobe -out matchd-bench/02-x-r1/clock.json`,
+		`bin\loadgen.exe -engine 127.0.0.1:19000 -id 02-x-r1`:                                        `bin\loadgen.exe -engine 127.0.0.1:19000 -id 02-x-r1`,
+	} {
+		if got := relativeRunPaths(in, "02-x-r1"); got != want {
+			t.Errorf("relativeRunPaths(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

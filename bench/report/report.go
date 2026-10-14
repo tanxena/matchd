@@ -72,12 +72,15 @@ func groups(runs []*result.Run, smoke bool) map[[3]string]*group {
 
 // check enforces PRD 7.5: every row needs at least minRuns counted runs,
 // and (unless allowed) no run may have been excluded.
-// minRuns applies to every suite unless perSuite names it.
+// minRuns applies to every row unless perSuite names its suite and table
+// ("balanced/clock") or, failing that, its suite ("balanced").
 func check(gs map[[3]string]*group, minRuns int, perSuite map[string]int, allowExcluded bool) error {
 	var problems []string
 	for _, g := range sortedGroups(gs) {
 		need := minRuns
-		if n, ok := perSuite[g.Suite]; ok {
+		if n, ok := perSuite[g.Suite+"/"+g.Table]; ok {
+			need = n
+		} else if n, ok := perSuite[g.Suite]; ok {
 			need = n
 		}
 		if len(g.Runs) < need {
@@ -682,7 +685,7 @@ func (d *doc) excluded() {
 // equivalents of what benchrun started, from the first run of the row.
 func (d *doc) commands(main string) {
 	d.p("<details><summary>Exact commands for every row</summary>\n\n")
-	d.p("Each suite's runs were started by `benchrun`, which pins each process with the same affinity mask `start /affinity` takes. To repeat one run by hand from cmd.exe, start the engine, then the load generator with `-engine-pid` set to the engine's process id (or 0 to skip its CPU time).\n\n")
+	d.p("Each suite's runs were started by `benchrun`, which pins each process with the same affinity mask `start /affinity` takes. To repeat one run by hand from cmd.exe, start the engine, then the load generator with `-engine-pid` set to the engine's process id (or 0 to skip its CPU time). Each run's data path is shown relative to the parent of `benchrun`'s data root: `matchd-bench\\<run>\\…`, where the default root is `%%TEMP%%\\matchd-bench`.\n\n")
 	suite := ""
 	for _, g := range sortedGroups(d.gs) {
 		r := firstAny(g)
@@ -695,9 +698,9 @@ func (d *doc) commands(main string) {
 		}
 		d.p("**%s / %s / %s**\n\n```\n", g.Suite, g.Table, g.Config)
 		if r.Commands.EngineStart != "" {
-			d.p("%s\n", r.Commands.EngineStart)
+			d.p("%s\n", relativeRunPaths(r.Commands.EngineStart, r.ID))
 		}
-		d.p("%s\n```\n\n", r.Commands.LoadgenStart)
+		d.p("%s\n```\n\n", relativeRunPaths(r.Commands.LoadgenStart, r.ID))
 	}
 	d.p("</details>\n")
 }
@@ -716,6 +719,28 @@ func benchrunLine(argv []string) string {
 		prog = "bin/" + prog
 	}
 	return strings.Join(append([]string{prog}, argv[1:]...), " ")
+}
+
+// relativeRunPaths shortens each absolute path into run id's directory
+// (C:\Users\…\Temp\matchd-bench\<id>\data) to one relative to the data
+// root's parent (matchd-bench\<id>\data), so the README doesn't carry the
+// home directory of whoever ran the benchmark (review F-013).
+func relativeRunPaths(cmd, id string) string {
+	fields := strings.Split(cmd, " ")
+	for i, f := range fields {
+		for _, sep := range []string{`\`, "/"} {
+			j := strings.Index(f, sep+id+sep)
+			if j < 0 {
+				continue
+			}
+			root := f[:j]
+			if strings.HasPrefix(root, sep) || (len(root) > 1 && root[1] == ':') {
+				fields[i] = root[strings.LastIndex(root, sep)+1:] + f[j:]
+			}
+			break
+		}
+	}
+	return strings.Join(fields, " ")
 }
 
 func firstAny(g *group) *result.Run {
