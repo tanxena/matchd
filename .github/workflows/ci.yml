@@ -1,7 +1,7 @@
 # Linux checks (PRD acceptance 7). Development happens on Windows, where
 # `make ci` runs everything natively and cross-compiles for Linux; this
-# workflow is where the suite actually runs on Linux. It has not run yet:
-# the repository hasn't been pushed.
+# workflow is where the suite actually runs on Linux. The benchmark
+# harness is Windows-only; its tests skip here (docs/bugs/003).
 name: ci
 
 # Pushes to main (and master, the branch this repository was built on) and

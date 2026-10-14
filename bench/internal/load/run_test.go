@@ -1,6 +1,7 @@
 package load
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +34,11 @@ func startEngine(t *testing.T) *server.Server {
 // engine: everything sent is answered, every number the report uses is
 // filled in, and the engine agrees on how many commands it executed.
 func TestRunAgainstEngine(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		// Run reads the engine's, its own and other processes' CPU time
+		// through bench/internal/sysinfo, which only Windows implements.
+		t.Skip("the benchmark harness is Windows-only (CPU accounting through bench/internal/sysinfo)")
+	}
 	for _, tc := range []struct {
 		mix  string
 		rate int

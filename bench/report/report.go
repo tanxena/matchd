@@ -712,7 +712,10 @@ func benchrunLine(argv []string) string {
 	if len(argv) == 0 {
 		return "benchrun"
 	}
-	prog := filepath.Base(argv[0])
+	prog := argv[0]
+	if i := strings.LastIndexAny(prog, `\/`); i >= 0 { // either separator, whatever OS runs report
+		prog = prog[i+1:]
+	}
 	if strings.Contains(argv[0], `\`) || strings.HasSuffix(prog, ".exe") {
 		prog = `bin\` + prog
 	} else {

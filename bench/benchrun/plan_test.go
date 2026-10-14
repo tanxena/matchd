@@ -1,10 +1,25 @@
 package main
 
 import (
+	"errors"
+	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tanxena/matchd/bench/internal/sysinfo"
 )
+
+// skipUnlessWindows skips a test of the benchmark harness proper: it pins
+// processes with Windows' affinity API and writes cmd.exe command lines,
+// and is not ported to other platforms (README, known limitations).
+func skipUnlessWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		t.Skip("the benchmark harness is Windows-only (start /affinity, cmd.exe command lines)")
+	}
+}
 
 // PRD 7.5: each table's configurations cycle in order, interleaved: the
 // fsync table runs always, group, never, always, ...; the mix table
@@ -94,6 +109,7 @@ func TestRunIDAndStartLine(t *testing.T) {
 	if id := runID(7, spec{Table: "fsync", Config: "group:1ms", Round: 3}); id != "07-fsync-group_1ms-r3" {
 		t.Errorf("runID = %q", id)
 	}
+	skipUnlessWindows(t) // the start line is a cmd.exe command
 	got := startLine(0x0F, []string{"GOMAXPROCS=4"}, []string{`bin\engine.exe`, "-data", `C:\a dir\x`})
 	want := `set "GOMAXPROCS=4" && start "engine" /affinity 0F bin\engine.exe -data "C:\a dir\x"`
 	if got != want {
@@ -101,5 +117,25 @@ func TestRunIDAndStartLine(t *testing.T) {
 	}
 	if !strings.Contains(startLine(0xF0, nil, []string{"loadgen"}), "/affinity F0 ") {
 		t.Error("mask not two hex digits")
+	}
+}
+
+// Off Windows, pinning a process isn't supported: start must say so (and
+// not leave the process running) rather than run it unpinned.
+func TestStartReportsUnsupportedAffinityElsewhere(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("affinity is supported on Windows")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mask uint64
+	cmd, _, err := start([]string{exe, "-test.run=^$"}, nil, 0x0F, &mask)
+	if !errors.Is(err, sysinfo.ErrUnsupported) {
+		t.Fatalf("start off Windows: err %v, want sysinfo.ErrUnsupported", err)
+	}
+	if cmd != nil {
+		t.Fatal("start returned a process it couldn't pin")
 	}
 }
