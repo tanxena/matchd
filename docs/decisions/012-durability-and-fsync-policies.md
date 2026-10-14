@@ -92,7 +92,7 @@ A wrapper around every WAL file counts fsyncs and can **hold** them (block until
 | `TestFsyncFailureEmitsNothing` (both policies) | a resting maker, and a crossing taker whose batch's fsync fails: **no** ack for the taker and **no** fill for either; the server reports failure and closes both connections; under group, the 4 events computed for the batch are withheld |
 | `TestFsyncCounts` | always, sequential: 20 orders = 20 fsyncs; group burst: 500 orders = 4 fsyncs |
 | `TestAlwaysForwardsOnlyAfterFsync`, `TestAlwaysBatchesWaitingCommands` | sequencer-level ordering; 1,000 waiting commands, 2 fsyncs |
-| `TestGroupBurstAndKick` | with a 1-hour window, the 4,096-style kick still makes data durable |
+| `TestGroupBurstAndKick` | with a 1-hour window, the 4,096-style kick still makes data durable, including a kick the syncer takes as its wake-up (before 2026-10-14 that one waited out the window, failing about 1 run in 100) |
 | `TestHeldUntilDurableThenReleasedInOrder`, `TestFailureWithholdsEverything`, `TestPendingLimitBackpressure` | publisher gate unit tests |
 
 Planted bugs, each caught: advancing durability without fsync under `always`; a publisher that ignores the durable seq; a WAL that marks data synced before the fsync succeeds; a syncer that is never kicked; treating every damaged record as torn.

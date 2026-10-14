@@ -313,22 +313,40 @@ func (g *groupSyncer) run() {
 	timer := time.NewTimer(time.Hour) // reused for every window
 	timer.Stop()
 	for {
+		kicked := false
 		select {
 		case <-g.dirty:
 		case <-g.kickCh:
+			// A kick always follows a markDirty, and select takes either
+			// when both wait: a kick taken here still means "sync now".
+			kicked = true
 		case <-g.stopCh:
 			return
 		}
-		// Data is waiting. Let more arrive for up to one window, unless
-		// told to hurry, then cover all of it with one fsync.
-		timer.Reset(g.window)
+		if !kicked {
+			// Data is waiting. Let more arrive for up to one window, unless
+			// told to hurry, then cover all of it with one fsync.
+			timer.Reset(g.window)
+			select {
+			case <-timer.C:
+			case <-g.kickCh:
+				timer.Stop()
+			case <-g.stopCh:
+				timer.Stop()
+				return // the sequencer does the final fsync itself
+			}
+		}
+		// The fsync below covers everything written so far, so signals
+		// already waiting are for data it covers: drop them, or they would
+		// start another window for nothing. Anything written from here on
+		// signals again.
 		select {
-		case <-timer.C:
+		case <-g.dirty:
+		default:
+		}
+		select {
 		case <-g.kickCh:
-			timer.Stop()
-		case <-g.stopCh:
-			timer.Stop()
-			return // the sequencer does the final fsync itself
+		default:
 		}
 		n, err := g.log.Sync()
 		if err != nil {

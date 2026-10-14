@@ -199,9 +199,37 @@ func TestGroupForwardsFirstThenSyncs(t *testing.T) {
 	}
 }
 
-// Under Group, a burst shares few fsyncs; and once MaxBatch commands are
-// unsynced the syncer doesn't wait out the window.
+// Under Group, once MaxBatch commands are unsynced the syncer is kicked and
+// doesn't wait out the window; and a burst shares few fsyncs.
 func TestGroupBurstAndKick(t *testing.T) {
+	// A kick taken as the syncer's wake-up. The sequencer always marks the
+	// log dirty before it kicks, and when both signals are waiting Go's
+	// select takes either at random. The syncer used to treat a kick taken
+	// first as just "data is waiting" and then wait out the window, so the
+	// burst below failed about 1 run in 100. A kick alone takes that branch
+	// every time.
+	l, _, err := wal.Open(t.TempDir(), wal.Options{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	l.Append(1, 10, []byte{1})
+	if err := l.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	d := durable.New(0)
+	g := startGroupSyncer(l, d, time.Hour) // the window never expires
+	g.kick()
+	deadline := time.Now().Add(5 * time.Second)
+	for d.Load() < 1 {
+		if time.Now().After(deadline) {
+			g.stop()
+			t.Fatal("kicked syncer waited out its 1h window instead of syncing")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	g.stop()
+
 	r := newRig(t, Policy{Mode: Group, Window: time.Hour, MaxBatch: 100}) // the window never expires
 	for i := range 1000 {
 		r.in <- order(i)
@@ -209,7 +237,7 @@ func TestGroupBurstAndKick(t *testing.T) {
 	for range 1000 {
 		recvOut(t, r)
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	deadline = time.Now().Add(5 * time.Second)
 	for r.d.Load() < 900 { // kicks every 100 unsynced; at most the last <100 wait for the window
 		if time.Now().After(deadline) {
 			t.Fatalf("durable stuck at %d with a 1h window: kicks didn't happen", r.d.Load())

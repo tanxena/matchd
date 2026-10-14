@@ -142,8 +142,8 @@ The layout is persistent: changing it means a new WAL format version.
   When its input closes, **`finish`** stops the syncer and does a final fsync.
 - **`groupSyncer`** ([sequencer.go:260](../../internal/sequencer/sequencer.go#L260)) runs a loop ([sequencer.go:311](../../internal/sequencer/sequencer.go#L311)):
   1. wait for "dirty" or a kick;
-  2. wait out the window, using one reused timer, unless kicked or stopped;
-  3. `Sync`, then `Advance` (or `Fail`).
+  2. if woken by "dirty", wait out the window, using one reused timer, unless kicked or stopped. Woken by a kick, it skips the window: the sequencer marks dirty before it kicks, and `select` takes either signal when both are waiting. Until 2026-10-14 a kick taken in step 1 was treated like "dirty", so the syncer waited out the window anyway; `TestGroupBurstAndKick` now drives that case directly;
+  3. drop any "dirty" or kick already waiting (the fsync covers their data), then `Sync`, then `Advance` (or `Fail`).
 
 ### `internal/publisher/publisher.go`: the gate
 
