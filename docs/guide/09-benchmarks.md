@@ -81,7 +81,7 @@ When a network packet or disk completion arrives, the CPU runs an **interrupt** 
   - `r < Cancel`: cancel a random own resting order (`TakeRandom` removes it from the live set at once, so it's never cancelled twice). If there's none, send a passive order and say so (`noTarget`).
   - `r < Cancel+Crossing`: an IOC at `Mid±Band`. Its quantity is drawn, then **scaled** by `depth.Scale()`.
   - otherwise passive: 1–10 ticks from mid on its own side, unless this connection already has `liveCap` resting orders, in which case a cap cancel is sent instead.
-- **`Depth.Scale`** ([mix.go:125](../../bench/internal/load/mix.go#L125)) is the feedback: resting orders ÷ target, clamped to [¼, 4]. Below the target, crossing orders shrink and the book fills; above, they grow and it drains.
+- **`Depth.Scale`** ([mix.go:129](../../bench/internal/load/mix.go#L129)) is the feedback: resting orders ÷ target, clamped to [¼, 4]. Below the target, crossing orders shrink and the book fills; above, they grow and it drains.
 - **`Live`** ([mix.go:189](../../bench/internal/load/mix.go#L189)) is a connection's resting order ids. A slice plus a map from id to index gives O(1) random choice and O(1) removal (swap with the last element, shrink). Each `Add` or `Remove` also moves the shared `Depth` counter.
 
 **`conn.go`: one connection.**
